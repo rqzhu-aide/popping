@@ -14,7 +14,7 @@
             </p>
         </div>
 
-        <form method="POST" action="{{ url_for('login', course_id=course.id) }}" class="login-form">
+        <form method="POST" action="{{ url_for('login', slug=course.slug) }}" class="login-form">
             <div class="form-group">
                 <label for="student_id">Student ID</label>
                 <input type="text" id="student_id" name="student_id" required

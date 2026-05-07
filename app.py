@@ -70,9 +70,9 @@ def index():
     return render_template('index.html', courses=courses)
 
 
-@app.route('/login/<int:course_id>', methods=['GET', 'POST'])
-def login(course_id):
-    course = query_db('SELECT * FROM courses WHERE id = ?', [course_id], one=True)
+@app.route('/login/<slug>', methods=['GET', 'POST'])
+def login(slug):
+    course = query_db('SELECT * FROM courses WHERE slug = ?', [slug], one=True)
     if not course:
         flash('Course not found.', 'error')
         return redirect(url_for('index'))
@@ -85,12 +85,12 @@ def login(course_id):
             return render_template('login.html', course=course)
         student = query_db(
             'SELECT * FROM students WHERE course_id = ? AND student_id = ? AND pin = ?',
-            [course_id, student_id, pin], one=True
+            [course['id'], student_id, pin], one=True
         )
         if student:
             session['student_id'] = student['student_id']
             session['name'] = student['name']
-            session['course_id'] = course_id
+            session['course_id'] = course['id']
             return redirect(url_for('dashboard'))
         flash('Invalid ID or PIN for this course.', 'error')
     return render_template('login.html', course=course)

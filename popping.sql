@@ -19,6 +19,7 @@ CREATE TABLE courses (
     name TEXT NOT NULL,
     code TEXT,
     semester TEXT,
+    slug TEXT NOT NULL UNIQUE,
     instructor_id INTEGER NOT NULL,
     is_active INTEGER DEFAULT 1,
     FOREIGN KEY (instructor_id) REFERENCES instructors (id)
@@ -96,9 +97,9 @@ CREATE TABLE discussion_responses (
 -- Seed data
 INSERT INTO instructors (username, name, pin) VALUES ('instructor', 'Instructor', 'admin123');
 
-INSERT INTO courses (name, code, semester, instructor_id) VALUES
-    ('Introduction to Data Science', 'STAT 430', 'Fall 2025', 1),
-    ('Machine Learning', 'STAT 542', 'Fall 2025', 1);
+INSERT INTO courses (name, code, semester, slug, instructor_id) VALUES
+    ('Basics of Statistical Learning', 'STAT 432', 'Fall 2026', '432fall2026', 1),
+    ('Machine Learning', 'STAT 542', 'Fall 2025', '542fall2025', 1);
 
 INSERT INTO teams (course_id, name, color) VALUES
     (1, 'Team Alpha', '#ef4444'),

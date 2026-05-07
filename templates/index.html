@@ -15,7 +15,7 @@
         <p class="hint">Choose your course to log in as a student.</p>
         <div class="course-grid">
             {% for c in courses %}
-            <a href="{{ url_for('login', course_id=c.id) }}" class="course-card">
+            <a href="{{ url_for('login', slug=c.slug) }}" class="course-card">
                 <div class="course-name">{{ c.name }}</div>
                 <div class="course-meta">
                     {% if c.code %}<span class="badge">{{ c.code }}</span>{% endif %}
