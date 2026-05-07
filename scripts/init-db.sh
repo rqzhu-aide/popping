@@ -1,8 +1,14 @@
 #!/usr/bin/env bash
 # Reset and initialize the Popping database
-# Usage: bash scripts/init-db.sh
+# Usage: bash scripts/init-db.sh [USERNAME] [NAME] [PIN]
+# Example: bash scripts/init-db.sh tez "Ruoqing Zhu" mysecret123
 
 set -e
+
+# Defaults
+USERNAME="${1:-instructor}"
+NAME="${2:-Instructor}"
+PIN="${3:-admin123}"
 
 echo "=== Popping Database Initialization ==="
 
@@ -21,10 +27,10 @@ rm -f popping.db
 echo "Initializing database schema..."
 flask --app app init-db
 
-# Seed default data
-echo "Seeding default data (instructor + demo courses)..."
-flask --app app seed
+# Seed default data with custom credentials
+echo "Seeding default data..."
+flask --app app seed --username "$USERNAME" --name "$NAME" --pin "$PIN"
 
 echo ""
 echo "=== Done! ==="
-echo "Instructor login: instructor / admin123"
+echo "Instructor login: $USERNAME / $PIN"

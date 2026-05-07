@@ -639,13 +639,18 @@ def init_db_command():
     print('Database initialized.')
 
 
+import click
+
 @app.cli.command('seed')
-def seed_command():
+@click.option('--username', default='instructor', help='Instructor username')
+@click.option('--name', default='Instructor', help='Instructor display name')
+@click.option('--pin', default='admin123', help='Instructor PIN')
+def seed_command(username, name, pin):
     execute_db(
         "INSERT OR IGNORE INTO instructors (username, name, pin) VALUES (?, ?, ?)",
-        ['instructor', 'Instructor', 'admin123']
+        [username, name, pin]
     )
-    print('Seeded instructor account: instructor / admin123')
+    print(f'Seeded instructor account: {username} / {pin}')
 
 
 if __name__ == '__main__':
