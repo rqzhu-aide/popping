@@ -11,5 +11,5 @@ services:
         value: 3.11.0
     disk:
       name: popping-data
-      mountPath: /opt/render/project/src
+      mountPath: /opt/render/project/src/instance
       sizeGB: 1
