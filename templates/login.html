@@ -1,17 +1,20 @@
 {% extends "base.html" %}
 
-{% block title %}Login - Popping{% endblock %}
+{% block title %}Login - {{ course.name }}{% endblock %}
 
 {% block content %}
 <div class="login-container">
     <div class="login-card">
         <div class="login-header">
             <span class="logo-large">🍿</span>
-            <h1>Welcome to Popping</h1>
-            <p class="subtitle">Team-based learning & peer grading</p>
+            <h1>{{ course.name }}</h1>
+            <p class="subtitle">
+                {% if course.code %}{{ course.code }}{% endif %}
+                {% if course.semester %} · {{ course.semester }}{% endif %}
+            </p>
         </div>
 
-        <form method="POST" action="{{ url_for('login') }}" class="login-form">
+        <form method="POST" action="{{ url_for('login', course_id=course.id) }}" class="login-form">
             <div class="form-group">
                 <label for="student_id">Student ID</label>
                 <input type="text" id="student_id" name="student_id" required
@@ -26,7 +29,7 @@
         </form>
 
         <div class="login-footer">
-            <p>Instructor? Use your instructor ID and PIN.</p>
+            <a href="{{ url_for('index') }}">← Choose a different course</a>
         </div>
     </div>
 </div>

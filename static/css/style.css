@@ -62,6 +62,14 @@ html, body {
 .nav-link:hover { color: var(--text); }
 .nav-link.logout { color: var(--danger); }
 
+.nav-home {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    text-decoration: none;
+    color: inherit;
+}
+
 .container {
     max-width: var(--max-width);
     margin: 0 auto;
@@ -405,4 +413,117 @@ input:focus, textarea:focus {
     .team-grid { grid-template-columns: 1fr 1fr; }
     .roster-grid { grid-template-columns: 1fr; }
     .card { padding: 18px; }
+}
+
+/* ===== LANDING PAGE ===== */
+.landing-hero {
+    text-align: center;
+    padding: 30px 0 20px;
+}
+.logo-huge {
+    font-size: 4rem;
+    display: block;
+    margin-bottom: 12px;
+}
+.landing-hero h1 {
+    margin: 0;
+    font-size: 2rem;
+}
+.landing-hero .subtitle {
+    color: var(--text-muted);
+    margin-top: 6px;
+    font-size: 1.05rem;
+}
+
+.course-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 16px;
+}
+.course-card {
+    display: block;
+    background: var(--surface);
+    border: 2px solid var(--border);
+    border-radius: var(--radius);
+    padding: 22px 18px;
+    text-decoration: none;
+    color: var(--text);
+    transition: transform 0.1s, border-color 0.15s, box-shadow 0.15s;
+}
+.course-card:hover {
+    border-color: var(--primary);
+    box-shadow: var(--shadow-lg);
+    transform: translateY(-2px);
+}
+.course-card .course-name {
+    font-size: 1.15rem;
+    font-weight: 700;
+    margin-bottom: 8px;
+}
+.course-card .course-meta {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 10px;
+    flex-wrap: wrap;
+}
+.course-card .course-instructor {
+    font-size: 0.85rem;
+    color: var(--text-muted);
+}
+.course-card .course-stats {
+    display: flex;
+    gap: 16px;
+    margin-top: 12px;
+    font-size: 0.85rem;
+    color: var(--text-muted);
+}
+
+.badge {
+    display: inline-block;
+    padding: 3px 10px;
+    border-radius: 6px;
+    font-size: 0.75rem;
+    font-weight: 600;
+    background: var(--primary);
+    color: #fff;
+}
+.badge-muted {
+    background: var(--border);
+    color: var(--text-muted);
+}
+
+.instructor-entry {
+    text-align: center;
+}
+.instructor-entry .btn {
+    margin-top: 10px;
+}
+
+.empty {
+    color: var(--text-muted);
+    text-align: center;
+    padding: 20px;
+    grid-column: 1 / -1;
+}
+
+.course-name-sm {
+    color: var(--text-muted);
+    font-size: 0.9rem;
+    margin: 4px 0 0;
+}
+
+.top-nav {
+    margin-bottom: 14px;
+}
+
+.text-muted {
+    color: var(--text-muted);
+}
+
+.course-card-large {
+    background: var(--bg);
+}
+
+.course-card-large .course-stats {
+    font-weight: 500;
 }

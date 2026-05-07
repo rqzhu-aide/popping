@@ -12,6 +12,11 @@ async function deleteJSON(url) {
     return res.json();
 }
 
+function getCourseId() {
+    const el = document.querySelector('.instructor[data-course-id]');
+    return el ? parseInt(el.dataset.courseId, 10) : null;
+}
+
 /* ===== LOGIN PAGE ===== */
 if (document.querySelector('.login-form')) {
     // nothing special needed
@@ -26,7 +31,7 @@ if (dashboard) {
         setInterval(() => {
             loadRoster();
             loadState();
-            if (document.getElementById('discussion-section').style.display !== 'none') {
+            if (document.getElementById('discussion-section')?.style.display !== 'none') {
                 loadDiscussions();
             }
         }, 3000);
@@ -50,8 +55,9 @@ if (dashboard) {
         teams.forEach(team => {
             const div = document.createElement('div');
             div.className = 'roster-team';
+            const myId = dashboard.dataset.you;
             const members = team.members.map(m => {
-                const isYou = m.student_id === (document.querySelector('.dashboard')?.dataset?.you || '');
+                const isYou = m.student_id === myId;
                 return `<div class="roster-member">
                     <span class="team-dot" style="background:${team.color}"></span>
                     <span class="${isYou ? 'you' : ''}">${m.name} ${isYou ? '(You)' : ''}</span>
@@ -108,10 +114,12 @@ if (dashboard) {
         if (!container || container.dataset.loaded) return;
 
         container.innerHTML = '';
-        const myTeam = teams.find(t => t.members.some(m => m.student_id === document.querySelector('.dashboard')?.dataset?.you));
+        const myId = dashboard.dataset.you;
+        const myTeam = teams.find(t => t.members.some(m => m.student_id === myId));
         if (!myTeam) return;
 
         myTeam.members.forEach(m => {
+            if (m.student_id === myId) return;
             const row = document.createElement('div');
             row.className = 'grade-row';
             row.innerHTML = `
@@ -186,44 +194,43 @@ if (dashboard) {
 }
 
 /* ===== INSTRUCTOR PANEL ===== */
-const instructor = document.querySelector('.instructor');
+const instructor = document.querySelector('.instructor[data-course-id]');
 if (instructor) {
     setInterval(async () => {
         const res = await fetch('/api/teams');
-        const teams = await res.json();
-        updateRoster(teams);
+        if (res.ok) {
+            const teams = await res.json();
+            // Could update roster live here if desired
+        }
     }, 3000);
-
-    function updateRoster(teams) {
-        const tbody = document.getElementById('student-table');
-        if (!tbody) return;
-        // simple reload approach: refetch page fragment would be cleaner,
-        // but for skeleton we skip live roster updates on instructor page
-    }
 }
 
 window.setPhase = async function(phase) {
-    await postJSON('/api/set_phase', { phase });
+    const courseId = getCourseId();
+    await postJSON('/api/set_phase', { course_id: courseId, phase });
     window.location.reload();
 };
 
 window.setActiveTeam = async function(teamId) {
-    await postJSON('/api/set_active_team', { team_id: teamId });
+    const courseId = getCourseId();
+    await postJSON('/api/set_active_team', { course_id: courseId, team_id: teamId });
     window.location.reload();
 };
 
 window.setQuestion = async function() {
+    const courseId = getCourseId();
     const q = document.getElementById('question-input')?.value || '';
-    await postJSON('/api/set_question', { question: q });
+    await postJSON('/api/set_question', { course_id: courseId, question: q });
     alert('Question updated');
 };
 
 window.addStudent = async function() {
+    const courseId = getCourseId();
     const id = document.getElementById('new-student-id').value.trim();
     const name = document.getElementById('new-name').value.trim();
     const pin = document.getElementById('new-pin').value.trim();
     if (!id || !name || !pin) { alert('All fields required'); return; }
-    const data = await postJSON('/api/add_student', { student_id: id, name, pin });
+    const data = await postJSON('/api/add_student', { course_id: courseId, student_id: id, name, pin });
     if (data.success) {
         window.location.reload();
     } else {
@@ -238,7 +245,8 @@ window.removeStudent = async function(studentDbId) {
 };
 
 window.resetData = async function() {
-    if (!confirm('This will delete ALL grades and reset teams. Are you sure?')) return;
-    await postJSON('/api/reset_data', {});
+    const courseId = getCourseId();
+    if (!confirm('This will delete ALL grades and reset teams for this course. Are you sure?')) return;
+    await postJSON('/api/reset_data', { course_id: courseId });
     window.location.reload();
 };

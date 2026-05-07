@@ -1,15 +1,22 @@
 {% extends "base.html" %}
 
-{% block title %}Instructor - Popping{% endblock %}
+{% block title %}Instructor - {{ course.name }}{% endblock %}
 
 {% block content %}
-<div class="instructor">
+<div class="instructor" data-course-id="{{ course.id }}">
     <header class="dash-header">
-        <h1>Instructor Control Panel</h1>
+        <div>
+            <h1>{{ course.name }}</h1>
+            <p class="course-name-sm">{{ course.code or '' }} {{ course.semester or '' }}</p>
+        </div>
         <div class="phase-badge phase-{{ state.phase }}">
             Phase: {{ state.phase.upper() }}
         </div>
     </header>
+
+    <div class="top-nav">
+        <a href="{{ url_for('instructor') }}" class="btn btn-sm btn-secondary">← My Courses</a>
+    </div>
 
     <section class="card">
         <h2>Phase Control</h2>
@@ -73,7 +80,7 @@
                         <td>{{ s.name }}</td>
                         <td>
                             {% if s.team_name %}
-                                <span class="team-tag" style="background: {{ s.color or '#ccc' }}">
+                                <span class="team-tag" style="background: {{ s.team_color or '#ccc' }}">
                                     {{ s.team_name }}
                                 </span>
                             {% else %}
@@ -81,11 +88,7 @@
                             {% endif %}
                         </td>
                         <td>
-                            {% if not s.is_instructor %}
                             <button class="btn btn-sm btn-danger" onclick="removeStudent({{ s.id }})">Remove</button>
-                            {% else %}
-                                <em>Instructor</em>
-                            {% endif %}
                         </td>
                     </tr>
                     {% endfor %}
@@ -96,9 +99,9 @@
 
     <section class="card">
         <h2>Data Export</h2>
-        <p class="hint">Download all grades and responses as CSV.</p>
-        <a href="{{ url_for('export_data') }}" class="btn btn-primary">Download CSV</a>
-        <button class="btn btn-danger" onclick="resetData()">Reset All Data</button>
+        <p class="hint">Download all grades and responses for this course as CSV.</p>
+        <a href="{{ url_for('export_data', course_id=course.id) }}" class="btn btn-primary">Download CSV</a>
+        <button class="btn btn-danger" onclick="resetData()">Reset Course Data</button>
     </section>
 </div>
 {% endblock %}

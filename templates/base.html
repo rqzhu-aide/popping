@@ -10,17 +10,18 @@
 <body>
     <nav class="navbar">
         <div class="nav-brand">
-            <span class="logo">🍿</span>
-            <span class="brand-text">Popping</span>
+            <a href="{{ url_for('index') }}" class="nav-home">
+                <span class="logo">🍿</span>
+                <span class="brand-text">Popping</span>
+            </a>
         </div>
         <div class="nav-links">
             {% if session.student_id %}
-                {% if session.is_instructor %}
-                    <a href="{{ url_for('instructor') }}" class="nav-link">Control Panel</a>
-                {% else %}
-                    <a href="{{ url_for('dashboard') }}" class="nav-link">Dashboard</a>
-                {% endif %}
+                <a href="{{ url_for('dashboard') }}" class="nav-link">Dashboard</a>
                 <a href="{{ url_for('logout') }}" class="nav-link logout">Logout ({{ session.name }})</a>
+            {% elif session.instructor_id %}
+                <a href="{{ url_for('instructor') }}" class="nav-link">My Courses</a>
+                <a href="{{ url_for('logout') }}" class="nav-link logout">Logout ({{ session.instructor_name }})</a>
             {% endif %}
         </div>
     </nav>

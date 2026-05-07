@@ -1,24 +1,25 @@
 # 🍿 Popping
 
-Interactive classroom team management and peer grading system.
+Multi-course interactive classroom team management and peer grading system.
 
 ## Features
 
-- **Team Selection**: Students log in with ID + PIN and pick a team.
+- **Multi-Course Support**: One app hosts many courses, each with its own instructor, students, teams, and data.
+- **Team Selection**: Students log in with ID + PIN and pick a team within their course.
 - **Live Roster**: Real-time view of who joined which team (3-second polling).
 - **Discussion Phase**: Students respond to instructor questions.
 - **Peer Grading**: Students grade teammates during discussion.
-- **Competition Mode**: Teams present; instructor selects active team.
+- **Competition Mode**: Teams present; instructor selects active team per course.
 - **Team Grading**: Non-presenting teams grade the presenting team.
-- **Instructor Panel**: Control phases, pick presenting team, manage students.
-- **Data Export**: Download all grades & responses as CSV.
+- **Instructor Panel**: Manage multiple courses, control phases, pick presenting teams.
+- **Data Export**: Download per-course grades & responses as CSV.
 
 ## Tech Stack
 
 - **Backend**: Python + Flask
-- **Database**: SQLite (zero-config, file-based)
+- **Database**: SQLite (zero-config, file-based, one DB for all courses)
 - **Frontend**: Vanilla JS + Jinja2 templates + modern CSS
-- **Auth**: Simple session-based (ID + PIN)
+- **Auth**: Simple session-based (ID + PIN for students; username + PIN for instructors)
 
 ## Quick Start (Local)
 
@@ -40,8 +41,19 @@ flask --app app seed
 flask --app app run
 ```
 
-Open http://127.0.0.1:5000 and log in as:
+Open http://127.0.0.1:5000
+
+### Default Login
+
 - **Instructor**: `instructor` / `admin123`
+- **Students**: Add them via the instructor panel after logging in
+
+### Pre-seeded Courses
+
+Two demo courses are created automatically:
+
+1. **Introduction to Data Science** (STAT 430)
+2. **Machine Learning** (STAT 542)
 
 ## Deploy to Render
 
@@ -60,21 +72,40 @@ Open http://127.0.0.1:5000 and log in as:
 
 ```
 popping/
-├── app.py              # Main Flask app (routes + API)
-├── database.py         # SQLite helpers
-├── config.py           # Config (DB path, secret key)
-├── popping.sql         # Database schema + seed data
-├── requirements.txt    # Python dependencies
-├── render.yaml         # Render Blueprint (optional)
+├── app.py                  # Main Flask app (routes + API)
+├── database.py             # SQLite helpers
+├── config.py               # Config (DB path, secret key)
+├── popping.sql             # Database schema + seed data
+├── requirements.txt        # Python dependencies
+├── render.yaml             # Render Blueprint (optional)
 ├── static/
-│   ├── css/style.css     # Modern styles
-│   └── js/app.js         # Frontend logic + polling
+│   ├── css/style.css         # Modern styles
+│   └── js/app.js             # Frontend logic + polling
 └── templates/
-    ├── base.html         # Layout
-    ├── login.html        # Login page
-    ├── dashboard.html    # Student view
-    └── instructor.html   # Instructor control panel
+    ├── base.html             # Layout
+    ├── index.html            # Landing page (course selection)
+    ├── login.html            # Student login for a course
+    ├── instructor_login.html # Instructor login
+    ├── instructor_courses.html # Instructor's course list
+    ├── instructor.html       # Instructor control panel
+    └── dashboard.html        # Student view
 ```
+
+## User Flow
+
+### Students
+
+1. Visit the site → see list of active courses.
+2. Click their course → enter Student ID + PIN.
+3. Select a team (during **SETUP** phase).
+4. Participate in discussion, peer grading, or team grading as phases change.
+
+### Instructors
+
+1. Click **Instructor Login** → enter username + PIN.
+2. See list of your courses → click one to manage.
+3. Control phases, manage students, set questions, select presenting teams.
+4. Export CSV at the end of class.
 
 ## Course Flow
 
@@ -84,13 +115,38 @@ popping/
 4. **GRADING** → Other teams grade the presenting team.
 5. **ENDED** → Instructor exports CSV and uploads to Canvas.
 
-## Adding Students
+## Managing Courses
 
-Use the instructor panel or insert directly into SQLite:
+### Adding a New Course
+
+Insert into the database (or via SQL directly):
 
 ```sql
-INSERT INTO students (student_id, name, pin) VALUES ('netid123', 'Alice', '1234');
+INSERT INTO courses (name, code, semester, instructor_id) VALUES ('New Course', 'STAT 101', 'Spring 2026', 1);
+INSERT INTO course_state (course_id, phase, active_team_id) VALUES (3, 'setup', NULL);
+INSERT INTO teams (course_id, name, color) VALUES (3, 'Team A', '#ef4444'), (3, 'Team B', '#3b82f6');
 ```
+
+### Adding Students
+
+Use the instructor panel, or insert directly:
+
+```sql
+INSERT INTO students (course_id, student_id, name, pin) VALUES (1, 'netid123', 'Alice', '1234');
+```
+
+### Adding Instructors
+
+```sql
+INSERT INTO instructors (username, name, pin) VALUES ('prof2', 'Dr. Smith', 'smith2025');
+```
+
+## Data Isolation
+
+Each course is fully isolated:
+- Students, teams, grades, and responses are scoped to a `course_id`.
+- Instructors can only access courses they own.
+- Export downloads data for one course at a time.
 
 ## License
 
