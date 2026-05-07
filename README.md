@@ -37,6 +37,9 @@ flask --app app init-db
 # 4. Seed instructor account
 flask --app app seed
 
+# Or use the one-liner script:
+# bash scripts/init-db.sh
+
 # 5. Run
 flask --app app run
 ```
@@ -52,8 +55,8 @@ Open http://127.0.0.1:5000
 
 Two demo courses are created automatically:
 
-1. **Introduction to Data Science** (STAT 430)
-2. **Machine Learning** (STAT 542)
+1. **Basics of Statistical Learning** (STAT 432, Fall 2026)
+2. **Machine Learning** (STAT 542, Fall 2025)
 
 ## Deploy to Render
 
@@ -64,6 +67,11 @@ Two demo courses are created automatically:
 5. Add environment variable: `SECRET_KEY` = (any random string)
 6. After first deploy, run in Render Shell:
    ```bash
+   bash scripts/init-db.sh
+   ```
+   Or manually:
+   ```bash
+   rm -f popping.db
    flask --app app init-db
    flask --app app seed
    ```
