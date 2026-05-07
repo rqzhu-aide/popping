@@ -642,9 +642,9 @@ def init_db_command():
 import click
 
 @app.cli.command('seed')
-@click.option('--username', default='instructor', help='Instructor username')
-@click.option('--name', default='Instructor', help='Instructor display name')
-@click.option('--pin', default='admin123', help='Instructor PIN')
+@click.option('--username', required=True, help='Instructor username')
+@click.option('--name', required=True, help='Instructor display name')
+@click.option('--pin', required=True, help='Instructor PIN')
 def seed_command(username, name, pin):
     execute_db(
         "INSERT OR IGNORE INTO instructors (username, name, pin) VALUES (?, ?, ?)",

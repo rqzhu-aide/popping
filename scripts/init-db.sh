@@ -1,14 +1,9 @@
 #!/usr/bin/env bash
 # Reset and initialize the Popping database
-# Usage: bash scripts/init-db.sh [USERNAME] [NAME] [PIN]
-# Example: bash scripts/init-db.sh tez "Ruoqing Zhu" mysecret123
+# Usage: bash scripts/init-db.sh
+# Prompts interactively for instructor credentials (PIN is hidden)
 
 set -e
-
-# Defaults
-USERNAME="${1:-instructor}"
-NAME="${2:-Instructor}"
-PIN="${3:-admin123}"
 
 echo "=== Popping Database Initialization ==="
 
@@ -19,7 +14,21 @@ cd "$PROJECT_DIR"
 
 echo "Project directory: $PROJECT_DIR"
 
+# Prompt for credentials (no defaults, no history)
+echo ""
+echo "Create the first instructor account:"
+read -p "  Username (login ID): " USERNAME
+read -p "  Display name:        " NAME
+read -s -p "  PIN / password:      " PIN
+echo ""
+
+if [ -z "$USERNAME" ] || [ -z "$NAME" ] || [ -z "$PIN" ]; then
+    echo "Error: all fields are required."
+    exit 1
+fi
+
 # Remove existing database
+echo ""
 echo "Removing existing database (if any)..."
 rm -f popping.db
 
@@ -27,10 +36,10 @@ rm -f popping.db
 echo "Initializing database schema..."
 flask --app app init-db
 
-# Seed default data with custom credentials
-echo "Seeding default data..."
+# Seed with your custom credentials
+echo "Seeding instructor account..."
 flask --app app seed --username "$USERNAME" --name "$NAME" --pin "$PIN"
 
 echo ""
 echo "=== Done! ==="
-echo "Instructor login: $USERNAME / $PIN"
+echo "Instructor login: $USERNAME / [hidden]"

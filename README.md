@@ -27,29 +27,22 @@ Multi-course interactive classroom team management and peer grading system.
 # 1. Clone
 git clone https://github.com/rqzhu-aide/popping.git
 cd popping
-
+```bash
 # 2. Install dependencies
 pip install -r requirements.txt
 
-# 3. Initialize database
-flask --app app init-db
+# 3. Initialize database (interactive prompt for instructor credentials)
+bash scripts/init-db.sh
 
-# 4. Seed instructor account
-flask --app app seed
-
-# Or use the one-liner script:
-# bash scripts/init-db.sh
-
-# 5. Run
+# 4. Run
 flask --app app run
 ```
 
 Open http://127.0.0.1:5000
 
-### Default Login
+### Login
 
-- **Instructor**: `instructor` / `admin123`
-- **Students**: Add them via the instructor panel after logging in
+After running `init-db.sh`, use the username and PIN you entered. Add students via the instructor panel.
 
 ### Pre-seeded Courses
 
@@ -66,15 +59,11 @@ Two demo courses are created automatically:
 4. Set start command: `gunicorn app:app`
 5. Add environment variable: `SECRET_KEY` = (any random string)
 6. After first deploy, run in Render Shell:
-   ```bash
-   bash scripts/init-db.sh
-   ```
-   Or manually:
-   ```bash
-   rm -f popping.db
-   flask --app app init-db
-   flask --app app seed
-   ```
+```bash
+bash scripts/init-db.sh
+```
+
+It will prompt you for a username, display name, and PIN (hidden). No credentials are hardcoded.
 
 ## Project Structure
 
