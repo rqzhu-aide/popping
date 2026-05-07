@@ -1,0 +1,104 @@
+{% extends "base.html" %}
+
+{% block title %}Instructor - Popping{% endblock %}
+
+{% block content %}
+<div class="instructor">
+    <header class="dash-header">
+        <h1>Instructor Control Panel</h1>
+        <div class="phase-badge phase-{{ state.phase }}">
+            Phase: {{ state.phase.upper() }}
+        </div>
+    </header>
+
+    <section class="card">
+        <h2>Phase Control</h2>
+        <div class="phase-buttons">
+            {% for p in phases %}
+            <button class="btn phase-btn {% if state.phase == p %}active{% endif %}"
+                    data-phase="{{ p }}" onclick="setPhase('{{ p }}')">
+                {{ p.upper() }}
+            </button>
+            {% endfor %}
+        </div>
+    </section>
+
+    <section class="card">
+        <h2>Active Presenting Team</h2>
+        <div class="team-buttons">
+            <button class="btn btn-outline {% if not state.active_team_id %}active{% endif %}"
+                    onclick="setActiveTeam(null)">None</button>
+            {% for t in teams %}
+            <button class="btn btn-outline {% if state.active_team_id == t.id %}active{% endif %}"
+                    style="--team-color: {{ t.color }}"
+                    onclick="setActiveTeam({{ t.id }})">
+                {{ t.name }}
+            </button>
+            {% endfor %}
+        </div>
+    </section>
+
+    <section class="card">
+        <h2>Discussion Question</h2>
+        <div class="form-inline">
+            <input type="text" id="question-input" placeholder="Enter question..."
+                   value="{{ state.current_question or '' }}">
+            <button class="btn btn-primary" onclick="setQuestion()">Set Question</button>
+        </div>
+    </section>
+
+    <section class="card">
+        <h2>Student Management</h2>
+        <div class="add-student-form">
+            <input type="text" id="new-student-id" placeholder="Student ID">
+            <input type="text" id="new-name" placeholder="Name">
+            <input type="text" id="new-pin" placeholder="PIN">
+            <button class="btn btn-primary" onclick="addStudent()">Add Student</button>
+        </div>
+
+        <div class="table-wrapper">
+            <table class="data-table">
+                <thead>
+                    <tr>
+                        <th>ID</th>
+                        <th>Name</th>
+                        <th>Team</th>
+                        <th>Action</th>
+                    </tr>
+                </thead>
+                <tbody id="student-table">
+                    {% for s in students %}
+                    <tr data-id="{{ s.id }}">
+                        <td>{{ s.student_id }}</td>
+                        <td>{{ s.name }}</td>
+                        <td>
+                            {% if s.team_name %}
+                                <span class="team-tag" style="background: {{ s.color or '#ccc' }}">
+                                    {{ s.team_name }}
+                                </span>
+                            {% else %}
+                                <em>Unassigned</em>
+                            {% endif %}
+                        </td>
+                        <td>
+                            {% if not s.is_instructor %}
+                            <button class="btn btn-sm btn-danger" onclick="removeStudent({{ s.id }})">Remove</button>
+                            {% else %}
+                                <em>Instructor</em>
+                            {% endif %}
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </section>
+
+    <section class="card">
+        <h2>Data Export</h2>
+        <p class="hint">Download all grades and responses as CSV.</p>
+        <a href="{{ url_for('export_data') }}" class="btn btn-primary">Download CSV</a>
+        <button class="btn btn-danger" onclick="resetData()">Reset All Data</button>
+    </section>
+</div>
+{% endblock %}
