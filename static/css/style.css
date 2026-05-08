@@ -516,6 +516,94 @@ input:focus, textarea:focus {
     min-width: 120px;
 }
 
+.competition-control {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+}
+
+.form-row {
+    display: flex;
+    gap: 16px;
+    flex-wrap: wrap;
+}
+.form-row .form-group {
+    flex: 1;
+    min-width: 200px;
+    margin-bottom: 0;
+}
+.form-row select {
+    width: 100%;
+    padding: 10px 12px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    font-family: inherit;
+    font-size: 0.95rem;
+    background: var(--surface);
+    color: var(--text);
+}
+
+.timer-display {
+    background: #f1f5f9;
+    border-radius: 8px;
+    padding: 12px 16px;
+    text-align: center;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+}
+.timer-label {
+    font-size: 0.9rem;
+    color: var(--text-muted);
+}
+.timer-value {
+    font-size: 1.6rem;
+    font-weight: 700;
+    font-family: 'SF Mono', monospace;
+    color: var(--text);
+}
+
+.comp-actions {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+}
+.comp-actions .btn {
+    flex: 1;
+    min-width: 140px;
+}
+
+.active-info {
+    background: var(--bg);
+    border-radius: 8px;
+    padding: 14px;
+    border: 1px solid var(--border);
+}
+.info-row {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 6px;
+    font-size: 0.95rem;
+}
+.info-row:last-child {
+    margin-bottom: 0;
+}
+.info-label {
+    color: var(--text-muted);
+    min-width: 80px;
+}
+.info-value {
+    font-weight: 600;
+}
+
+.question-display {
+    background: #eef2ff;
+    border-radius: 8px;
+    padding: 12px;
+    margin: 12px 0;
+}
+
 .empty {
     color: var(--text-muted);
     text-align: center;

@@ -3,7 +3,7 @@
 {% block title %}Instructor - {{ course.name }}{% endblock %}
 
 {% block content %}
-<div class="instructor" data-slug="{{ course.slug }}">
+<div class="instructor" data-slug="{{ course.slug }}" data-presentation-started="{{ state.presentation_started_at or '' }}">
     <header class="dash-header">
         <div>
             <h1>{{ course.name }}</h1>
@@ -18,6 +18,68 @@
         <a href="{{ url_for('index') }}" class="btn btn-sm btn-secondary">← Course Selection</a>
     </div>
 
+    <!-- Competition Control -->
+    <section class="card">
+        <h2>🎯 Competition Control</h2>
+        <div class="competition-control">
+            {% if state.active_team_id and state.active_question_id %}
+            <!-- Presentation is active -->
+            <div class="timer-display" id="instructor-timer">
+                <span class="timer-label">⏱️ Elapsed:</span>
+                <span class="timer-value" id="timer-value">00:00</span>
+            </div>
+            <div class="active-info" id="active-info">
+                <div class="info-row">
+                    <span class="info-label">Presenting:</span>
+                    <span class="info-value" id="active-team-name">
+                        {% for t in teams %}{% if t.id == state.active_team_id %}{{ t.name }}{% endif %}{% endfor %}
+                    </span>
+                </div>
+                <div class="info-row">
+                    <span class="info-label">Question:</span>
+                    <span class="info-value" id="active-question-text">
+                        {% for q in questions %}{% if q.id == state.active_question_id %}#{{ q.question_num }}: {{ q.question_text }}{% endif %}{% endfor %}
+                    </span>
+                </div>
+            </div>
+            <div class="comp-actions">
+                <button class="btn btn-secondary" id="btn-stop" onclick="stopPresentation()">⏹ Stop Timer</button>
+                <button class="btn btn-danger" id="btn-next" onclick="nextPresentation()">⏭ Next Team</button>
+            </div>
+            {% else %}
+            <!-- No active presentation -->
+            <div class="form-row">
+                <div class="form-group">
+                    <label>Select Team</label>
+                    <select id="comp-team">
+                        <option value="">-- Choose team --</option>
+                        {% for t in teams %}
+                        <option value="{{ t.id }}">{{ t.name }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>Select Question</label>
+                    <select id="comp-question">
+                        <option value="">-- Choose question --</option>
+                        {% for q in questions %}
+                        <option value="{{ q.id }}">#{{ q.question_num }}: {{ q.question_text[:60] }}{% if q.question_text|length > 60 %}...{% endif %}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+            </div>
+            <div class="timer-display" id="instructor-timer">
+                <span class="timer-label">⏱️ Elapsed:</span>
+                <span class="timer-value" id="timer-value">00:00</span>
+            </div>
+            <div class="comp-actions">
+                <button class="btn btn-primary btn-full" id="btn-start" onclick="startPresentation()">▶ Start Presentation</button>
+            </div>
+            {% endif %}
+        </div>
+    </section>
+
+    <!-- Phase Control (compact) -->
     <section class="card">
         <h2>Phase Control</h2>
         <div class="phase-buttons">
@@ -30,30 +92,42 @@
         </div>
     </section>
 
+    <!-- Question Bank -->
     <section class="card">
-        <h2>Active Presenting Team</h2>
-        <div class="team-buttons">
-            <button class="btn btn-outline {% if not state.active_team_id %}active{% endif %}"
-                    onclick="setActiveTeam(null)">None</button>
-            {% for t in teams %}
-            <button class="btn btn-outline {% if state.active_team_id == t.id %}active{% endif %}"
-                    style="--team-color: {{ t.color }}"
-                    onclick="setActiveTeam({{ t.id }})">
-                {{ t.name }}
-            </button>
-            {% endfor %}
+        <h2>📝 Question Bank</h2>
+        <div class="add-student-form">
+            <input type="text" id="new-question" placeholder="Enter question text..." style="flex:3">
+            <button class="btn btn-primary" onclick="addQuestion()">Add Question</button>
+        </div>
+        <div class="table-wrapper">
+            <table class="data-table" id="question-table">
+                <thead>
+                    <tr>
+                        <th style="width:60px">#</th>
+                        <th>Question</th>
+                        <th style="width:80px">Action</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for q in questions %}
+                    <tr data-id="{{ q.id }}">
+                        <td>{{ q.question_num }}</td>
+                        <td>{{ q.question_text }}</td>
+                        <td>
+                            <button class="btn btn-sm btn-danger" onclick="deleteQuestion({{ q.id }})">Delete</button>
+                        </td>
+                    </tr>
+                    {% else %}
+                    <tr>
+                        <td colspan="3" class="empty">No questions yet. Add one above.</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
         </div>
     </section>
 
-    <section class="card">
-        <h2>Discussion Question</h2>
-        <div class="form-inline">
-            <input type="text" id="question-input" placeholder="Enter question..."
-                   value="{{ state.current_question or '' }}">
-            <button class="btn btn-primary" onclick="setQuestion()">Set Question</button>
-        </div>
-    </section>
-
+    <!-- Student Management -->
     <section class="card">
         <h2>Student Management</h2>
         <div class="add-student-form">

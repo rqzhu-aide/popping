@@ -105,7 +105,28 @@ if (dashboard) {
                     banner.textContent = state.active_team.name;
                     banner.style.color = state.active_team.color;
                 }
+                // Show active question
+                const qDisplay = document.getElementById('question-display');
+                const qText = document.getElementById('active-question-text');
+                if (qDisplay && qText && state.active_question) {
+                    qDisplay.style.display = 'block';
+                    qText.textContent = `#${state.active_question.question_num}: ${state.active_question.question_text}`;
+                } else if (qDisplay) {
+                    qDisplay.style.display = 'none';
+                }
+                // Show/hide timer
+                const timer = document.getElementById('student-timer');
+                if (timer) {
+                    timer.style.display = state.presentation_started_at ? 'block' : 'none';
+                }
+                if (state.presentation_started_at) {
+                    startTimer(state.presentation_started_at);
+                } else {
+                    stopTimer();
+                }
                 loadTeamGraders(state.active_team);
+            } else {
+                stopTimer();
             }
         }
     }
@@ -244,6 +265,48 @@ window.addStudent = async function() {
     }
 };
 
+window.addQuestion = async function() {
+    const text = document.getElementById('new-question').value.trim();
+    if (!text) { alert('Question text required'); return; }
+    const data = await postJSON('/api/questions', { question_text: text });
+    if (data.success) {
+        window.location.reload();
+    } else {
+        alert(data.error || 'Failed to add question');
+    }
+};
+
+window.deleteQuestion = async function(qid) {
+    if (!confirm('Delete this question?')) return;
+    await deleteJSON('/api/questions/' + qid);
+    window.location.reload();
+};
+
+window.startPresentation = async function() {
+    const teamId = document.getElementById('comp-team').value;
+    const questionId = document.getElementById('comp-question').value;
+    if (!teamId || !questionId) { alert('Select both a team and a question'); return; }
+    const data = await postJSON('/api/start_presentation', {
+        team_id: parseInt(teamId, 10),
+        question_id: parseInt(questionId, 10)
+    });
+    if (data.success) {
+        window.location.reload();
+    } else {
+        alert(data.error || 'Failed to start presentation');
+    }
+};
+
+window.stopPresentation = async function() {
+    await postJSON('/api/stop_presentation', {});
+    window.location.reload();
+};
+
+window.nextPresentation = async function() {
+    await postJSON('/api/next_presentation', {});
+    window.location.reload();
+};
+
 window.removeStudent = async function(studentDbId) {
     if (!confirm('Remove this student?')) return;
     await deleteJSON('/api/remove_student/' + studentDbId);
@@ -255,3 +318,44 @@ window.resetData = async function() {
     await postJSON('/api/reset_data', {});
     window.location.reload();
 };
+
+// ===== PRESENTATION TIMER =====
+let timerInterval = null;
+
+function formatDuration(seconds) {
+    const m = Math.floor(seconds / 60).toString().padStart(2, '0');
+    const s = Math.floor(seconds % 60).toString().padStart(2, '0');
+    return `${m}:${s}`;
+}
+
+function startTimer(startedAt) {
+    if (timerInterval) clearInterval(timerInterval);
+    const startTime = new Date(startedAt).getTime();
+    const tick = () => {
+        const elapsed = Math.floor((Date.now() - startTime) / 1000);
+        document.querySelectorAll('.timer-value').forEach(el => {
+            el.textContent = formatDuration(elapsed);
+        });
+    };
+    tick();
+    timerInterval = setInterval(tick, 1000);
+}
+
+function stopTimer() {
+    if (timerInterval) {
+        clearInterval(timerInterval);
+        timerInterval = null;
+    }
+    document.querySelectorAll('.timer-value').forEach(el => {
+        el.textContent = '00:00';
+    });
+}
+
+// Check for active timer on page load
+const instructorEl = document.querySelector('.instructor[data-presentation-started]');
+if (instructorEl) {
+    const startedAt = instructorEl.dataset.presentationStarted;
+    if (startedAt) {
+        startTimer(startedAt);
+    }
+}

@@ -46,13 +46,26 @@ CREATE TABLE students (
     UNIQUE(course_id, student_id)
 );
 
+CREATE TABLE questions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    course_id INTEGER NOT NULL,
+    question_num INTEGER NOT NULL,
+    question_text TEXT NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (course_id) REFERENCES courses (id)
+);
+
 CREATE TABLE course_state (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     course_id INTEGER NOT NULL UNIQUE,
-    phase TEXT DEFAULT 'setup',
+    phase TEXT DEFAULT 'setup' CHECK(phase IN ('setup', 'discussion', 'competition', 'grading', 'ended')),
     active_team_id INTEGER,
+    active_question_id INTEGER,
     current_question TEXT,
-    FOREIGN KEY (course_id) REFERENCES courses (id)
+    presentation_started_at TIMESTAMP,
+    FOREIGN KEY (course_id) REFERENCES courses (id),
+    FOREIGN KEY (active_team_id) REFERENCES teams (id),
+    FOREIGN KEY (active_question_id) REFERENCES questions (id)
 );
 
 CREATE TABLE peer_reviews (

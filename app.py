@@ -224,10 +224,13 @@ def instructor_course(slug):
     state = query_db(slug,
         'SELECT * FROM course_state WHERE course_id = ?', [course['id']], one=True
     )
+    questions = query_db(slug,
+        'SELECT * FROM questions WHERE course_id = ? ORDER BY question_num', [course['id']]
+    )
     return render_template(
         'instructor.html',
         course=course, teams=teams, students=students,
-        state=state, phases=PHASES
+        state=state, phases=PHASES, questions=questions
     )
 
 
@@ -300,11 +303,20 @@ def api_state():
         my_team = query_db(slug,
             'SELECT * FROM teams WHERE id = ?', [me['team_id']], one=True
         )
+    active_question = None
+    if state and state['active_question_id']:
+        aq = query_db(slug,
+            'SELECT * FROM questions WHERE id = ?', [state['active_question_id']], one=True
+        )
+        if aq:
+            active_question = dict(aq)
     return jsonify({
         'phase': state['phase'] if state else 'setup',
         'active_team': dict(active_team) if active_team else None,
+        'active_question': active_question,
         'my_team': dict(my_team) if my_team else None,
-        'current_question': state['current_question'] if state else None
+        'current_question': state['current_question'] if state else None,
+        'presentation_started_at': state['presentation_started_at'] if state else None
     })
 
 
@@ -482,6 +494,104 @@ def set_question():
     execute_db(slug,
         'UPDATE course_state SET current_question = ? WHERE course_id = ?',
         [question, course['id']]
+    )
+    return jsonify({'success': True})
+
+
+# ---------------------------------------------------------------------------
+# Question Bank API
+# ---------------------------------------------------------------------------
+
+@app.route('/api/questions', methods=['GET'])
+@instructor_login_required
+def get_questions():
+    slug = session['slug']
+    rows = query_db(slug,
+        'SELECT * FROM questions WHERE course_id = (SELECT id FROM courses LIMIT 1) ORDER BY question_num'
+    )
+    return jsonify([dict(r) for r in rows])
+
+
+@app.route('/api/questions', methods=['POST'])
+@instructor_login_required
+def add_question():
+    slug = session['slug']
+    data = request.get_json()
+    text = data.get('question_text', '').strip()
+    if not text:
+        return jsonify({'error': 'Question text required'}), 400
+    course = query_db(slug, 'SELECT id FROM courses LIMIT 1', one=True)
+    # Get next question number
+    max_num = query_db(slug,
+        'SELECT MAX(question_num) as m FROM questions WHERE course_id = ?',
+        [course['id']], one=True
+    )
+    next_num = (max_num['m'] or 0) + 1
+    execute_db(slug,
+        'INSERT INTO questions (course_id, question_num, question_text) VALUES (?, ?, ?)',
+        [course['id'], next_num, text]
+    )
+    return jsonify({'success': True})
+
+
+@app.route('/api/questions/<int:qid>', methods=['DELETE'])
+@instructor_login_required
+def delete_question(qid):
+    slug = session['slug']
+    execute_db(slug, 'DELETE FROM questions WHERE id = ?', [qid])
+    return jsonify({'success': True})
+
+
+# ---------------------------------------------------------------------------
+# Competition / Presentation Control API
+# ---------------------------------------------------------------------------
+
+@app.route('/api/start_presentation', methods=['POST'])
+@instructor_login_required
+def start_presentation():
+    slug = session['slug']
+    data = request.get_json()
+    team_id = data.get('team_id')
+    question_id = data.get('question_id')
+    if not team_id or not question_id:
+        return jsonify({'error': 'Team and question required'}), 400
+    course = query_db(slug, 'SELECT id FROM courses LIMIT 1', one=True)
+    execute_db(slug,
+        '''UPDATE course_state
+           SET phase = 'competition', active_team_id = ?, active_question_id = ?,
+               presentation_started_at = CURRENT_TIMESTAMP
+           WHERE course_id = ?''',
+        [team_id, question_id, course['id']]
+    )
+    return jsonify({'success': True})
+
+
+@app.route('/api/stop_presentation', methods=['POST'])
+@instructor_login_required
+def stop_presentation():
+    slug = session['slug']
+    course = query_db(slug, 'SELECT id FROM courses LIMIT 1', one=True)
+    execute_db(slug,
+        '''UPDATE course_state
+           SET presentation_started_at = NULL
+           WHERE course_id = ?''',
+        [course['id']]
+    )
+    return jsonify({'success': True})
+
+
+@app.route('/api/next_presentation', methods=['POST'])
+@instructor_login_required
+def next_presentation():
+    """Stop current presentation, clear team/question, ready for next."""
+    slug = session['slug']
+    course = query_db(slug, 'SELECT id FROM courses LIMIT 1', one=True)
+    execute_db(slug,
+        '''UPDATE course_state
+           SET active_team_id = NULL, active_question_id = NULL,
+               presentation_started_at = NULL
+           WHERE course_id = ?''',
+        [course['id']]
     )
     return jsonify({'success': True})
 
