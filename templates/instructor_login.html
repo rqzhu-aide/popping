@@ -1,17 +1,20 @@
 {% extends "base.html" %}
 
-{% block title %}Instructor Login - Popping{% endblock %}
+{% block title %}Instructor Login - {{ course.name }}{% endblock %}
 
 {% block content %}
 <div class="login-container">
     <div class="login-card">
         <div class="login-header">
             <span class="logo-large">🍿</span>
-            <h1>Instructor Login</h1>
-            <p class="subtitle">Access your course control panels</p>
+            <h1>{{ course.name }}</h1>
+            <p class="subtitle">
+                {% if course.code %}{{ course.code }}{% endif %}
+                {% if course.semester %} · {{ course.semester }}{% endif %}
+            </p>
         </div>
 
-        <form method="POST" action="{{ url_for('instructor_login') }}" class="login-form">
+        <form method="POST" action="{{ url_for('instructor_login', slug=slug) }}" class="login-form">
             <div class="form-group">
                 <label for="username">Username</label>
                 <input type="text" id="username" name="username" required

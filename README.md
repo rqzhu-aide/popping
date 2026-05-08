@@ -2,22 +2,24 @@
 
 Multi-course interactive classroom team management and peer grading system.
 
+Each course lives in its own folder with its own SQLite database. This keeps course data completely isolated and makes it easy to reset or archive individual courses.
+
 ## Features
 
-- **Multi-Course Support**: One app hosts many courses, each with its own instructor, students, teams, and data.
-- **Team Selection**: Students log in with ID + PIN and pick a team within their course.
+- **Per-Course Databases**: Each course has its own folder (`data/{slug}/`) with its own `popping.db`.
+- **Team Selection**: Students log in with ID + PIN and pick a team.
 - **Live Roster**: Real-time view of who joined which team (3-second polling).
 - **Discussion Phase**: Students respond to instructor questions.
 - **Peer Grading**: Students grade teammates during discussion.
-- **Competition Mode**: Teams present; instructor selects active team per course.
+- **Competition Mode**: Teams present; instructor selects active team.
 - **Team Grading**: Non-presenting teams grade the presenting team.
-- **Instructor Panel**: Manage multiple courses, control phases, pick presenting teams.
+- **Instructor Panel**: Control phases, pick presenting team, manage students.
 - **Data Export**: Download per-course grades & responses as CSV.
 
 ## Tech Stack
 
 - **Backend**: Python + Flask
-- **Database**: SQLite (zero-config, file-based, one DB for all courses)
+- **Database**: SQLite (one per course, in its own folder)
 - **Frontend**: Vanilla JS + Jinja2 templates + modern CSS
 - **Auth**: Simple session-based (ID + PIN for students; username + PIN for instructors)
 
@@ -27,29 +29,62 @@ Multi-course interactive classroom team management and peer grading system.
 # 1. Clone
 git clone https://github.com/rqzhu-aide/popping.git
 cd popping
-```bash
+
 # 2. Install dependencies
 pip install -r requirements.txt
 
-# 3. Initialize database (interactive prompt for instructor credentials)
-bash scripts/init-db.sh
+# 3. Create a course
+bash scripts/create-course.sh
+#   It will ask you for:
+#   - Course slug (e.g. 432fall2026)
+#   - Course name (e.g. "Basics of Statistical Learning")
+#   - Course code (e.g. STAT 432)
+#   - Semester (e.g. Fall 2026)
+#   Then it creates the folder under data/{slug}/
 
-# 4. Run
+# 4. Initialize the course database
+cd data/432fall2026
+bash init-db.sh
+#   It will prompt you for instructor credentials
+
+# 5. Run the app
+cd ../..
 flask --app app run
 ```
 
 Open http://127.0.0.1:5000
 
-### Login
+## Course Folder Structure
 
-After running `init-db.sh`, use the username and PIN you entered. Add students via the instructor panel.
+After creating a course, you get:
 
-### Pre-seeded Courses
+```
+data/432fall2026/
+├── course.json          # Course metadata (name, code, teams, etc.)
+├── init-db.sh           # Script to reset/reinitialize this course's DB
+└── popping.db           # The SQLite database (created by init-db.sh)
+```
 
-Two demo courses are created automatically:
+### To Reset a Course (change instructor password, wipe student data)
 
-1. **Basics of Statistical Learning** (STAT 432, Fall 2026)
-2. **Machine Learning** (STAT 542, Fall 2025)
+```bash
+cd data/432fall2026
+bash init-db.sh
+```
+
+This will:
+- Delete `popping.db`
+- Recreate the schema
+- Prompt you for new instructor credentials
+- Keep the same course name, code, semester, and team structure from `course.json`
+
+### To Create Another Course
+
+```bash
+bash scripts/create-course.sh
+```
+
+Then `cd data/{new-slug} && bash init-db.sh`
 
 ## Deploy to Render
 
@@ -58,34 +93,44 @@ Two demo courses are created automatically:
 3. Set build command: `pip install -r requirements.txt`
 4. Set start command: `gunicorn app:app`
 5. Add environment variable: `SECRET_KEY` = (any random string)
-6. After first deploy, run in Render Shell:
-```bash
-bash scripts/init-db.sh
-```
-
-It will prompt you for a username, display name, and PIN (hidden). No credentials are hardcoded.
+6. After first deploy, open Render Shell and create your course:
+   ```bash
+   bash scripts/create-course.sh
+   # Answer the prompts (slug, name, code, semester)
+   
+   cd data/YOUR-SLUG
+   bash init-db.sh
+   # Enter instructor credentials when prompted
+   ```
 
 ## Project Structure
 
 ```
 popping/
 ├── app.py                  # Main Flask app (routes + API)
-├── database.py             # SQLite helpers
-├── config.py               # Config (DB path, secret key)
-├── popping.sql             # Database schema + seed data
+├── config.py               # Config (data dir, secret key)
+├── database.py             # SQLite helpers (per-course connections)
+├── popping.sql             # Database schema (no seed data)
 ├── requirements.txt        # Python dependencies
 ├── render.yaml             # Render Blueprint (optional)
+├── scripts/
+│   ├── create-course.sh    # Create a new course folder + course.json
+│   └── init-course-db.py   # Python helper called by per-course init-db.sh
+├── data/                   # One folder per course (not in git)
+│   └── 432fall2026/
+│       ├── course.json
+│       ├── init-db.sh
+│       └── popping.db
 ├── static/
-│   ├── css/style.css         # Modern styles
-│   └── js/app.js             # Frontend logic + polling
+│   ├── css/style.css
+│   └── js/app.js
 └── templates/
-    ├── base.html             # Layout
-    ├── index.html            # Landing page (course selection)
-    ├── login.html            # Student login for a course
-    ├── instructor_login.html # Instructor login
-    ├── instructor_courses.html # Instructor's course list
-    ├── instructor.html       # Instructor control panel
-    └── dashboard.html        # Student view
+    ├── base.html
+    ├── index.html
+    ├── login.html
+    ├── instructor_login.html
+    ├── instructor.html
+    └── dashboard.html
 ```
 
 ## User Flow
@@ -93,14 +138,14 @@ popping/
 ### Students
 
 1. Visit the site → see list of active courses.
-2. Click their course → enter Student ID + PIN.
+2. Click **Student Login** on your course → enter Student ID + PIN.
 3. Select a team (during **SETUP** phase).
 4. Participate in discussion, peer grading, or team grading as phases change.
 
 ### Instructors
 
-1. Click **Instructor Login** → enter username + PIN.
-2. See list of your courses → click one to manage.
+1. Click **Instructor Login** on your course → enter username + PIN.
+2. Go directly to the control panel for that course.
 3. Control phases, manage students, set questions, select presenting teams.
 4. Export CSV at the end of class.
 
@@ -116,34 +161,34 @@ popping/
 
 ### Adding a New Course
 
-Insert into the database (or via SQL directly):
-
-```sql
-INSERT INTO courses (name, code, semester, instructor_id) VALUES ('New Course', 'STAT 101', 'Spring 2026', 1);
-INSERT INTO course_state (course_id, phase, active_team_id) VALUES (3, 'setup', NULL);
-INSERT INTO teams (course_id, name, color) VALUES (3, 'Team A', '#ef4444'), (3, 'Team B', '#3b82f6');
+```bash
+bash scripts/create-course.sh
 ```
+
+Follow the prompts. Then `cd data/{slug}` and `bash init-db.sh`.
+
+### Customizing Teams
+
+Edit the `teams` array in `data/{slug}/course.json`, then run `bash init-db.sh` to recreate the database.
 
 ### Adding Students
 
-Use the instructor panel, or insert directly:
+Use the instructor panel, or insert directly into the course database:
+
+```bash
+sqlite3 data/432fall2026/popping.db
+```
 
 ```sql
 INSERT INTO students (course_id, student_id, name, pin) VALUES (1, 'netid123', 'Alice', '1234');
 ```
 
-### Adding Instructors
-
-```sql
-INSERT INTO instructors (username, name, pin) VALUES ('prof2', 'Dr. Smith', 'smith2025');
-```
-
 ## Data Isolation
 
-Each course is fully isolated:
-- Students, teams, grades, and responses are scoped to a `course_id`.
-- Instructors can only access courses they own.
-- Export downloads data for one course at a time.
+- Each course folder has its own `popping.db`.
+- No global database. Courses are discovered by scanning the `data/` directory.
+- Deleting a course folder completely removes that course's data.
+- Resetting a course (running `init-db.sh`) only affects that one course.
 
 ## License
 

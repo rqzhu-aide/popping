@@ -499,6 +499,17 @@ input:focus, textarea:focus {
     margin-top: 10px;
 }
 
+.course-actions {
+    display: flex;
+    gap: 10px;
+    margin-top: 14px;
+    flex-wrap: wrap;
+}
+.course-actions .btn {
+    flex: 1;
+    min-width: 120px;
+}
+
 .empty {
     color: var(--text-muted);
     text-align: center;

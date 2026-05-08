@@ -6,5 +6,6 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 if os.path.isdir('/opt/render/project/src/instance'):
     BASE_DIR = '/opt/render/project/src/instance'
 
-DATABASE = os.path.join(BASE_DIR, 'popping.db')
+DATA_DIR = os.path.join(BASE_DIR, 'data')
+DATABASE_SCHEMA = os.path.join(BASE_DIR, 'popping.sql')
 SECRET_KEY = os.environ.get('SECRET_KEY', 'dev-secret-key-change-in-production')

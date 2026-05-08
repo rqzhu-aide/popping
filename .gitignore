@@ -217,5 +217,6 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 
-# SQLite database
+# SQLite databases (per-course)
+data/**/popping.db
 popping.db

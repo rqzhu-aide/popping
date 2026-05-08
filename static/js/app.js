@@ -194,7 +194,7 @@ if (dashboard) {
 }
 
 /* ===== INSTRUCTOR PANEL ===== */
-const instructor = document.querySelector('.instructor[data-course-id]');
+const instructor = document.querySelector('.instructor[data-slug]');
 if (instructor) {
     setInterval(async () => {
         const res = await fetch('/api/teams');
@@ -206,31 +206,27 @@ if (instructor) {
 }
 
 window.setPhase = async function(phase) {
-    const courseId = getCourseId();
-    await postJSON('/api/set_phase', { course_id: courseId, phase });
+    await postJSON('/api/set_phase', { phase });
     window.location.reload();
 };
 
 window.setActiveTeam = async function(teamId) {
-    const courseId = getCourseId();
-    await postJSON('/api/set_active_team', { course_id: courseId, team_id: teamId });
+    await postJSON('/api/set_active_team', { team_id: teamId });
     window.location.reload();
 };
 
 window.setQuestion = async function() {
-    const courseId = getCourseId();
     const q = document.getElementById('question-input')?.value || '';
-    await postJSON('/api/set_question', { course_id: courseId, question: q });
+    await postJSON('/api/set_question', { question: q });
     alert('Question updated');
 };
 
 window.addStudent = async function() {
-    const courseId = getCourseId();
     const id = document.getElementById('new-student-id').value.trim();
     const name = document.getElementById('new-name').value.trim();
     const pin = document.getElementById('new-pin').value.trim();
     if (!id || !name || !pin) { alert('All fields required'); return; }
-    const data = await postJSON('/api/add_student', { course_id: courseId, student_id: id, name, pin });
+    const data = await postJSON('/api/add_student', { student_id: id, name, pin });
     if (data.success) {
         window.location.reload();
     } else {
@@ -245,8 +241,7 @@ window.removeStudent = async function(studentDbId) {
 };
 
 window.resetData = async function() {
-    const courseId = getCourseId();
     if (!confirm('This will delete ALL grades and reset teams for this course. Are you sure?')) return;
-    await postJSON('/api/reset_data', { course_id: courseId });
+    await postJSON('/api/reset_data', {});
     window.location.reload();
 };

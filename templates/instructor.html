@@ -3,7 +3,7 @@
 {% block title %}Instructor - {{ course.name }}{% endblock %}
 
 {% block content %}
-<div class="instructor" data-course-id="{{ course.id }}">
+<div class="instructor" data-slug="{{ course.slug }}">
     <header class="dash-header">
         <div>
             <h1>{{ course.name }}</h1>
@@ -15,7 +15,7 @@
     </header>
 
     <div class="top-nav">
-        <a href="{{ url_for('instructor') }}" class="btn btn-sm btn-secondary">← My Courses</a>
+        <a href="{{ url_for('index') }}" class="btn btn-sm btn-secondary">← Course Selection</a>
     </div>
 
     <section class="card">
@@ -100,7 +100,7 @@
     <section class="card">
         <h2>Data Export</h2>
         <p class="hint">Download all grades and responses for this course as CSV.</p>
-        <a href="{{ url_for('export_data', course_id=course.id) }}" class="btn btn-primary">Download CSV</a>
+        <a href="{{ url_for('export_data', slug=course.slug) }}" class="btn btn-primary">Download CSV</a>
         <button class="btn btn-danger" onclick="resetData()">Reset Course Data</button>
     </section>
 </div>

@@ -19,8 +19,8 @@
             {% if session.student_id %}
                 <a href="{{ url_for('dashboard') }}" class="nav-link">Dashboard</a>
                 <a href="{{ url_for('logout') }}" class="nav-link logout">Logout ({{ session.name }})</a>
-            {% elif session.instructor_id %}
-                <a href="{{ url_for('instructor') }}" class="nav-link">My Courses</a>
+            {% elif session.instructor_id and session.slug %}
+                <a href="{{ url_for('instructor_course', slug=session.slug) }}" class="nav-link">Control Panel</a>
                 <a href="{{ url_for('logout') }}" class="nav-link logout">Logout ({{ session.instructor_name }})</a>
             {% endif %}
         </div>

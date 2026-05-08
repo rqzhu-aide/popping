@@ -93,24 +93,3 @@ CREATE TABLE discussion_responses (
     FOREIGN KEY (course_id) REFERENCES courses (id),
     FOREIGN KEY (student_id) REFERENCES students (id)
 );
-
--- Seed data
-INSERT INTO instructors (username, name, pin) VALUES ('instructor', 'Instructor', 'admin123');
-
-INSERT INTO courses (name, code, semester, slug, instructor_id) VALUES
-    ('Basics of Statistical Learning', 'STAT 432', 'Fall 2026', '432fall2026', 1),
-    ('Machine Learning', 'STAT 542', 'Fall 2025', '542fall2025', 1);
-
-INSERT INTO teams (course_id, name, color) VALUES
-    (1, 'Team Alpha', '#ef4444'),
-    (1, 'Team Beta', '#3b82f6'),
-    (1, 'Team Gamma', '#10b981'),
-    (1, 'Team Delta', '#f59e0b'),
-    (1, 'Team Epsilon', '#8b5cf6'),
-    (2, 'Team Red', '#ef4444'),
-    (2, 'Team Blue', '#3b82f6'),
-    (2, 'Team Green', '#10b981');
-
-INSERT INTO course_state (course_id, phase, active_team_id) VALUES
-    (1, 'setup', NULL),
-    (2, 'setup', NULL);
