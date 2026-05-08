@@ -7,6 +7,7 @@ read -p "Course slug (folder name, e.g. 432fall2026): " SLUG
 read -p "Course name: " NAME
 read -p "Course code (e.g. STAT 432): " CODE
 read -p "Semester (e.g. Fall 2026): " SEMESTER
+read -p "Course catalog URL (optional, press Enter to skip): " URL
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
@@ -20,10 +21,17 @@ fi
 mkdir -p "$COURSE_DIR"
 
 # Write course.json
+if [ -n "$URL" ]; then
+  URL_LINE="\"url\": \"$URL\","
+else
+  URL_LINE=""
+fi
+
 cat > "$COURSE_DIR/course.json" <<EOF
 {
   "slug": "$SLUG",
   "name": "$NAME",
+  $URL_LINE
   "code": "$CODE",
   "semester": "$SEMESTER",
   "teams": [

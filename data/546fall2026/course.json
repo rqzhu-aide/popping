@@ -1,0 +1,14 @@
+{
+  "slug": "546fall2026",
+  "name": "Machine Learning in Data Science",
+  "url": "https://courses.illinois.edu/schedule/2025/fall/STAT/546",
+  "code": "STAT 546",
+  "semester": "Fall 2026",
+  "teams": [
+    {"name": "Team Alpha", "color": "#ef4444"},
+    {"name": "Team Beta", "color": "#3b82f6"},
+    {"name": "Team Gamma", "color": "#10b981"},
+    {"name": "Team Delta", "color": "#f59e0b"},
+    {"name": "Team Epsilon", "color": "#8b5cf6"}
+  ]
+}

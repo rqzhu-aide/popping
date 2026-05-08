@@ -16,7 +16,11 @@
         <div class="course-grid">
             {% for c in courses %}
             <div class="course-card course-card-large">
-                <div class="course-name">{{ c.name }}</div>
+                <div class="course-name">
+                    {% if c.url %}<a href="{{ c.url }}" target="_blank">{% endif %}
+                    {{ c.name }}
+                    {% if c.url %}</a>{% endif %}
+                </div>
                 <div class="course-meta">
                     {% if c.code %}<span class="badge">{{ c.code }}</span>{% endif %}
                     {% if c.semester %}<span class="badge badge-muted">{{ c.semester }}</span>{% endif %}

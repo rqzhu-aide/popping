@@ -46,18 +46,26 @@ def _scan_courses():
     for slug in sorted(os.listdir(config.DATA_DIR)):
         course_dir = os.path.join(config.DATA_DIR, slug)
         db_path = os.path.join(course_dir, 'popping.db')
+        json_path = os.path.join(course_dir, 'course.json')
         if not os.path.isdir(course_dir) or not os.path.exists(db_path):
             continue
         try:
+            import json
+            with open(json_path) as f:
+                cfg = json.load(f)
             conn = sqlite3.connect(db_path)
             conn.row_factory = sqlite3.Row
-            row = conn.execute('SELECT * FROM courses WHERE slug = ?', [slug]).fetchone()
             instructor = conn.execute('SELECT name FROM instructors LIMIT 1').fetchone()
-            if row:
-                d = dict(row)
-                d['instructor_name'] = instructor['name'] if instructor else ''
-                courses.append(d)
             conn.close()
+            courses.append({
+                'id': cfg['slug'],
+                'slug': cfg['slug'],
+                'name': cfg['name'],
+                'code': cfg.get('code'),
+                'semester': cfg.get('semester'),
+                'url': cfg.get('url'),
+                'instructor_name': instructor['name'] if instructor else ''
+            })
         except Exception:
             pass
     return courses
