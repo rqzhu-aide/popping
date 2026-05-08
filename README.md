@@ -93,15 +93,24 @@ Then `cd data/{new-slug} && bash init-db.sh`
 3. Set build command: `pip install -r requirements.txt`
 4. Set start command: `gunicorn app:app`
 5. Add environment variable: `SECRET_KEY` = (any random string)
-6. After first deploy, open Render Shell and create your course:
+6. Add a **Disk** (Settings → Disks):
+   - **Name:** `data`
+   - **Mount Path:** `/data`
+   - **Size:** 1 GB
+7. After first deploy, open Render Shell and init your courses:
    ```bash
-   bash scripts/create-course.sh
-   # Answer the prompts (slug, name, code, semester)
-   
-   cd data/YOUR-SLUG
+   # STAT 432
+   cd data/432fall2026
+   bash init-db.sh
+   # Enter instructor credentials when prompted
+
+   # STAT 546
+   cd ../546fall2026
    bash init-db.sh
    # Enter instructor credentials when prompted
    ```
+
+> **Why the disk?** On Render, anything not committed to git is ephemeral. The disk at `/data` persists across redeploys, so your SQLite databases survive code updates.
 
 ## Project Structure
 
@@ -116,11 +125,10 @@ popping/
 ├── scripts/
 │   ├── create-course.sh    # Create a new course folder + course.json
 │   └── init-course-db.py   # Python helper called by per-course init-db.sh
-├── data/                   # One folder per course (not in git)
+├── data/                   # Course configs (committed to git)
 │   └── 432fall2026/
 │       ├── course.json
-│       ├── init-db.sh
-│       └── popping.db
+│       └── init-db.sh
 ├── static/
 │   ├── css/style.css
 │   └── js/app.js
@@ -132,6 +140,8 @@ popping/
     ├── instructor.html
     └── dashboard.html
 ```
+
+> On Render with a mounted disk, the actual SQLite databases live under `/data/{slug}/popping.db` (persistent), while the course configs (`course.json`, `init-db.sh`) stay in the git repo under `data/{slug}/`.
 
 ## User Flow
 

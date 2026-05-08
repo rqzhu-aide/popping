@@ -39,24 +39,28 @@ def instructor_login_required(f):
 
 
 def _scan_courses():
-    """Scan data/ directory and return list of course dicts."""
+    """Scan CONFIG_DIR for course configs and DATA_DIR for databases."""
     courses = []
-    if not os.path.isdir(config.DATA_DIR):
+    if not os.path.isdir(config.CONFIG_DIR):
         return courses
-    for slug in sorted(os.listdir(config.DATA_DIR)):
-        course_dir = os.path.join(config.DATA_DIR, slug)
-        db_path = os.path.join(course_dir, 'popping.db')
-        json_path = os.path.join(course_dir, 'course.json')
-        if not os.path.isdir(course_dir) or not os.path.exists(db_path):
+    for slug in sorted(os.listdir(config.CONFIG_DIR)):
+        config_dir = os.path.join(config.CONFIG_DIR, slug)
+        db_path = os.path.join(config.DATA_DIR, slug, 'popping.db')
+        json_path = os.path.join(config_dir, 'course.json')
+        if not os.path.isdir(config_dir) or not os.path.exists(json_path):
             continue
         try:
             import json
             with open(json_path) as f:
                 cfg = json.load(f)
-            conn = sqlite3.connect(db_path)
-            conn.row_factory = sqlite3.Row
-            instructor = conn.execute('SELECT name FROM instructors LIMIT 1').fetchone()
-            conn.close()
+            instructor_name = ''
+            if os.path.exists(db_path):
+                conn = sqlite3.connect(db_path)
+                conn.row_factory = sqlite3.Row
+                instructor = conn.execute('SELECT name FROM instructors LIMIT 1').fetchone()
+                if instructor:
+                    instructor_name = instructor['name']
+                conn.close()
             courses.append({
                 'id': cfg['slug'],
                 'slug': cfg['slug'],
@@ -64,7 +68,8 @@ def _scan_courses():
                 'code': cfg.get('code'),
                 'semester': cfg.get('semester'),
                 'url': cfg.get('url'),
-                'instructor_name': instructor['name'] if instructor else ''
+                'has_db': os.path.exists(db_path),
+                'instructor_name': instructor_name
             })
         except Exception:
             pass

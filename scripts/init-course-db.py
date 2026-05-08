@@ -6,15 +6,15 @@ import sqlite3
 import getpass
 
 if len(sys.argv) < 2:
-    print("Usage: python3 init-course-db.py <course_dir>")
+    print("Usage: python3 init-course-db.py <course_config_dir>")
+    print("  <course_config_dir> is the folder containing course.json (e.g. data/432fall2026)")
     sys.exit(1)
 
-course_dir = os.path.abspath(sys.argv[1])
-json_path = os.path.join(course_dir, 'course.json')
-db_path = os.path.join(course_dir, 'popping.db')
+config_dir = os.path.abspath(sys.argv[1])
+json_path = os.path.join(config_dir, 'course.json')
 
 if not os.path.exists(json_path):
-    print(f"Error: course.json not found in {course_dir}")
+    print(f"Error: course.json not found in {config_dir}")
     sys.exit(1)
 
 with open(json_path) as f:
@@ -26,8 +26,20 @@ code = cfg['code']
 semester = cfg['semester']
 teams = cfg['teams']
 
+# Determine where to write the database
+# Priority: /data (Render disk) > local data/ folder
+if os.path.isdir('/data'):
+    DATA_DIR = '/data'
+else:
+    project_root = os.path.dirname(os.path.dirname(config_dir))
+    DATA_DIR = os.path.join(project_root, 'data')
+
+db_dir = os.path.join(DATA_DIR, slug)
+db_path = os.path.join(db_dir, 'popping.db')
+
 print("=== Create/Reset Course Database ===")
 print(f"Course: {name} ({slug})")
+print(f"Config:  {config_dir}")
 print(f"DB path: {db_path}")
 print("")
 
@@ -40,13 +52,16 @@ if not username or not display_name or not pin:
     print("Error: all fields are required.")
     sys.exit(1)
 
+# Ensure DB directory exists
+os.makedirs(db_dir, exist_ok=True)
+
 # Remove old DB
 if os.path.exists(db_path):
     print("Removing existing database...")
     os.remove(db_path)
 
 # Find project root and schema
-project_root = os.path.dirname(os.path.dirname(course_dir))
+project_root = os.path.dirname(os.path.dirname(config_dir))
 schema_path = os.path.join(project_root, 'popping.sql')
 
 print("Initializing schema...")
