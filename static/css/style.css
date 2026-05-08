@@ -91,6 +91,12 @@ html, body {
     font-weight: 600;
 }
 
+.hint-inline {
+    font-size: 0.85rem;
+    color: var(--text-muted);
+    font-weight: 400;
+}
+
 .hint {
     color: var(--text-muted);
     font-size: 0.9rem;

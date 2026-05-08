@@ -57,9 +57,9 @@
     <section class="card">
         <h2>Student Management</h2>
         <div class="add-student-form">
-            <input type="text" id="new-student-id" placeholder="Student ID">
-            <input type="text" id="new-name" placeholder="Name">
-            <input type="text" id="new-pin" placeholder="PIN">
+            <input type="text" id="new-student-id" placeholder="Student ID" required>
+            <input type="text" id="new-name" placeholder="Name (optional)">
+            <input type="text" id="new-pin" placeholder="PIN" required>
             <button class="btn btn-primary" onclick="addStudent()">Add Student</button>
         </div>
 
@@ -77,7 +77,7 @@
                     {% for s in students %}
                     <tr data-id="{{ s.id }}">
                         <td>{{ s.student_id }}</td>
-                        <td>{{ s.name }}</td>
+                        <td>{{ s | display_name }}</td>
                         <td>
                             {% if s.team_name %}
                                 <span class="team-tag" style="background: {{ s.team_color or '#ccc' }}">

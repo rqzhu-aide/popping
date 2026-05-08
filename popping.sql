@@ -38,7 +38,7 @@ CREATE TABLE students (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     course_id INTEGER NOT NULL,
     student_id TEXT NOT NULL,
-    name TEXT NOT NULL,
+    name TEXT,
     pin TEXT NOT NULL,
     team_id INTEGER,
     FOREIGN KEY (course_id) REFERENCES courses (id),

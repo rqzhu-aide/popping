@@ -20,6 +20,25 @@ init_app(app)
 PHASES = ['setup', 'discussion', 'competition', 'grading', 'ended']
 
 
+@app.template_filter('display_name')
+def display_name_filter(student):
+    """Format student display as 'Name (id)' or just 'id' if no name."""
+    if hasattr(student, 'keys'):
+        # sqlite3.Row
+        keys = student.keys()
+        name = student['name'] if 'name' in keys else None
+        sid = student['student_id'] if 'student_id' in keys else None
+    elif isinstance(student, dict):
+        name = student.get('name')
+        sid = student.get('student_id')
+    else:
+        name = getattr(student, 'name', None)
+        sid = getattr(student, 'student_id', None)
+    if name and sid and name != sid:
+        return f"{name} ({sid})"
+    return sid or name or 'Unknown'
+
+
 def student_login_required(f):
     @wraps(f)
     def decorated(*args, **kwargs):
@@ -96,6 +115,7 @@ def login(slug):
     if request.method == 'POST':
         student_id = request.form.get('student_id', '').strip()
         pin = request.form.get('pin', '').strip()
+        display_name = request.form.get('name', '').strip()
         if not student_id or not pin:
             flash('Please enter both ID and PIN.', 'error')
             return render_template('login.html', slug=slug)
@@ -104,8 +124,17 @@ def login(slug):
             [student_id, pin], one=True
         )
         if student:
+            # Update display name if provided on login
+            if display_name:
+                execute_db(slug,
+                    'UPDATE students SET name = ? WHERE id = ?',
+                    [display_name, student['id']]
+                )
+                student_name = display_name
+            else:
+                student_name = student['name'] or student['student_id']
             session['student_id'] = student['student_id']
-            session['name'] = student['name']
+            session['name'] = student_name
             session['slug'] = slug
             return redirect(url_for('dashboard'))
         flash('Invalid ID or PIN for this course.', 'error')
@@ -465,13 +494,13 @@ def add_student():
     student_id = data.get('student_id', '').strip()
     name = data.get('name', '').strip()
     pin = data.get('pin', '').strip()
-    if not student_id or not name or not pin:
-        return jsonify({'error': 'All fields required'}), 400
+    if not student_id or not pin:
+        return jsonify({'error': 'Student ID and PIN are required'}), 400
     course = query_db(slug, 'SELECT id FROM courses LIMIT 1', one=True)
     try:
         execute_db(slug,
             'INSERT INTO students (course_id, student_id, name, pin) VALUES (?, ?, ?, ?)',
-            [course['id'], student_id, name, pin]
+            [course['id'], student_id, name or None, pin]
         )
     except Exception:
         return jsonify({'error': 'Student ID already exists in this course'}), 400

@@ -58,9 +58,12 @@ if (dashboard) {
             const myId = dashboard.dataset.you;
             const members = team.members.map(m => {
                 const isYou = m.student_id === myId;
+                const display = m.name && m.name !== m.student_id
+                    ? `${m.name} (${m.student_id})`
+                    : m.student_id;
                 return `<div class="roster-member">
                     <span class="team-dot" style="background:${team.color}"></span>
-                    <span class="${isYou ? 'you' : ''}">${m.name} ${isYou ? '(You)' : ''}</span>
+                    <span class="${isYou ? 'you' : ''}">${display} ${isYou ? '(You)' : ''}</span>
                 </div>`;
             }).join('');
             div.innerHTML = `<h3><span class="team-dot" style="background:${team.color}"></span>${team.name}</h3>${members || '<em>No members</em>'}`;
@@ -120,10 +123,13 @@ if (dashboard) {
 
         myTeam.members.forEach(m => {
             if (m.student_id === myId) return;
+            const display = m.name && m.name !== m.student_id
+                ? `${m.name} (${m.student_id})`
+                : m.student_id;
             const row = document.createElement('div');
             row.className = 'grade-row';
             row.innerHTML = `
-                <span class="grade-name">${m.name}</span>
+                <span class="grade-name">${display}</span>
                 <input type="number" min="1" max="10" class="grade-input"
                        data-recipient="${m.student_id}" placeholder="1-10"
                        onchange="submitPeerGrade('${m.student_id}', this.value)">
@@ -176,12 +182,16 @@ if (dashboard) {
         const rows = await res.json();
         const container = document.getElementById('discussion-list');
         if (!container) return;
-        container.innerHTML = rows.slice(0, 20).map(r => `
+        container.innerHTML = rows.slice(0, 20).map(r => {
+            const display = r.name && r.name !== r.student_id
+                ? `${r.name} (${r.student_id})`
+                : r.student_id;
+            return `
             <div class="discussion-item">
-                <div class="meta">${r.name} · ${r.team_name || 'No team'} · ${r.created_at}</div>
+                <div class="meta">${display} · ${r.team_name || 'No team'} · ${r.created_at}</div>
                 <div>${escapeHtml(r.response)}</div>
             </div>
-        `).join('');
+        `}).join('');
     }
 
     function escapeHtml(text) {
@@ -225,7 +235,7 @@ window.addStudent = async function() {
     const id = document.getElementById('new-student-id').value.trim();
     const name = document.getElementById('new-name').value.trim();
     const pin = document.getElementById('new-pin').value.trim();
-    if (!id || !name || !pin) { alert('All fields required'); return; }
+    if (!id || !pin) { alert('Student ID and PIN are required'); return; }
     const data = await postJSON('/api/add_student', { student_id: id, name, pin });
     if (data.success) {
         window.location.reload();

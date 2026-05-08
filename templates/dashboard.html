@@ -6,7 +6,7 @@
 <div class="dashboard" data-phase="{{ state.phase }}" data-you="{{ student.student_id }}">
     <header class="dash-header">
         <div>
-            <h1>Hello, {{ student.name }}</h1>
+            <h1>Hello, {{ student | display_name }}</h1>
             <p class="course-name-sm">{{ course.name }}</p>
         </div>
         <div class="phase-badge phase-{{ state.phase }}">
