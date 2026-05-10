@@ -10,42 +10,11 @@
             <p class="course-name-sm">{{ course.name }}</p>
         </div>
         <div class="phase-badge phase-{{ state.phase }}">
-            Phase: {{ state.phase.upper() }}
+            Phase: {{ state.phase | phase_label }}
         </div>
     </header>
 
-    {% if not team %}
-    <section class="card team-select">
-        <h2>Select Your Team</h2>
-        <p class="hint">Choose a team to join. You can change this during setup.</p>
-        <div class="team-grid">
-            {% for t in teams %}
-            <button class="team-card" data-team-id="{{ t.id }}"
-                    style="--team-color: {{ t.color }}"
-                    onclick="joinTeam({{ t.id }})">
-                <span class="team-dot" style="background: {{ t.color }}"></span>
-                <span class="team-name">{{ t.name }}</span>
-            </button>
-            {% endfor %}
-        </div>
-    </section>
-    {% else %}
-    <section class="card my-team">
-        <h2>Your Team</h2>
-        <div class="team-banner" style="background: {{ team.color }}20; border-left-color: {{ team.color }}">
-            <span class="team-dot" style="background: {{ team.color }}"></span>
-            <span class="team-name-large">{{ team.name }}</span>
-        </div>
-    </section>
-    {% endif %}
-
-    <section class="card roster">
-        <h2>Class Roster</h2>
-        <div id="roster-table" class="roster-grid">
-            <p class="loading">Loading roster...</p>
-        </div>
-    </section>
-
+    <!-- Main activity sections (top when active) -->
     {% if team %}
     <section class="card discussion" id="discussion-section">
         <h2>Discussion</h2>
@@ -55,12 +24,6 @@
         <textarea id="discussion-input" rows="3" placeholder="Type your response..."></textarea>
         <button class="btn btn-secondary" onclick="submitDiscussion()">Submit Response</button>
         <div id="discussion-list" class="discussion-list"></div>
-    </section>
-
-    <section class="card peer-grading" id="peer-section">
-        <h2>Peer Grading</h2>
-        <p class="hint">Rate your teammates (1-10)</p>
-        <div id="peer-graders"></div>
     </section>
 
     <section class="card team-grading" id="team-section" style="display:none;">
@@ -81,14 +44,100 @@
         <div id="team-graders"></div>
     </section>
     {% endif %}
+
+    <!-- Team section -->
+    {% if not team %}
+    <section class="card team-select">
+        <h2>Select Your Team</h2>
+        <p class="hint">Choose a team to join. You can change this during setup.</p>
+        <div class="team-grid">
+            {% for t in teams %}
+            <button class="team-card" data-team-id="{{ t.id }}"
+                    style="--team-color: {{ t.color }}"
+                    onclick="joinTeam({{ t.id }})">
+                <span class="team-dot" style="background: {{ t.color }}"></span>
+                <span class="team-name">{{ t.name }}</span>
+            </button>
+            {% endfor %}
+        </div>
+    </section>
+    {% else %}
+    <section class="card my-team">
+        <div class="team-layout">
+            <div class="team-info">
+                <div class="team-banner" style="background: {{ team.color }}20; border-left-color: {{ team.color }}">
+                    <span class="team-dot" style="background: {{ team.color }}"></span>
+                    <span class="team-name-large">{{ team.name }}</span>
+                </div>
+                {% if state.phase == 'setup' %}
+                {% if teams_locked %}
+                <p class="hint" style="margin-top:12px; color: var(--danger);">Teams are Locked by Instructor</p>
+                {% else %}
+                <button class="btn btn-sm btn-secondary" id="btn-change-team" onclick="showTeamPicker()" style="margin-top:12px;">Change Team</button>
+                <div id="team-picker-panel" style="display:none; margin-top:14px;">
+                    <p class="hint">Select a new team:</p>
+                    <div class="team-grid" id="team-picker-grid"></div>
+                    <button class="btn btn-sm btn-secondary" onclick="hideTeamPicker()" style="margin-top:10px;">Cancel</button>
+                </div>
+                {% endif %}
+                {% else %}
+                {% if teammates %}
+                <div class="team-instructions">
+                    <p>Drag members to arrange seating.</p>
+                    <p>Give a <strong>👍</strong> to the significant contributor(s) in your group.</p>
+                </div>
+                {% else %}
+                <p class="hint">You're the only member so far.</p>
+                {% endif %}
+                {% endif %}
+            </div>
+            {% if teammates and state.phase != 'setup' %}
+            <div class="team-table-wrapper">
+                <button class="btn btn-sm btn-primary" onclick="resetCardPositions()">Reset Positions</button>
+                <div class="team-table" id="team-table" data-team-color="{{ team.color }}">
+                    {% for m in teammates %}
+                    <div class="teammate-card" draggable="true"
+                         data-student-id="{{ m.student_id }}"
+                         id="card-{{ m.student_id }}">
+                        <div class="card-circle" style="border-color:{{ team.color }}">
+                            <span class="card-name">{{ m.name or m.student_id }}</span>
+                            {% if m.name and m.name != m.student_id %}
+                            <span class="card-id">{{ m.student_id }}</span>
+                            {% endif %}
+                            <button class="thumb-btn thumb-up" onclick="gradeTeammate(this, '{{ m.student_id }}', 1)">👍</button>
+                        </div>
+                    </div>
+                    {% endfor %}
+                    <div class="teammate-card" draggable="true" data-student-id="you" id="card-you">
+                        <div class="card-circle" style="border-color:{{ team.color }}; background:{{ team.color }}15;">
+                            <span class="card-name">You</span>
+                            <span class="card-id">{{ student.student_id }}</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            {% endif %}
+        </div>
+    </section>
+    {% endif %}
+
+    <!-- Roster (always bottom) -->
+    <section class="card roster">
+        <div style="display:flex; align-items:center; justify-content:space-between;">
+            <h2 style="margin:0;">Class Roster</h2>
+            <button class="btn btn-sm btn-primary" onclick="toggleRoster()" id="btn-toggle-roster">Hide</button>
+        </div>
+        <div id="roster-content">
+            <div id="roster-table" class="roster-grid" style="margin-top:14px;">
+                <p class="loading">Loading roster...</p>
+            </div>
+        </div>
+    </section>
 </div>
 {% endblock %}
 
 {% block scripts %}
 <script>
     const MY_TEAM_ID = {{ team.id if team else 'null' }};
-    const PHASES_WITH_DISCUSSION = ['discussion'];
-    const PHASES_WITH_PEER = ['discussion'];
-    const PHASES_WITH_TEAM = ['competition', 'grading'];
 </script>
 {% endblock %}

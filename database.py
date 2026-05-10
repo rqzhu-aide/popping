@@ -38,6 +38,56 @@ def init_db(slug):
 def init_app(app):
     app.teardown_appcontext(close_db)
 
+
+def ensure_schema(slug):
+    """Add missing columns to existing databases (migration)."""
+    db = get_db(slug)
+
+    # course_state columns
+    cs_cols = [row['name'] for row in db.execute('PRAGMA table_info(course_state)').fetchall()]
+    if 'max_teams' not in cs_cols:
+        db.execute('ALTER TABLE course_state ADD COLUMN max_teams INTEGER DEFAULT 5')
+    if 'max_members_per_team' not in cs_cols:
+        db.execute('ALTER TABLE course_state ADD COLUMN max_members_per_team INTEGER DEFAULT 10')
+    if 'teams_locked' not in cs_cols:
+        db.execute('ALTER TABLE course_state ADD COLUMN teams_locked INTEGER DEFAULT 0')
+    if 'discussion_week' not in cs_cols:
+        db.execute('ALTER TABLE course_state ADD COLUMN discussion_week INTEGER DEFAULT 1')
+    if 'session_started_at' not in cs_cols:
+        db.execute('ALTER TABLE course_state ADD COLUMN session_started_at TIMESTAMP')
+
+    # students columns
+    st_cols = [row['name'] for row in db.execute('PRAGMA table_info(students)').fetchall()]
+    if 'last_login_at' not in st_cols:
+        db.execute('ALTER TABLE students ADD COLUMN last_login_at TIMESTAMP')
+    if 'last_team_joined_at' not in st_cols:
+        db.execute('ALTER TABLE students ADD COLUMN last_team_joined_at TIMESTAMP')
+    if 'last_team_id' not in st_cols:
+        db.execute('ALTER TABLE students ADD COLUMN last_team_id INTEGER')
+    if 'last_active_at' not in st_cols:
+        db.execute('ALTER TABLE students ADD COLUMN last_active_at TIMESTAMP')
+
+    db.commit()
+
+
+def get_max_teams(slug, course_id):
+    """Get max_teams for a course, with fallback for old databases."""
+    ensure_schema(slug)
+    state = query_db(slug, 'SELECT max_teams FROM course_state WHERE course_id = ?', [course_id], one=True)
+    if state and state['max_teams'] is not None:
+        return state['max_teams']
+    total = query_db(slug, 'SELECT COUNT(*) as c FROM teams WHERE course_id = ?', [course_id], one=True)
+    return total['c'] if total else 5
+
+
+def get_max_members_per_team(slug, course_id):
+    """Get max_members_per_team for a course."""
+    ensure_schema(slug)
+    state = query_db(slug, 'SELECT max_members_per_team FROM course_state WHERE course_id = ?', [course_id], one=True)
+    if state and state['max_members_per_team'] is not None:
+        return state['max_members_per_team']
+    return 10
+
 def query_db(slug, query, args=(), one=False):
     cur = get_db(slug).execute(query, args)
     rv = cur.fetchall()

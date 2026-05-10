@@ -1,0 +1,65 @@
+{% extends "base.html" %}
+
+{% block title %}How It Works — Popping{% endblock %}
+
+{% block content %}
+<div class="demo-page">
+    <div class="top-nav">
+        <a href="{{ url_for('index') }}" class="btn btn-sm btn-secondary">← Back</a>
+    </div>
+
+    <section class="card">
+        <h2>How Popping Works</h2>
+
+        <div class="demo-steps">
+            <div class="demo-step">
+                <div class="demo-step-num">1</div>
+                <div class="demo-step-body">
+                    <h3>Instructor Creates a Course</h3>
+                    <p>Each course gets its own space with a unique login page. Instructors set up teams and add students (via manual entry or CSV upload).</p>
+                </div>
+            </div>
+
+            <div class="demo-step">
+                <div class="demo-step-num">2</div>
+                <div class="demo-step-body">
+                    <h3>Students Join & Pick Teams</h3>
+                    <p>Students log in with their ID and PIN, then choose a team. Instructors control how many teams are available and how many members per team.</p>
+                </div>
+            </div>
+
+            <div class="demo-step">
+                <div class="demo-step-num">3</div>
+                <div class="demo-step-body">
+                    <h3>Discussion Phase</h3>
+                    <p>The instructor posts a question. Students submit written responses and grade their teammates on participation. All responses update in real time.</p>
+                </div>
+            </div>
+
+            <div class="demo-step">
+                <div class="demo-step-num">4</div>
+                <div class="demo-step-body">
+                    <h3>Competition Phase</h3>
+                    <p>Teams present one at a time. The instructor selects a team and a question from the bank, starts a live timer, and the presenting team's name is broadcast to all students.</p>
+                </div>
+            </div>
+
+            <div class="demo-step">
+                <div class="demo-step-num">5</div>
+                <div class="demo-step-body">
+                    <h3>Team Grading</h3>
+                    <p>While a team presents, other teams grade them on Content, Delivery, Creativity, and Teamwork. All scores are collected in real time.</p>
+                </div>
+            </div>
+
+            <div class="demo-step">
+                <div class="demo-step-num">6</div>
+                <div class="demo-step-body">
+                    <h3>Export & Finish</h3>
+                    <p>At the end of class, the instructor downloads a CSV with all student data: team assignments, login times, peer reviews, and team grades — ready for the gradebook.</p>
+                </div>
+            </div>
+        </div>
+    </section>
+</div>
+{% endblock %}

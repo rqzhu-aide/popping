@@ -1,24 +1,24 @@
 #!/usr/bin/env python3
 import sys
 import os
-import json
+import yaml
 import sqlite3
 import getpass
 
 if len(sys.argv) < 2:
     print("Usage: python3 init-course-db.py <course_config_dir>")
-    print("  <course_config_dir> is the folder containing course.json (e.g. data/432fall2026)")
+    print("  <course_config_dir> is the folder containing course.yaml (e.g. classes/432fall2026)")
     sys.exit(1)
 
 config_dir = os.path.abspath(sys.argv[1])
-json_path = os.path.join(config_dir, 'course.json')
+yaml_path = os.path.join(config_dir, 'course.yaml')
 
-if not os.path.exists(json_path):
-    print(f"Error: course.json not found in {config_dir}")
+if not os.path.exists(yaml_path):
+    print(f"Error: course.yaml not found in {config_dir}")
     sys.exit(1)
 
-with open(json_path) as f:
-    cfg = json.load(f)
+with open(yaml_path) as f:
+    cfg = yaml.safe_load(f)
 
 slug = cfg['slug']
 name = cfg['name']
@@ -84,16 +84,22 @@ cur = conn.execute(
 )
 course_id = cur.lastrowid
 
-# Insert teams
-for t in teams:
+# Insert 20 teams with auto-generated names and colors
+COLORS = [
+    '#ef4444', '#3b82f6', '#10b981', '#f59e0b', '#8b5cf6',
+    '#ec4899', '#06b6d4', '#84cc16', '#f97316', '#6366f1',
+    '#14b8a6', '#e11d48', '#0ea5e9', '#a855f7', '#22c55e',
+    '#eab308', '#dc2626', '#2563eb', '#059669', '#d97706'
+]
+for i in range(20):
     conn.execute(
         "INSERT INTO teams (course_id, name, color) VALUES (?, ?, ?)",
-        (course_id, t['name'], t['color'])
+        (course_id, f"Team {i+1}", COLORS[i])
     )
 
-# Insert course state
+# Insert course state with default 5 teams
 conn.execute(
-    "INSERT INTO course_state (course_id, phase, active_team_id) VALUES (?, 'setup', NULL)",
+    "INSERT INTO course_state (course_id, phase, max_teams, max_members_per_team) VALUES (?, 'setup', 5, 10)",
     (course_id,)
 )
 

@@ -11,13 +11,38 @@ from flask import (
 )
 
 import config
-from database import init_app, query_db, execute_db, get_db, init_db
+from database import init_app, query_db, execute_db, get_db, init_db, get_max_teams, get_max_members_per_team, ensure_schema
 
 app = Flask(__name__)
 app.config.from_object(config)
 init_app(app)
 
 PHASES = ['setup', 'discussion', 'competition', 'grading', 'ended']
+
+PHASE_LABELS = {
+    'setup': 'Setup',
+    'discussion': 'Group Discussion',
+    'competition': 'Competition',
+    'grading': 'Grading',
+    'ended': 'Ended'
+}
+
+
+@app.before_request
+def track_student_activity():
+    if 'student_id' in session and 'slug' in session:
+        try:
+            execute_db(session['slug'],
+                "UPDATE students SET last_active_at = CURRENT_TIMESTAMP WHERE student_id = ?",
+                [session['student_id']]
+            )
+        except Exception:
+            pass  # db might not exist yet on first request
+
+
+@app.template_filter('phase_label')
+def phase_label_filter(phase):
+    return PHASE_LABELS.get(phase, phase.upper())
 
 
 @app.template_filter('display_name')
@@ -58,20 +83,23 @@ def instructor_login_required(f):
 
 
 def _scan_courses():
-    """Scan CONFIG_DIR for course configs and DATA_DIR for databases."""
+    """Scan CLASSES_DIR for course configs, only return active courses."""
     courses = []
-    if not os.path.isdir(config.CONFIG_DIR):
+    if not os.path.isdir(config.CLASSES_DIR):
         return courses
-    for slug in sorted(os.listdir(config.CONFIG_DIR)):
-        config_dir = os.path.join(config.CONFIG_DIR, slug)
+    for slug in sorted(os.listdir(config.CLASSES_DIR)):
+        class_dir = os.path.join(config.CLASSES_DIR, slug)
         db_path = os.path.join(config.DATA_DIR, slug, 'popping.db')
-        json_path = os.path.join(config_dir, 'course.json')
-        if not os.path.isdir(config_dir) or not os.path.exists(json_path):
+        yaml_path = os.path.join(class_dir, 'course.yaml')
+        if not os.path.isdir(class_dir) or not os.path.exists(yaml_path):
             continue
         try:
-            import json
-            with open(json_path) as f:
-                cfg = json.load(f)
+            import yaml
+            with open(yaml_path) as f:
+                cfg = yaml.safe_load(f)
+            # Only show active courses on landing page
+            if not cfg.get('active', False):
+                continue
             instructor_name = ''
             if os.path.exists(db_path):
                 conn = sqlite3.connect(db_path)
@@ -124,6 +152,10 @@ def login(slug):
             [student_id, pin], one=True
         )
         if student:
+            execute_db(slug,
+                'UPDATE students SET last_login_at = CURRENT_TIMESTAMP WHERE id = ?',
+                [student['id']]
+            )
             # Update display name if provided on login
             if display_name:
                 execute_db(slug,
@@ -171,6 +203,11 @@ def instructor_login(slug):
     return render_template('instructor_login.html', course=course, slug=slug)
 
 
+@app.route('/demo')
+def demo():
+    return render_template('demo.html')
+
+
 @app.route('/logout')
 def logout():
     session.clear()
@@ -181,6 +218,8 @@ def logout():
 @student_login_required
 def dashboard():
     slug = session['slug']
+    from database import ensure_schema
+    ensure_schema(slug)
     student = query_db(slug,
         'SELECT * FROM students WHERE student_id = ?',
         [session['student_id']], one=True
@@ -191,16 +230,25 @@ def dashboard():
             'SELECT * FROM teams WHERE id = ?', [student['team_id']], one=True
         )
     course = query_db(slug, 'SELECT * FROM courses WHERE slug = ?', [slug], one=True)
-    teams = query_db(slug,
-        'SELECT * FROM teams WHERE course_id = ? ORDER BY name', [course['id']]
-    )
     state = query_db(slug,
         'SELECT * FROM course_state WHERE course_id = ?', [course['id']], one=True
     )
+    max_teams = get_max_teams(slug, course['id'])
+    teams = query_db(slug,
+        'SELECT * FROM teams WHERE course_id = ? ORDER BY id LIMIT ?', [course['id'], max_teams]
+    )
+    teams_locked = state['teams_locked'] if state and 'teams_locked' in state.keys() else 0
+    teammates = []
+    if team:
+        teammates = query_db(slug,
+            'SELECT student_id, name FROM students WHERE team_id = ? AND id != ? ORDER BY name',
+            [team['id'], student['id']]
+        )
     return render_template(
         'dashboard.html',
         student=student, team=team, teams=teams,
-        state=state, course=course, phases=PHASES
+        state=state, course=course, phases=PHASES,
+        teams_locked=teams_locked, teammates=teammates
     )
 
 
@@ -213,24 +261,37 @@ def instructor_course(slug):
 
     course = query_db(slug, 'SELECT * FROM courses WHERE slug = ?', [slug], one=True)
     teams = query_db(slug,
-        'SELECT * FROM teams WHERE course_id = ? ORDER BY name', [course['id']]
+        'SELECT * FROM teams WHERE course_id = ? ORDER BY id', [course['id']]
     )
+    state = query_db(slug,
+        'SELECT * FROM course_state WHERE course_id = ?', [course['id']], one=True
+    )
+    max_teams = get_max_teams(slug, course['id'])
+    teams_locked = state['teams_locked'] if state and 'teams_locked' in state.keys() else 0
     students = query_db(slug,
         '''SELECT s.*, t.name as team_name, t.color as team_color
            FROM students s LEFT JOIN teams t ON s.team_id = t.id
            WHERE s.course_id = ? ORDER BY s.name''',
         [course['id']]
     )
-    state = query_db(slug,
-        'SELECT * FROM course_state WHERE course_id = ?', [course['id']], one=True
-    )
     questions = query_db(slug,
         'SELECT * FROM questions WHERE course_id = ? ORDER BY question_num', [course['id']]
     )
+    from datetime import datetime as dt, timedelta
+    cutoff = (dt.utcnow() - timedelta(minutes=3)).isoformat()
+    students_enhanced = []
+    for s in students:
+        d = dict(s)
+        d['is_online'] = s['last_active_at'] and s['last_active_at'] > cutoff
+        students_enhanced.append(d)
     return render_template(
         'instructor.html',
-        course=course, teams=teams, students=students,
-        state=state, phases=PHASES, questions=questions
+        course=course, teams=teams, students=students_enhanced,
+        state=state, phases=PHASES, questions=questions,
+        max_teams=max_teams,
+        max_members=get_max_members_per_team(slug, course['id']),
+        teams_locked=teams_locked,
+        session_started_at=state['session_started_at'] if state and 'session_started_at' in state.keys() else None
     )
 
 
@@ -238,13 +299,21 @@ def instructor_course(slug):
 # Student API
 # ---------------------------------------------------------------------------
 
+def _get_slug_from_session():
+    if 'slug' in session:
+        return session['slug']
+    return None
+
+
 @app.route('/api/teams', methods=['GET'])
-@student_login_required
 def api_teams():
-    slug = session['slug']
+    slug = _get_slug_from_session()
+    if not slug or ('student_id' not in session and 'instructor_id' not in session):
+        return jsonify({'error': 'Not logged in'}), 401
     course = query_db(slug, 'SELECT * FROM courses LIMIT 1', one=True)
+    max_teams = get_max_teams(slug, course['id'])
     teams = query_db(slug,
-        'SELECT * FROM teams WHERE course_id = ? ORDER BY name', [course['id']]
+        'SELECT * FROM teams WHERE course_id = ? ORDER BY id LIMIT ?', [course['id'], max_teams]
     )
     result = []
     for t in teams:
@@ -266,7 +335,7 @@ def join_team():
     slug = session['slug']
     data = request.get_json()
     team_id = data.get('team_id')
-    if not team_id:
+    if team_id is None:
         return jsonify({'error': 'Team ID required'}), 400
     student = query_db(slug,
         'SELECT * FROM students WHERE student_id = ?',
@@ -274,12 +343,53 @@ def join_team():
     )
     if not student:
         return jsonify({'error': 'Student not found'}), 404
-    state = query_db(slug, 'SELECT phase FROM course_state LIMIT 1', one=True)
+    state = query_db(slug, 'SELECT phase, teams_locked FROM course_state LIMIT 1', one=True)
     if state['phase'] != 'setup':
         return jsonify({'error': 'Team selection is closed'}), 403
+    if state['teams_locked']:
+        return jsonify({'error': 'Teams are currently locked by the instructor'}), 403
+
+    # Leaving team (team_id = 0 means unassign)
+    if not team_id:
+        execute_db(slug, 'UPDATE students SET team_id = NULL WHERE id = ?', [student['id']])
+        return jsonify({'success': True})
+
+    # Check team capacity
+    course = query_db(slug, 'SELECT id FROM courses LIMIT 1', one=True)
+    max_members = get_max_members_per_team(slug, course['id'])
+    member_count = query_db(slug,
+        'SELECT COUNT(*) as c FROM students WHERE team_id = ?', [team_id], one=True
+    )
+    if member_count and member_count['c'] >= max_members:
+        # LIFO: kick the member who joined most recently
+        last_joiner = query_db(slug,
+            '''SELECT id FROM students
+               WHERE team_id = ? AND last_team_joined_at IS NOT NULL
+               ORDER BY last_team_joined_at DESC LIMIT 1''',
+            [team_id], one=True
+        )
+        if last_joiner:
+            execute_db(slug,
+                'UPDATE students SET team_id = NULL WHERE id = ?',
+                [last_joiner['id']]
+            )
+        else:
+            # Fallback: no join timestamps, kick any member
+            any_member = query_db(slug,
+                'SELECT id FROM students WHERE team_id = ? LIMIT 1',
+                [team_id], one=True
+            )
+            if any_member:
+                execute_db(slug,
+                    'UPDATE students SET team_id = NULL WHERE id = ?',
+                    [any_member['id']]
+                )
+
     execute_db(slug,
-        'UPDATE students SET team_id = ? WHERE id = ?',
-        [team_id, student['id']]
+        '''UPDATE students
+           SET team_id = ?, last_team_id = ?, last_team_joined_at = CURRENT_TIMESTAMP
+           WHERE id = ?''',
+        [team_id, team_id, student['id']]
     )
     return jsonify({'success': True})
 
@@ -498,9 +608,261 @@ def set_question():
     return jsonify({'success': True})
 
 
+@app.route('/api/set_max_teams', methods=['POST'])
+@instructor_login_required
+def set_max_teams():
+    slug = session['slug']
+    data = request.get_json()
+    new_max = data.get('max_teams')
+    if not isinstance(new_max, int) or new_max < 1 or new_max > 20:
+        return jsonify({'error': 'Team count must be between 1 and 20'}), 400
+    course = query_db(slug, 'SELECT id FROM courses LIMIT 1', one=True)
+    current_max = get_max_teams(slug, course['id'])
+    if new_max < current_max:
+        # Unassign students in teams beyond the new limit
+        teams_beyond = query_db(slug,
+            'SELECT id FROM teams WHERE course_id = ? ORDER BY id LIMIT -1 OFFSET ?',
+            [course['id'], new_max]
+        )
+        if teams_beyond:
+            ids = [t['id'] for t in teams_beyond]
+            placeholders = ','.join(['?'] * len(ids))
+            execute_db(slug,
+                f"UPDATE students SET team_id = NULL WHERE team_id IN ({placeholders})",
+                ids
+            )
+    execute_db(slug,
+        'UPDATE course_state SET max_teams = ? WHERE course_id = ?',
+        [new_max, course['id']]
+    )
+    return jsonify({'success': True, 'max_teams': new_max})
+
+
+@app.route('/api/random_assign', methods=['POST'])
+@instructor_login_required
+def random_assign():
+    slug = session['slug']
+    import random as rnd
+    course = query_db(slug, 'SELECT id FROM courses LIMIT 1', one=True)
+    max_teams = get_max_teams(slug, course['id'])
+    max_members = get_max_members_per_team(slug, course['id'])
+
+    teams = query_db(slug,
+        'SELECT id FROM teams WHERE course_id = ? ORDER BY id LIMIT ?',
+        [course['id'], max_teams]
+    )
+    if not teams:
+        return jsonify({'error': 'No teams available'}), 400
+
+    team_ids = [t['id'] for t in teams]
+    unassigned = query_db(slug,
+        'SELECT id FROM students WHERE course_id = ? AND team_id IS NULL',
+        [course['id']]
+    )
+    if not unassigned:
+        return jsonify({'success': True, 'assigned': 0})
+
+    student_ids = [s['id'] for s in unassigned]
+    rnd.shuffle(student_ids)
+
+    # Count current members per team
+    counts = {}
+    for tid in team_ids:
+        c = query_db(slug, 'SELECT COUNT(*) as c FROM students WHERE team_id = ?', [tid], one=True)
+        counts[tid] = c['c']
+
+    # Assign each student to the smallest team (fill evenly)
+    assigned = 0
+    for sid in student_ids:
+        # Find teams with the fewest members
+        min_count = min(counts.values())
+        candidates = [tid for tid in team_ids if counts[tid] == min_count and counts[tid] < max_members]
+        if not candidates:
+            # All teams at max, find any team below max
+            candidates = [tid for tid in team_ids if counts[tid] < max_members]
+        if not candidates:
+            break
+        tid = rnd.choice(candidates)
+        execute_db(slug,
+            'UPDATE students SET team_id = ?, last_team_id = ?, last_team_joined_at = CURRENT_TIMESTAMP WHERE id = ?',
+            [tid, tid, sid]
+        )
+        counts[tid] += 1
+        assigned += 1
+
+    return jsonify({'success': True, 'assigned': assigned})
+
+
+@app.route('/api/start_session_timer', methods=['POST'])
+@instructor_login_required
+def start_session_timer():
+    slug = session['slug']
+    course = query_db(slug, 'SELECT id FROM courses LIMIT 1', one=True)
+    execute_db(slug,
+        "UPDATE course_state SET session_started_at = CURRENT_TIMESTAMP WHERE course_id = ?",
+        [course['id']]
+    )
+    return jsonify({'success': True})
+
+
+@app.route('/api/stop_session_timer', methods=['POST'])
+@instructor_login_required
+def stop_session_timer():
+    slug = session['slug']
+    course = query_db(slug, 'SELECT id FROM courses LIMIT 1', one=True)
+    execute_db(slug,
+        "UPDATE course_state SET session_started_at = NULL WHERE course_id = ?",
+        [course['id']]
+    )
+    return jsonify({'success': True})
+
+
+@app.route('/api/set_discussion_week', methods=['POST'])
+@instructor_login_required
+def set_discussion_week():
+    slug = session['slug']
+    data = request.get_json()
+    week = data.get('week')
+    if not isinstance(week, int) or week < 1:
+        return jsonify({'error': 'Invalid week'}), 400
+    course = query_db(slug, 'SELECT id FROM courses LIMIT 1', one=True)
+    ensure_schema(slug)
+    execute_db(slug,
+        'UPDATE course_state SET discussion_week = ? WHERE course_id = ?',
+        [week, course['id']]
+    )
+    return jsonify({'success': True})
+
+
+@app.route('/api/toggle_lock_teams', methods=['POST'])
+@instructor_login_required
+def toggle_lock_teams():
+    slug = session['slug']
+    data = request.get_json()
+    locked = 1 if data.get('locked') else 0
+    course = query_db(slug, 'SELECT id FROM courses LIMIT 1', one=True)
+    if locked:
+        execute_db(slug,
+            'UPDATE course_state SET teams_locked = 1 WHERE course_id = ?',
+            [course['id']]
+        )
+    else:
+        execute_db(slug,
+            'UPDATE course_state SET teams_locked = 0 WHERE course_id = ?',
+            [course['id']]
+        )
+    return jsonify({'success': True, 'locked': bool(locked)})
+
+
+@app.route('/api/set_max_members', methods=['POST'])
+@instructor_login_required
+def set_max_members():
+    slug = session['slug']
+    data = request.get_json()
+    new_max = data.get('max_members')
+    if not isinstance(new_max, int) or new_max < 1 or new_max > 99:
+        return jsonify({'error': 'Max members must be between 1 and 99'}), 400
+    course = query_db(slug, 'SELECT id FROM courses LIMIT 1', one=True)
+
+    # If reducing, unassign excess members from affected teams
+    current_max = get_max_members_per_team(slug, course['id'])
+    if new_max < current_max:
+        # Find teams with more than new_max members
+        full_teams = query_db(slug,
+            '''SELECT team_id, COUNT(*) as cnt FROM students
+               WHERE team_id IS NOT NULL GROUP BY team_id HAVING cnt > ?''',
+            [new_max]
+        )
+        for ft in full_teams:
+            # LIFO: remove the most recent joiners first
+            excess = query_db(slug,
+                '''SELECT id FROM students WHERE team_id = ?
+                   ORDER BY last_team_joined_at DESC NULLS LAST LIMIT ?''',
+                [ft['team_id'], ft['cnt'] - new_max]
+            )
+            for s in excess:
+                execute_db(slug, 'UPDATE students SET team_id = NULL WHERE id = ?', [s['id']])
+
+    execute_db(slug,
+        'UPDATE course_state SET max_members_per_team = ? WHERE course_id = ?',
+        [new_max, course['id']]
+    )
+    return jsonify({'success': True, 'max_members': new_max})
+
+
 # ---------------------------------------------------------------------------
 # Question Bank API
 # ---------------------------------------------------------------------------
+
+@app.route('/api/discussion_questions', methods=['GET'])
+@instructor_login_required
+def discussion_questions():
+    """Load questions from weekly .md files in the course's classes folder."""
+    slug = session['slug']
+    import glob as glob_mod
+    import re
+
+    class_dir = os.path.join(config.CLASSES_DIR, slug)
+    question_files = sorted(
+        [os.path.basename(f) for f in glob_mod.glob(os.path.join(class_dir, 'week-*-questions.md'))]
+    )
+
+    # Get saved week from course_state, or use request param, or default to first
+    week_param = request.args.get('week')
+    course = query_db(slug, 'SELECT id FROM courses LIMIT 1', one=True)
+    ensure_schema(slug)
+    state = query_db(slug, 'SELECT discussion_week FROM course_state WHERE course_id = ?', [course['id']], one=True)
+    saved_week = state['discussion_week'] if state and state['discussion_week'] else 1
+
+    questions_list = []
+    weeks = []
+
+    for qf in question_files:
+        m = re.match(r'week-(\d+)-questions\.md', qf)
+        wnum = int(m.group(1)) if m else 0
+        weeks.append({'num': wnum, 'file': qf})
+
+    if week_param and weeks:
+        target = next((w for w in weeks if str(w['num']) == str(week_param)), weeks[0])
+    elif weeks:
+        target = next((w for w in weeks if w['num'] == saved_week), weeks[0])
+    else:
+        target = None
+
+    if target:
+        filepath = os.path.join(class_dir, target['file'])
+        try:
+            with open(filepath, 'r', encoding='utf-8') as f:
+                content = f.read()
+            # Parse YAML frontmatter blocks separated by ---
+            import yaml
+            content = content.lstrip('-').lstrip()
+            blocks = content.split('\n---\n')
+            # Blocks alternate: [fm1, body1, fm2, body2, ...]
+            i = 0
+            while i + 1 < len(blocks):
+                fm_block = blocks[i].strip()
+                body_block = blocks[i + 1].strip()
+                if fm_block:
+                    try:
+                        fm = yaml.safe_load(fm_block)
+                        if fm and fm.get('title'):
+                            questions_list.append({
+                                'title': fm.get('title', 'Untitled'),
+                                'content': body_block
+                            })
+                    except Exception:
+                        pass
+                i += 2
+        except Exception as e:
+            return jsonify({'error': str(e)}), 500
+
+    return jsonify({
+        'weeks': weeks,
+        'current_week': target['num'] if target else None,
+        'questions': questions_list
+    })
+
 
 @app.route('/api/questions', methods=['GET'])
 @instructor_login_required
@@ -545,6 +907,54 @@ def delete_question(qid):
 # ---------------------------------------------------------------------------
 # Competition / Presentation Control API
 # ---------------------------------------------------------------------------
+
+@app.route('/api/upload_roster', methods=['POST'])
+@instructor_login_required
+def upload_roster():
+    slug = session['slug']
+    course = query_db(slug, 'SELECT id FROM courses LIMIT 1', one=True)
+    if 'file' not in request.files:
+        return jsonify({'error': 'No file uploaded'}), 400
+    file = request.files['file']
+    if file.filename == '' or not file.filename.endswith('.csv'):
+        return jsonify({'error': 'Please upload a CSV file'}), 400
+    try:
+        content = file.read().decode('utf-8')
+        reader = csv.reader(io.StringIO(content))
+        rows = list(reader)
+    except Exception:
+        return jsonify({'error': 'Failed to read CSV file'}), 400
+
+    if not rows or rows[0][:3] != ['student_id', 'name', 'pin']:
+        return jsonify({'error': 'CSV must have columns: student_id, name, pin'}), 400
+
+    added, updated = 0, 0
+    for row in rows[1:]:
+        if not row or not row[0].strip():
+            continue
+        sid = row[0].strip()
+        name = row[1].strip() if len(row) > 1 else ''
+        pin = row[2].strip() if len(row) > 2 and row[2].strip() else sid[-4:]  # default PIN: last 4 chars of student_id
+
+        existing = query_db(slug,
+            'SELECT id FROM students WHERE student_id = ? AND course_id = ?',
+            [sid, course['id']], one=True
+        )
+        if existing:
+            execute_db(slug,
+                'UPDATE students SET name = ?, pin = ? WHERE id = ?',
+                [name or None, pin, existing['id']]
+            )
+            updated += 1
+        else:
+            execute_db(slug,
+                'INSERT INTO students (course_id, student_id, name, pin) VALUES (?, ?, ?, ?)',
+                [course['id'], sid, name or None, pin]
+            )
+            added += 1
+
+    return jsonify({'success': True, 'added': added, 'updated': updated})
+
 
 @app.route('/api/start_presentation', methods=['POST'])
 @instructor_login_required
@@ -596,6 +1006,80 @@ def next_presentation():
     return jsonify({'success': True})
 
 
+@app.route('/api/students', methods=['GET'])
+@instructor_login_required
+def api_students():
+    slug = session['slug']
+    course = query_db(slug, 'SELECT id FROM courses LIMIT 1', one=True)
+    page = request.args.get('page', 1, type=int)
+    per_page = request.args.get('per_page', 10, type=int)
+    sort_col = request.args.get('sort', 'student_id')
+    order = request.args.get('order', 'asc')
+    search = request.args.get('search', '').strip()
+    team_filter = request.args.get('team', '')
+
+    allowed_sorts = {'student_id': 's.student_id', 'name': 's.name', 'last_active_at': 's.last_active_at'}
+    if sort_col not in allowed_sorts:
+        sort_col = 'student_id'
+    sort_sql = allowed_sorts[sort_col]
+    order_sql = 'DESC' if order == 'desc' else 'ASC'
+
+    from datetime import datetime as dt, timedelta
+    cutoff = (dt.utcnow() - timedelta(minutes=3)).isoformat()
+
+    where_clause = ''
+    params = [course['id']]
+    if search:
+        where_clause += ' AND s.student_id LIKE ?'
+        params.append(f'%{search}%')
+    if team_filter == 'none':
+        where_clause += ' AND s.team_id IS NULL'
+    elif team_filter:
+        where_clause += ' AND s.team_id = ?'
+        params.append(int(team_filter))
+
+    count = query_db(slug,
+        f'SELECT COUNT(*) as c FROM students s WHERE s.course_id = ? {where_clause}',
+        params, one=True
+    )
+    total = count['c']
+    total_pages = max(1, (total + per_page - 1) // per_page)
+    offset = (page - 1) * per_page
+
+    rows = query_db(slug,
+        f'''SELECT s.id, s.student_id, s.name, s.pin, s.team_id,
+                   t.name as team_name, t.color as team_color,
+                   s.last_login_at, s.last_active_at, s.last_team_joined_at
+            FROM students s LEFT JOIN teams t ON s.team_id = t.id
+            WHERE s.course_id = ? {where_clause}
+            ORDER BY {sort_sql} {order_sql}
+            LIMIT ? OFFSET ?''',
+        params + [per_page, offset]
+    )
+
+    students = []
+    for r in rows:
+        d = dict(r)
+        d['is_online'] = r['last_active_at'] and r['last_active_at'] > cutoff
+        students.append(d)
+
+    max_teams = get_max_teams(slug, course['id'])
+    teams = query_db(slug,
+        'SELECT id, name, color FROM teams WHERE course_id = ? ORDER BY id LIMIT ?',
+        [course['id'], max_teams]
+    )
+
+    return jsonify({
+        'students': students,
+        'teams': [dict(t) for t in teams],
+        'page': page,
+        'total_pages': total_pages,
+        'total': total,
+        'sort': sort_col,
+        'order': order
+    })
+
+
 @app.route('/api/add_student', methods=['POST'])
 @instructor_login_required
 def add_student():
@@ -614,6 +1098,30 @@ def add_student():
         )
     except Exception:
         return jsonify({'error': 'Student ID already exists in this course'}), 400
+    return jsonify({'success': True})
+
+
+@app.route('/api/assign_student', methods=['POST'])
+@instructor_login_required
+def assign_student():
+    slug = session['slug']
+    data = request.get_json()
+    student_id = data.get('student_id')  # DB row id
+    team_id = data.get('team_id')  # None or '' to unassign
+    if not student_id:
+        return jsonify({'error': 'Student ID required'}), 400
+
+    if team_id:
+        team = query_db(slug, 'SELECT id FROM teams WHERE id = ?', [team_id], one=True)
+        if not team:
+            return jsonify({'error': 'Team not found'}), 404
+
+    execute_db(slug,
+        '''UPDATE students
+           SET team_id = ?, last_team_id = ?, last_team_joined_at = CURRENT_TIMESTAMP
+           WHERE id = ?''',
+        [team_id or None, team_id or None, student_id]
+    )
     return jsonify({'success': True})
 
 
@@ -657,16 +1165,25 @@ def export_data(slug):
     writer.writerow(['Course', course['name']])
     writer.writerow(['Code', course['code'] or ''])
     writer.writerow(['Exported at', datetime.now().isoformat()])
+    state = query_db(slug, 'SELECT * FROM course_state WHERE course_id = ?', [course['id']], one=True)
+    if state and state['session_started_at']:
+        writer.writerow(['Session started', state['session_started_at']])
     writer.writerow([])
 
     writer.writerow(['--- STUDENTS ---'])
-    writer.writerow(['student_id', 'name', 'team'])
+    writer.writerow(['student_id', 'name', 'pin', 'current_team', 'joined_current_team_at', 'last_login_at'])
     for row in query_db(slug,
-        '''SELECT s.student_id, s.name, t.name as team
+        '''SELECT s.student_id, s.name, s.pin, t.name as current_team,
+                  s.last_team_joined_at, s.last_login_at
            FROM students s LEFT JOIN teams t ON s.team_id = t.id
            ORDER BY s.name'''
     ):
-        writer.writerow([row['student_id'], row['name'], row['team'] or ''])
+        writer.writerow([
+            row['student_id'], row['name'] or '', row['pin'],
+            row['current_team'] or '',
+            row['last_team_joined_at'] or '' if row['current_team'] else '',
+            row['last_login_at'] or ''
+        ])
     writer.writerow([])
 
     writer.writerow(['--- PEER REVIEWS ---'])

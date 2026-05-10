@@ -3,98 +3,154 @@
 {% block title %}Instructor - {{ course.name }}{% endblock %}
 
 {% block content %}
-<div class="instructor" data-slug="{{ course.slug }}" data-presentation-started="{{ state.presentation_started_at or '' }}">
+<div class="instructor" data-slug="{{ course.slug }}" data-presentation-started="{{ state.presentation_started_at or '' }}" data-session-started="{{ session_started_at or '' }}">
     <header class="dash-header">
         <div>
             <h1>{{ course.name }}</h1>
             <p class="course-name-sm">{{ course.code or '' }} {{ course.semester or '' }}</p>
         </div>
-        <div class="phase-badge phase-{{ state.phase }}">
-            Phase: {{ state.phase.upper() }}
-        </div>
     </header>
 
-    <div class="top-nav">
-        <a href="{{ url_for('index') }}" class="btn btn-sm btn-secondary">← Course Selection</a>
-    </div>
-
-    <!-- Competition Control -->
+    <!-- Phase Control -->
     <section class="card">
-        <h2>🎯 Competition Control</h2>
-        <div class="competition-control">
-            {% if state.active_team_id and state.active_question_id %}
-            <!-- Presentation is active -->
-            <div class="timer-display" id="instructor-timer">
-                <span class="timer-label">⏱️ Elapsed:</span>
-                <span class="timer-value" id="timer-value">00:00</span>
-            </div>
-            <div class="active-info" id="active-info">
-                <div class="info-row">
-                    <span class="info-label">Presenting:</span>
-                    <span class="info-value" id="active-team-name">
-                        {% for t in teams %}{% if t.id == state.active_team_id %}{{ t.name }}{% endif %}{% endfor %}
-                    </span>
+        <div class="phase-header">
+            <h2>Phase Control</h2>
+            <div class="phase-header-right">
+                <div class="session-timer" id="session-timer">
+                    <span class="timer-label">⏱ Session</span>
+                    <span class="timer-value-large" id="session-timer-value">00:00</span>
                 </div>
-                <div class="info-row">
-                    <span class="info-label">Question:</span>
-                    <span class="info-value" id="active-question-text">
-                        {% for q in questions %}{% if q.id == state.active_question_id %}#{{ q.question_num }}: {{ q.question_text }}{% endif %}{% endfor %}
-                    </span>
-                </div>
+                <span class="phase-badge phase-{{ state.phase }}">Current: {{ state.phase | phase_label }}</span>
             </div>
-            <div class="comp-actions">
-                <button class="btn btn-secondary" id="btn-stop" onclick="stopPresentation()">⏹ Stop Timer</button>
-                <button class="btn btn-danger" id="btn-next" onclick="nextPresentation()">⏭ Next Team</button>
-            </div>
-            {% else %}
-            <!-- No active presentation -->
-            <div class="form-row">
-                <div class="form-group">
-                    <label>Select Team</label>
-                    <select id="comp-team">
-                        <option value="">-- Choose team --</option>
-                        {% for t in teams %}
-                        <option value="{{ t.id }}">{{ t.name }}</option>
-                        {% endfor %}
-                    </select>
-                </div>
-                <div class="form-group">
-                    <label>Select Question</label>
-                    <select id="comp-question">
-                        <option value="">-- Choose question --</option>
-                        {% for q in questions %}
-                        <option value="{{ q.id }}">#{{ q.question_num }}: {{ q.question_text[:60] }}{% if q.question_text|length > 60 %}...{% endif %}</option>
-                        {% endfor %}
-                    </select>
-                </div>
-            </div>
-            <div class="timer-display" id="instructor-timer">
-                <span class="timer-label">⏱️ Elapsed:</span>
-                <span class="timer-value" id="timer-value">00:00</span>
-            </div>
-            <div class="comp-actions">
-                <button class="btn btn-primary btn-full" id="btn-start" onclick="startPresentation()">▶ Start Presentation</button>
-            </div>
-            {% endif %}
         </div>
-    </section>
-
-    <!-- Phase Control (compact) -->
-    <section class="card">
-        <h2>Phase Control</h2>
         <div class="phase-buttons">
             {% for p in phases %}
             <button class="btn phase-btn {% if state.phase == p %}active{% endif %}"
                     data-phase="{{ p }}" onclick="setPhase('{{ p }}')">
-                {{ p.upper() }}
+                {{ p | phase_label }}
             </button>
             {% endfor %}
         </div>
+        {% if state.phase == 'setup' %}
+        <div class="phase-settings">
+            <div class="team-count-control">
+                <span class="team-count-label">Teams:</span>
+                <span class="team-count-value" id="team-count-display">{{ max_teams }}</span>
+                <button class="btn btn-sm btn-secondary" id="btn-modify-teams" onclick="startModifyTeams()">Modify</button>
+            </div>
+            <div class="team-count-control">
+                <span class="team-count-label">Max per team:</span>
+                <span class="team-count-value" id="max-members-display">{{ max_members }}</span>
+                <button class="btn btn-sm btn-secondary" id="btn-modify-members" onclick="startModifyMembers()">Modify</button>
+            </div>
+            <div class="week-selector" id="setup-week-selector">
+                <span class="week-label">Discussion week</span>
+                <select id="setup-week-select" onchange="setDiscussionWeek()">
+                    <option value="">Loading...</option>
+                </select>
+            </div>
+        </div>
+            <div class="phase-settings phase-settings-secondary">
+                <button class="btn btn-sm {% if teams_locked %}btn-danger{% else %}btn-primary{% endif %}" onclick="toggleLock()">
+                    {% if teams_locked %}Unlock Teams{% else %}Lock Teams{% endif %}
+                </button>
+                <button class="btn btn-sm {% if session_started_at %}btn-danger{% else %}btn-primary{% endif %}" id="btn-session-timer" onclick="toggleSessionTimer()">
+                    {% if session_started_at %}Stop Timer{% else %}Start Timer{% endif %}
+                </button>
+            </div>
+        {% endif %}
     </section>
 
-    <!-- Question Bank -->
+    <!-- ===== SETUP PHASE ===== -->
+    {% if state.phase == 'setup' %}
+
     <section class="card">
-        <h2>📝 Question Bank</h2>
+        <div class="card-header-row">
+            <h2>Team and Members</h2>
+            <button class="btn btn-sm btn-primary" onclick="randomAssign()">Assign Remaining</button>
+        </div>
+        <div class="roster-grid">
+            {% for t in teams[:max_teams] %}
+            <div class="roster-team">
+                <h3><span class="team-dot" style="background:{{ t.color }}"></span>{{ t.name }}</h3>
+                {% set team_students = students | selectattr('team_id', 'equalto', t.id) | list %}
+                {% if team_students %}
+                    {% for s in team_students %}
+                    <div class="roster-member">
+                        <span class="team-dot" style="background:{{ t.color }}"></span>
+                        {{ s | display_name }}
+                    </div>
+                    {% endfor %}
+                {% else %}
+                    <em>No members</em>
+                {% endif %}
+            </div>
+            {% endfor %}
+        </div>
+        {% set unassigned = students | selectattr('team_id', 'none') | list %}
+        {% if unassigned %}
+        <p class="hint" style="margin-top:12px;">{{ unassigned|length }} student{{ 's' if unassigned|length != 1 else '' }} unassigned</p>
+        {% endif %}
+    </section>
+
+    <section class="card">
+        <h2>Student Management</h2>
+        <div class="add-student-form">
+            <input type="text" id="new-student-id" placeholder="Student ID" required>
+            <input type="text" id="new-name" placeholder="Name (optional)">
+            <input type="text" id="new-pin" placeholder="PIN" required>
+            <button class="btn btn-primary" onclick="addStudent()">Add Student</button>
+        </div>
+
+        <div class="table-toolbar">
+            <input type="text" id="student-search" placeholder="Search by ID..." oninput="loadStudentTable()">
+            <div class="filter-group">
+                <span class="filter-label">Filter by team</span>
+                <div class="filter-dropdown" id="team-filter-dropdown">
+                    <button class="filter-btn" onclick="toggleTeamFilter(event)">
+                        <span id="team-filter-label">All</span> ▾
+                    </button>
+                    <div class="team-picker filter-picker" id="team-filter-menu" style="display:none;">
+                        <div class="team-picker-item" onclick="setTeamFilter('', 'All')">All</div>
+                        {% for t in teams[:max_teams] %}
+                        <div class="team-picker-item" style="border-left:3px solid {{ t.color }}" onclick="setTeamFilter('{{ t.id }}', '{{ t.name }}')">{{ t.name }}</div>
+                        {% endfor %}
+                        <div class="team-picker-item" onclick="setTeamFilter('none', 'Unassigned')">Unassigned</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        <div class="table-wrapper">
+            <table class="data-table" id="student-table">
+                <thead>
+                    <tr>
+                        <th class="sortable" data-sort="student_id" onclick="sortStudents('student_id')">ID <span class="sort-arrow"></span></th>
+                        <th class="sortable" data-sort="name" onclick="sortStudents('name')">Name <span class="sort-arrow"></span></th>
+                        <th>Team</th>
+                        <th class="sortable" data-sort="last_active_at" onclick="sortStudents('last_active_at')">Status <span class="sort-arrow"></span></th>
+                        <th>Last Login</th>
+                        <th>Action</th>
+                    </tr>
+                </thead>
+                <tbody id="student-tbody">
+                </tbody>
+            </table>
+        </div>
+        <div class="pagination" id="student-pagination"></div>
+    </section>
+
+    <!-- ===== DISCUSSION PHASE ===== -->
+    {% elif state.phase == 'discussion' %}
+
+    <section class="card">
+        <h2>Discussion Questions</h2>
+        <div class="disc-questions-list" id="disc-questions-list">
+            <p class="loading">Loading questions...</p>
+        </div>
+    </section>
+
+    <section class="card">
+        <h2>📝 Question Bank (Manual)</h2>
         <div class="add-student-form">
             <input type="text" id="new-question" placeholder="Enter question text..." style="flex:3">
             <button class="btn btn-primary" onclick="addQuestion()">Add Question</button>
@@ -127,55 +183,89 @@
         </div>
     </section>
 
-    <!-- Student Management -->
-    <section class="card">
-        <h2>Student Management</h2>
-        <div class="add-student-form">
-            <input type="text" id="new-student-id" placeholder="Student ID" required>
-            <input type="text" id="new-name" placeholder="Name (optional)">
-            <input type="text" id="new-pin" placeholder="PIN" required>
-            <button class="btn btn-primary" onclick="addStudent()">Add Student</button>
-        </div>
+    <!-- ===== COMPETITION PHASE ===== -->
+    {% elif state.phase == 'competition' %}
 
-        <div class="table-wrapper">
-            <table class="data-table">
-                <thead>
-                    <tr>
-                        <th>ID</th>
-                        <th>Name</th>
-                        <th>Team</th>
-                        <th>Action</th>
-                    </tr>
-                </thead>
-                <tbody id="student-table">
-                    {% for s in students %}
-                    <tr data-id="{{ s.id }}">
-                        <td>{{ s.student_id }}</td>
-                        <td>{{ s | display_name }}</td>
-                        <td>
-                            {% if s.team_name %}
-                                <span class="team-tag" style="background: {{ s.team_color or '#ccc' }}">
-                                    {{ s.team_name }}
-                                </span>
-                            {% else %}
-                                <em>Unassigned</em>
-                            {% endif %}
-                        </td>
-                        <td>
-                            <button class="btn btn-sm btn-danger" onclick="removeStudent({{ s.id }})">Remove</button>
-                        </td>
-                    </tr>
-                    {% endfor %}
-                </tbody>
-            </table>
+    <section class="card">
+        <h2>🎯 Competition Control</h2>
+        <div class="competition-control">
+            {% if state.active_team_id and state.active_question_id %}
+            <div class="timer-display" id="instructor-timer">
+                <span class="timer-label">⏱️ Elapsed:</span>
+                <span class="timer-value" id="timer-value">00:00</span>
+            </div>
+            <div class="active-info" id="active-info">
+                <div class="info-row">
+                    <span class="info-label">Presenting:</span>
+                    <span class="info-value" id="active-team-name">
+                        {% for t in teams %}{% if t.id == state.active_team_id %}{{ t.name }}{% endif %}{% endfor %}
+                    </span>
+                </div>
+                <div class="info-row">
+                    <span class="info-label">Question:</span>
+                    <span class="info-value" id="active-question-text">
+                        {% for q in questions %}{% if q.id == state.active_question_id %}#{{ q.question_num }}: {{ q.question_text }}{% endif %}{% endfor %}
+                    </span>
+                </div>
+            </div>
+            <div class="comp-actions">
+                <button class="btn btn-secondary" id="btn-stop" onclick="stopPresentation()">⏹ Stop Timer</button>
+                <button class="btn btn-danger" id="btn-next" onclick="nextPresentation()">⏭ Next Team</button>
+            </div>
+            {% else %}
+            <div class="form-row">
+                <div class="form-group">
+                    <label>Select Team</label>
+                    <select id="comp-team">
+                        <option value="">-- Choose team --</option>
+                        {% for t in teams[:max_teams] %}
+                        <option value="{{ t.id }}">{{ t.name }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>Select Question</label>
+                    <select id="comp-question">
+                        <option value="">-- Choose question --</option>
+                        {% for q in questions %}
+                        <option value="{{ q.id }}">#{{ q.question_num }}: {{ q.question_text[:60] }}{% if q.question_text|length > 60 %}...{% endif %}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+            </div>
+            <div class="timer-display" id="instructor-timer">
+                <span class="timer-label">⏱️ Elapsed:</span>
+                <span class="timer-value" id="timer-value">00:00</span>
+            </div>
+            <div class="comp-actions">
+                <button class="btn btn-primary btn-full" id="btn-start" onclick="startPresentation()">▶ Start Presentation</button>
+            </div>
+            {% endif %}
         </div>
     </section>
 
+    <!-- ===== GRADING PHASE ===== -->
+    {% elif state.phase == 'grading' %}
+
     <section class="card">
-        <h2>Data Export</h2>
-        <p class="hint">Download all grades and responses for this course as CSV.</p>
+        <h2>📊 Grading</h2>
+        <p class="hint">Students are submitting team grades. Use the export to download results.</p>
+        <div class="comp-actions">
+            <button class="btn btn-danger" onclick="resetData()">Reset Course Data</button>
+        </div>
+    </section>
+
+    <!-- ===== ENDED PHASE ===== -->
+    {% elif state.phase == 'ended' %}
+
+    <section class="card">
+        <h2>🏁 Class Ended</h2>
+        <p class="hint">The class session has ended. Download the CSV export for your records.</p>
         <a href="{{ url_for('export_data', slug=course.slug) }}" class="btn btn-primary">Download CSV</a>
         <button class="btn btn-danger" onclick="resetData()">Reset Course Data</button>
     </section>
+
+    {% endif %}
+
 </div>
 {% endblock %}
