@@ -931,20 +931,39 @@ window.startPresentation = async function() {
 window.stopPresentation = async function() {
     const data = await postJSON('/api/stop_presentation', {});
     if (data.success) {
-        document.getElementById('btn-stop').style.display = 'none';
-        document.getElementById('btn-resume').style.display = '';
+        const btnPause = document.getElementById('btn-pause');
+        const btnResume = document.getElementById('btn-resume');
+        if (btnPause) btnPause.style.display = 'none';
+        if (btnResume) btnResume.style.display = '';
         stopCountdownTimer();
         const tv = document.getElementById('timer-value');
-        if (tv && data.remaining) tv.textContent = formatDuration(data.remaining);
+        if (tv && data.remaining != null) tv.textContent = formatDuration(data.remaining);
     }
 };
 
 window.resumePresentation = async function() {
     const data = await postJSON('/api/resume_presentation', {});
     if (data.success) {
-        document.getElementById('btn-stop').style.display = '';
-        document.getElementById('btn-resume').style.display = 'none';
-        window.location.reload();
+        const btnPause = document.getElementById('btn-pause');
+        const btnResume = document.getElementById('btn-resume');
+        if (btnPause) btnPause.style.display = '';
+        if (btnResume) btnResume.style.display = 'none';
+        // Start countdown locally — no page reload needed
+        startCountdownTimer(data.remaining);
+    }
+};
+
+window.resetTimer = async function() {
+    if (!confirm('Reset timer to full time?')) return;
+    const data = await postJSON('/api/reset_presentation_timer', {});
+    if (data.success) {
+        const btnPause = document.getElementById('btn-pause');
+        const btnResume = document.getElementById('btn-resume');
+        if (btnPause) btnPause.style.display = 'none';
+        if (btnResume) btnResume.style.display = '';
+        stopCountdownTimer();
+        const tv = document.getElementById('timer-value');
+        if (tv) tv.textContent = formatDuration(data.cap);
     }
 };
 
@@ -1099,10 +1118,12 @@ function stopCountdownTimer() {
 }
 
 function startTimer(startedAt) {
-    // Legacy: now uses countdown from state
-    const startTime = new Date(startedAt).getTime();
+    // FIX: append 'Z' — SQLite CURRENT_TIMESTAMP is UTC
+    const startTime = new Date(startedAt.replace(' ', 'T') + 'Z').getTime();
     const elapsed = Math.floor((Date.now() - startTime) / 1000);
-    startCountdownTimer(Math.max(0, 300 - elapsed));
+    const instructorEl = document.querySelector('.instructor[data-slug]');
+    const cap = instructorEl ? parseInt(instructorEl.dataset.presentationTimeCap || '300', 10) : 300;
+    startCountdownTimer(Math.max(0, cap - elapsed));
 }
 
 function stopTimer() {
@@ -1120,13 +1141,20 @@ if (instructorEl) {
     const presRemaining = instructorEl.dataset.presentationRemaining;
     const presCap = parseInt(instructorEl.dataset.presentationTimeCap || '300', 10);
     if (presStarted) {
-        const startTime = new Date(presStarted.replace(' ', 'T')).getTime();
+        // FIX: append 'Z' — SQLite CURRENT_TIMESTAMP is UTC
+        const startTime = new Date(presStarted.replace(' ', 'T') + 'Z').getTime();
         const elapsed = Math.floor((Date.now() - startTime) / 1000);
         startCountdownTimer(Math.max(0, presCap - elapsed));
+        const btnStop = document.getElementById('btn-pause');
+        const btnResume = document.getElementById('btn-resume');
+        if (btnStop) btnStop.style.display = '';
+        if (btnResume) btnResume.style.display = 'none';
     } else if (presRemaining) {
         document.getElementById('timer-value').textContent = formatDuration(parseInt(presRemaining, 10));
-        document.getElementById('btn-stop').style.display = 'none';
-        document.getElementById('btn-resume').style.display = '';
+        const btnStop = document.getElementById('btn-pause');
+        const btnResume = document.getElementById('btn-resume');
+        if (btnStop) btnStop.style.display = 'none';
+        if (btnResume) btnResume.style.display = '';
     }
     // Session timer
     const sessionStartDb = instructorEl.dataset.sessionStarted;

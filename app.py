@@ -1365,7 +1365,7 @@ def stop_presentation():
 @app.route('/api/resume_presentation', methods=['POST'])
 @instructor_login_required
 def resume_presentation():
-    """Resume a paused presentation — remaining time becomes the new cap."""
+    """Resume a paused presentation — keep original cap, shift started_at."""
     slug = session['slug']
     state = query_db(slug, 'SELECT * FROM course_state LIMIT 1', one=True)
     if not state:
@@ -1374,14 +1374,42 @@ def resume_presentation():
     if remaining is None or remaining <= 0:
         return jsonify({'error': 'No remaining time to resume'}), 400
     course = query_db(slug, 'SELECT id FROM courses LIMIT 1', one=True)
+    cap = state['presentation_time_cap'] or 300
+    # Shift started_at back so that cap - elapsed == remaining
+    # elapsed = cap - remaining, so started_at = now - (cap - remaining)
+    consumed = cap - remaining
+    from datetime import timedelta
+    shifted_start = datetime.utcnow() - timedelta(seconds=consumed)
     execute_db(slug,
         '''UPDATE course_state
-           SET presentation_started_at = CURRENT_TIMESTAMP,
-               presentation_time_cap = ?, presentation_remaining = NULL
+           SET presentation_started_at = ?,
+               presentation_remaining = NULL
            WHERE course_id = ?''',
-        [remaining, course['id']]
+        [shifted_start.strftime('%Y-%m-%d %H:%M:%S'), course['id']]
     )
-    return jsonify({'success': True})
+    return jsonify({'success': True, 'remaining': remaining})
+
+
+@app.route('/api/reset_presentation_timer', methods=['POST'])
+@instructor_login_required
+def reset_presentation_timer():
+    """Reset the timer to the original time cap (paused state)."""
+    slug = session['slug']
+    state = query_db(slug, 'SELECT * FROM course_state LIMIT 1', one=True)
+    if not state:
+        return jsonify({'error': 'No state'}), 400
+    if not state['active_team_id']:
+        return jsonify({'error': 'No active presentation'}), 400
+    course = query_db(slug, 'SELECT id FROM courses LIMIT 1', one=True)
+    cap = state['presentation_time_cap'] or 300
+    execute_db(slug,
+        '''UPDATE course_state
+           SET presentation_started_at = NULL,
+               presentation_remaining = ?
+           WHERE course_id = ?''',
+        [cap, course['id']]
+    )
+    return jsonify({'success': True, 'cap': cap})
 
 
 @app.route('/api/next_presentation', methods=['POST'])

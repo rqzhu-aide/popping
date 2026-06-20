@@ -995,6 +995,30 @@ input:focus, textarea:focus {
     color: var(--text);
 }
 
+.timer-box {
+    background: var(--timer-bg);
+    border-radius: 12px;
+    padding: 16px 20px;
+    margin-bottom: 16px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    flex-wrap: wrap;
+}
+.timer-box .timer-display {
+    background: transparent;
+    padding: 4px 0;
+}
+.timer-controls {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+.timer-controls .btn {
+    min-width: 100px;
+}
+
 .comp-actions {
     display: flex;
     gap: 10px;

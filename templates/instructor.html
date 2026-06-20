@@ -21,7 +21,8 @@
         <div class="phase-header">
             <h2>Phase Control</h2>
             <div class="phase-header-right">
-                <div class="session-timer" id="session-timer">
+                <div class="session-timer" id="session-timer"
+                     style="{% if state.phase in ['competition', 'ended', 'grading'] %}display:none{% endif %}">
                     <span class="timer-label">⏱ Session</span>
                     <span class="timer-value-large" id="session-timer-value">00:00</span>
                 </div>
@@ -179,10 +180,17 @@
         <h2>🎯 Group Presentation</h2>
         <div class="competition-control">
             {% if state.active_team_id and state.active_question_id %}
-            {# --- Active presentation --- #}
-            <div class="timer-display" id="instructor-timer">
-                <span class="timer-label">⏱ Remaining:</span>
-                <span class="timer-value" id="timer-value">--:--</span>
+            {# --- Active presentation with unified timer --- #}
+            <div class="timer-box" id="timer-box">
+                <div class="timer-display" id="instructor-timer">
+                    <span class="timer-label">⏱ Timer</span>
+                    <span class="timer-value" id="timer-value">--:--</span>
+                </div>
+                <div class="timer-controls">
+                    <button class="btn btn-warning" id="btn-pause" onclick="stopPresentation()">⏸ Pause</button>
+                    <button class="btn btn-primary" id="btn-resume" onclick="resumePresentation()" style="display:none">▶ Resume</button>
+                    <button class="btn btn-secondary" id="btn-reset" onclick="resetTimer()">↻ Reset</button>
+                </div>
             </div>
             <div class="active-info" id="active-info">
                 <div class="info-row">
@@ -200,8 +208,6 @@
             </div>
 
             <div class="comp-actions">
-                <button class="btn btn-warning" id="btn-stop" onclick="stopPresentation()">⏸ Pause</button>
-                <button class="btn btn-primary" id="btn-resume" onclick="resumePresentation()" style="display:none">▶ Resume</button>
                 <button class="btn btn-secondary" id="btn-start-poll" onclick="startPoll()">⭐ Start Poll</button>
                 <button class="btn btn-danger" id="btn-next" onclick="nextPresentation()">⏭ Next</button>
             </div>
