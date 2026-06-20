@@ -74,21 +74,29 @@ def init_demo_db():
             (course_id, name, color)
         )
 
-    # 12 students, 3 per team
+    # 20 students, 5 per team
     students_data = [
         # (student_id, name, team_index)
         ('demo001', 'Alice Chen',     0),
         ('demo002', 'Bob Garcia',     0),
         ('demo003', 'Cara Singh',     0),
-        ('demo004', 'Dan Park',       1),
-        ('demo005', 'Eva Müller',     1),
+        ('demo004', 'Derek Wright',   0),
+        ('demo005', 'Eva Müller',     0),
         ('demo006', 'Finn O\'Brien',  1),
-        ('demo007', 'Gina Rossi',     2),
-        ('demo008', 'Hiro Tanaka',    2),
-        ('demo009', 'Iris Novak',     2),
-        ('demo010', 'Jay Kim',        3),
-        ('demo011', 'Kira Patel',     3),
-        ('demo012', 'Leo Silva',      3),
+        ('demo007', 'Gina Rossi',     1),
+        ('demo008', 'Hiro Tanaka',    1),
+        ('demo009', 'Iris Novak',     1),
+        ('demo010', 'Jasper Lee',     1),
+        ('demo011', 'Kira Patel',     2),
+        ('demo012', 'Leo Silva',      2),
+        ('demo013', 'Mara Cohen',     2),
+        ('demo014', 'Nico Bauer',     2),
+        ('demo015', 'Omar Haddad',    2),
+        ('demo016', 'Priya Nair',     3),
+        ('demo017', 'Quinn Foster',   3),
+        ('demo018', 'Rosa Mendez',    3),
+        ('demo019', 'Sven Eriksson',  3),
+        ('demo020', 'Tara Brooks',    3),
     ]
     for sid, name, team_idx in students_data:
         team = conn.execute(
@@ -131,7 +139,7 @@ def init_demo_db():
     conn.close()
     print(f"Demo database created at {DB_PATH}")
     print(f"  Instructor: demo_instructor")
-    print(f"  Students:   12 (demo001-demo012, PIN='demo')")
+    print(f"  Students:   20 (demo001-demo020, PIN='demo')")
     print(f"  Teams:      4 (Alpha, Beta, Gamma, Delta)")
     print(f"  Questions:  10")
 

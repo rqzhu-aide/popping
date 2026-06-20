@@ -205,11 +205,23 @@ def instructor_login(slug):
     return render_template('instructor_login.html', course=course, slug=slug)
 
 
+def _ensure_demo_db():
+    """Create the demo database if it doesn't exist yet."""
+    db_path = os.path.join(config.DATA_DIR, 'demo', 'popping.db')
+    if os.path.exists(db_path):
+        return True
+    try:
+        import subprocess
+        script = os.path.join(os.path.dirname(__file__), 'scripts', 'init-demo-db.py')
+        subprocess.run([sys.executable, script], check=True, capture_output=True, timeout=30)
+        return os.path.exists(db_path)
+    except Exception:
+        return False
+
+
 @app.route('/demo')
 def demo():
-    demo_exists = os.path.exists(
-        os.path.join(config.DATA_DIR, 'demo', 'popping.db')
-    )
+    demo_exists = _ensure_demo_db()
     return render_template('demo.html', demo_exists=demo_exists)
 
 
