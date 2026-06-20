@@ -46,7 +46,7 @@ window.handleRosterFile = async function(e) {
     const res = await fetch('/api/upload_roster', { method: 'POST', body: formData });
     const data = await res.json();
     if (data.success) {
-        alert(`Roster uploaded: ${data.added} added, ${data.updated} updated.`);
+        alert(`Roster uploaded: ${data.added} added, ${data.updated} updated, ${data.removed || 0} removed.`);
         window.location.reload();
     } else {
         alert(data.error || 'Upload failed');
@@ -63,13 +63,16 @@ if (document.querySelector('.login-form')) {
 const PHASE_LABELS = {
     setup: 'Setup',
     discussion: 'Group Discussion',
-    competition: 'Competition',
-    grading: 'Grading',
-    ended: 'Ended'
+    competition: 'Group Presentation',
+    ended: 'End Session'
 };
 
 const PHASES_WITH_DISCUSSION = ['discussion'];
-const PHASES_WITH_TEAM = ['competition', 'grading'];
+const PHASES_WITH_TEAM = ['competition'];
+
+// Track poll state
+let pollSelections = { q1: 0, q2: 0 };
+let pollInterval = null;
 
 const dashboard = document.querySelector('.dashboard');
 if (dashboard) {
@@ -192,40 +195,40 @@ if (dashboard) {
                 } else {
                     stopTimer();
                 }
-                loadTeamGraders(state.active_team);
+
+                // --- Poll control ---
+                const pollSection = document.getElementById('poll-section');
+                const pollWaitHint = document.getElementById('poll-wait-hint');
+                const youAreUp = document.getElementById('you-are-up');
+
+                // "You are up!" banner
+                if (youAreUp && state.active_team && state.active_team.id === MY_TEAM_ID) {
+                    youAreUp.style.display = 'block';
+                    if (pollSection) pollSection.style.display = 'none';
+                    if (pollWaitHint) pollWaitHint.style.display = 'none';
+                } else {
+                    if (youAreUp) youAreUp.style.display = 'none';
+                    if (state.poll_active) {
+                        if (pollSection) pollSection.style.display = 'block';
+                        if (pollWaitHint) pollWaitHint.style.display = 'none';
+                    } else {
+                        if (pollSection) pollSection.style.display = 'none';
+                        if (pollWaitHint) {
+                            pollWaitHint.textContent = 'Waiting for poll to open...';
+                            pollWaitHint.style.display = '';
+                        }
+                    }
+                }
+
+                initStarRows();
             } else {
                 stopTimer();
             }
         }
     }
 
-    async function loadTeamGraders(activeTeam) {
-        const container = document.getElementById('team-graders');
-        if (!container || !activeTeam) return;
-        if (container.dataset.teamId === String(activeTeam.id)) return;
-
-        container.innerHTML = '';
-        const criteria = ['Content', 'Delivery', 'Creativity', 'Teamwork'];
-        criteria.forEach(crit => {
-            const row = document.createElement('div');
-            row.className = 'grade-row';
-            row.innerHTML = `
-                <span class="grade-name">${crit}</span>
-                <input type="number" min="1" max="10" class="grade-input"
-                       data-criterion="${crit}" placeholder="1-10"
-                       onchange="submitTeamGrade(${activeTeam.id}, '${crit}', this.value)">
-            `;
-            container.appendChild(row);
-        });
-        container.dataset.teamId = activeTeam.id;
-    }
-
     window.submitPeerGrade = async function(recipientId, score) {
         await postJSON('/api/grade_peer', { recipient_id: recipientId, criterion: 'overall', score });
-    };
-
-    window.submitTeamGrade = async function(recipientTeamId, criterion, score) {
-        await postJSON('/api/grade_team', { recipient_team_id: recipientTeamId, criterion, score });
     };
 
     window.submitDiscussion = async function() {
@@ -910,10 +913,13 @@ window.deleteQuestion = async function(qid) {
 window.startPresentation = async function() {
     const teamId = document.getElementById('comp-team').value;
     const questionId = document.getElementById('comp-question').value;
+    const timeCap = parseInt(document.getElementById('time-cap')?.value || '300', 10);
     if (!teamId || !questionId) { alert('Select both a team and a question'); return; }
     const data = await postJSON('/api/start_presentation', {
         team_id: parseInt(teamId, 10),
-        question_id: parseInt(questionId, 10)
+        question_id: parseInt(questionId, 10),
+        time_cap: timeCap,
+        question_text: document.getElementById('comp-question').selectedOptions[0].text
     });
     if (data.success) {
         window.location.reload();
@@ -923,13 +929,126 @@ window.startPresentation = async function() {
 };
 
 window.stopPresentation = async function() {
-    await postJSON('/api/stop_presentation', {});
-    window.location.reload();
+    const data = await postJSON('/api/stop_presentation', {});
+    if (data.success) {
+        document.getElementById('btn-stop').style.display = 'none';
+        document.getElementById('btn-resume').style.display = '';
+        stopCountdownTimer();
+        const tv = document.getElementById('timer-value');
+        if (tv && data.remaining) tv.textContent = formatDuration(data.remaining);
+    }
+};
+
+window.resumePresentation = async function() {
+    const data = await postJSON('/api/resume_presentation', {});
+    if (data.success) {
+        document.getElementById('btn-stop').style.display = '';
+        document.getElementById('btn-resume').style.display = 'none';
+        window.location.reload();
+    }
 };
 
 window.nextPresentation = async function() {
     await postJSON('/api/next_presentation', {});
     window.location.reload();
+};
+
+// ===== POLL FUNCTIONS =====
+
+window.startPoll = async function() {
+    const data = await postJSON('/api/start_poll', {});
+    if (data.success) {
+        window.location.reload();
+    } else {
+        alert(data.error || 'Failed to start poll');
+    }
+};
+
+window.stopPoll = async function() {
+    const data = await postJSON('/api/stop_poll', {});
+    if (data.success) {
+        window.location.reload();
+    } else {
+        alert(data.error || 'Failed to stop poll');
+    }
+};
+
+window.submitRating = async function() {
+    if (!pollSelections.q1 || !pollSelections.q2) {
+        alert('Please rate both questions');
+        return;
+    }
+    const data = await postJSON('/api/submit_rating', {
+        q1_developed: pollSelections.q1,
+        q2_easy: pollSelections.q2
+    });
+    if (data.success) {
+        alert('Rating submitted!');
+    } else {
+        alert(data.error || 'Failed to submit rating');
+    }
+};
+
+// Star interaction
+function initStarRows() {
+    document.querySelectorAll('.star-row').forEach(row => {
+        const question = row.dataset.question;
+        const stars = row.querySelectorAll('.star');
+        stars.forEach(star => {
+            star.addEventListener('click', () => {
+                const val = parseInt(star.dataset.value, 10);
+                pollSelections[question] = val;
+                stars.forEach(s => {
+                    s.classList.toggle('active', parseInt(s.dataset.value, 10) <= val);
+                    s.textContent = parseInt(s.dataset.value, 10) <= val ? '★' : '☆';
+                });
+            });
+        });
+    });
+}
+
+// ===== DISCUSSION SIGN-UP =====
+
+window.togglePresent = async function(questionKey, btn) {
+    const data = await postJSON('/api/toggle_present', { question_key: questionKey });
+    if (data.success) {
+        btn.classList.toggle('selected', data.selected);
+        btn.textContent = data.selected ? 'Signed Up' : 'Sign Up';
+        // Refresh counts
+        const res = await fetch('/api/discussion_questions');
+        const d = await res.json();
+        renderDiscussionQuestions(d);
+    }
+};
+
+// ===== UNASSIGN ALL =====
+
+window.unassignAll = async function() {
+    if (!confirm('Clear all team assignments?')) return;
+    const data = await postJSON('/api/unassign_all', {});
+    if (data.success) window.location.reload();
+};
+
+// ===== APPENDIX QUESTIONS =====
+
+window.addAppendixQuestion = async function() {
+    const title = document.getElementById('appendix-title')?.value.trim();
+    const content = document.getElementById('appendix-content')?.value.trim();
+    if (!title || !content) { alert('Title and content required'); return; }
+    const data = await postJSON('/api/questions', { title, content });
+    if (data.success) {
+        document.getElementById('appendix-title').value = '';
+        document.getElementById('appendix-content').value = '';
+        window.location.reload();
+    } else {
+        alert(data.error || 'Failed to add question');
+    }
+};
+
+window.deleteAppendixQuestion = async function(index) {
+    if (!confirm('Delete this appendix question?')) return;
+    const data = await postJSON('/api/delete_appendix_question', { index });
+    if (data.success) window.location.reload();
 };
 
 window.removeStudent = async function(studentDbId) {
@@ -953,38 +1072,63 @@ function formatDuration(seconds) {
     return `${m}:${s}`;
 }
 
-function startTimer(startedAt) {
-    if (timerInterval) clearInterval(timerInterval);
-    const startTime = new Date(startedAt).getTime();
+let countdownTimerInterval = null;
+
+function startCountdownTimer(remainingSeconds) {
+    if (countdownTimerInterval) clearInterval(countdownTimerInterval);
+    let remaining = remainingSeconds;
     const tick = () => {
-        const elapsed = Math.floor((Date.now() - startTime) / 1000);
         document.querySelectorAll('.timer-value').forEach(el => {
-            el.textContent = formatDuration(elapsed);
+            el.textContent = formatDuration(Math.max(0, remaining));
         });
+        if (remaining <= 0) {
+            clearInterval(countdownTimerInterval);
+            countdownTimerInterval = null;
+        }
+        remaining--;
     };
     tick();
-    timerInterval = setInterval(tick, 1000);
+    countdownTimerInterval = setInterval(tick, 1000);
+}
+
+function stopCountdownTimer() {
+    if (countdownTimerInterval) {
+        clearInterval(countdownTimerInterval);
+        countdownTimerInterval = null;
+    }
+}
+
+function startTimer(startedAt) {
+    // Legacy: now uses countdown from state
+    const startTime = new Date(startedAt).getTime();
+    const elapsed = Math.floor((Date.now() - startTime) / 1000);
+    startCountdownTimer(Math.max(0, 300 - elapsed));
 }
 
 function stopTimer() {
-    if (timerInterval) {
-        clearInterval(timerInterval);
-        timerInterval = null;
-    }
+    stopCountdownTimer();
     document.querySelectorAll('.timer-value').forEach(el => {
-        el.textContent = '00:00';
+        el.textContent = '--:--';
     });
 }
 
 // Check for active timers on page load
 const instructorEl = document.querySelector('.instructor[data-slug]');
 if (instructorEl) {
-    // Presentation timer
+    // Presentation countdown timer
     const presStarted = instructorEl.dataset.presentationStarted;
+    const presRemaining = instructorEl.dataset.presentationRemaining;
+    const presCap = parseInt(instructorEl.dataset.presentationTimeCap || '300', 10);
     if (presStarted) {
-        startTimer(presStarted);
+        const startTime = new Date(presStarted.replace(' ', 'T')).getTime();
+        const elapsed = Math.floor((Date.now() - startTime) / 1000);
+        startCountdownTimer(Math.max(0, presCap - elapsed));
+    } else if (presRemaining) {
+        document.getElementById('timer-value').textContent = formatDuration(parseInt(presRemaining, 10));
+        document.getElementById('btn-stop').style.display = 'none';
+        document.getElementById('btn-resume').style.display = '';
     }
-    // Session timer: prefer DB timestamp, fall back to localStorage
+    // Session timer
     const sessionStartDb = instructorEl.dataset.sessionStarted;
     const sessionStartLs = localStorage.getItem('popping-session-start');
     if (sessionStartDb) {
@@ -992,8 +1136,16 @@ if (instructorEl) {
     } else if (sessionStartLs) {
         startSessionTimer(parseInt(sessionStartLs, 10));
     } else {
-        document.getElementById('session-timer').style.display = 'none';
+        const st = document.getElementById('session-timer');
+        if (st) st.style.display = 'none';
     }
+    // Poll status
+    const pollStatus = document.getElementById('poll-status');
+    if (pollStatus && window.__initialPollActive) {
+        pollStatus.style.display = 'flex';
+    }
+    // History
+    renderHistory();
 }
 
 function startSessionTimer(startMs) {
@@ -1005,4 +1157,86 @@ function startSessionTimer(startMs) {
     };
     tick();
     sessionTimerInterval = setInterval(tick, 1000);
+}
+
+
+// ===== THEME TOGGLE =====
+(function() {
+    const saved = localStorage.getItem('popping-theme');
+    if (saved === 'light') {
+        document.documentElement.classList.add('light');
+    }
+    updateThemeIcon();
+})();
+
+window.toggleTheme = function() {
+    const html = document.documentElement;
+    const isLight = html.classList.toggle('light');
+    localStorage.setItem('popping-theme', isLight ? 'light' : 'dark');
+    updateThemeIcon();
+};
+
+function updateThemeIcon() {
+    const icon = document.getElementById('theme-icon');
+    if (!icon) return;
+    icon.textContent = document.documentElement.classList.contains('light') ? '☽' : '☀';
+}
+
+// ===== HISTORY RENDER =====
+function renderHistory() {
+    const container = document.getElementById('history-list');
+    if (!container) return;
+    const instructorEl = document.querySelector('.instructor[data-slug]');
+    if (!instructorEl) return;
+    let history = [];
+    try {
+        history = JSON.parse(instructorEl.dataset.presentationHistory || '[]');
+    } catch(e) {}
+    if (!history.length) {
+        container.innerHTML = '<p class="hint">No presentations yet.</p>';
+        return;
+    }
+    container.innerHTML = history.map(h => `
+        <div class="history-item">
+            <span>${h.title || 'Untitled'} — <strong>${h.team || '?'}</strong></span>
+            <span>${h.responses || 0} responses</span>
+        </div>
+    `).join('');
+}
+
+// ===== DISCUSSION QUESTIONS RENDER (enhanced with sign-ups) =====
+function renderDiscussionQuestions(data) {
+    const container = document.getElementById('disc-questions-list');
+    if (!container) return;
+
+    if (!data.questions || data.questions.length === 0) {
+        container.innerHTML = '<p class="empty">No questions found. Add <code>week-N-questions.md</code> files in the course folder, then select a week during setup.</p>';
+        return;
+    }
+
+    const isInstructor = !!document.querySelector('.instructor[data-slug]');
+
+    container.innerHTML = data.questions.map((q, i) => {
+        const key = q._key || `week-${data.current_week}-q${i}`;
+        const presenting = q.teams_presenting || 0;
+        const presenters = q.presenters || 0;
+        const selected = q.i_selected ? 'selected' : '';
+        const btn = isInstructor
+            ? `<span class="presenting-badge">${presenting} team${presenting !== 1 ? 's' : ''}</span>`
+            : `<button class="toggle-present-btn ${selected}" onclick="togglePresent('${key}', this)">${q.i_selected ? 'Signed Up' : 'Sign Up'}</button>`;
+        return `
+        <div class="disc-question-card">
+            <div class="disc-question-header" onclick="this.parentElement.classList.toggle('expanded')">
+                <span class="disc-question-num">#${i + 1}</span>
+                <span class="disc-question-title">${q.title}</span>
+                ${btn}
+            </div>
+            <div class="disc-question-body">
+                <div class="markdown-content">${marked.parse(q.content)}</div>
+            </div>
+        </div>
+    `}).join('');
+
+    if (window.MathJax) MathJax.typesetPromise([container]);
+    if (window.hljs) container.querySelectorAll('pre code').forEach(hljs.highlightElement);
 }

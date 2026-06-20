@@ -27,7 +27,7 @@
     </section>
 
     <section class="card team-grading" id="team-section" style="display:none;">
-        <h2>Team Presentation Grading</h2>
+        <h2>Presentation Rating</h2>
         <div class="presenting-banner" id="presenting-banner">
             <span class="presenting-label">🎯 Now Presenting:</span>
             <span class="presenting-name" id="presenting-name">---</span>
@@ -36,12 +36,33 @@
             <span style="font-size:0.8rem; color:#64748b; display:block; margin-bottom:4px;">Question:</span>
             <span id="active-question-text" style="font-weight:600;"></span>
         </div>
-        <div class="timer-display" id="student-timer" style="display:none; text-align:center; margin: 10px 0;">
-            <span style="font-size:0.85rem; color:#64748b;">⏱️ Elapsed:</span>
-            <span class="timer-value" style="font-size:1.4rem; font-weight:700; font-family:monospace;">00:00</span>
+        <div class="you-are-up" id="you-are-up" style="display:none;">
+            🎉 Your team is up! Good luck!
         </div>
-        <p class="hint">Rate the presenting team (1-10)</p>
-        <div id="team-graders"></div>
+        <div class="poll-section" id="poll-section" style="display:none;">
+            <div class="poll-card">
+                <p>Was the team's answer well-developed and convincing?</p>
+                <div class="star-row" data-question="q1">
+                    <span class="star" data-value="1">&#9734;</span>
+                    <span class="star" data-value="2">&#9734;</span>
+                    <span class="star" data-value="3">&#9734;</span>
+                    <span class="star" data-value="4">&#9734;</span>
+                    <span class="star" data-value="5">&#9734;</span>
+                </div>
+            </div>
+            <div class="poll-card">
+                <p>Was the team's explanation easy to follow?</p>
+                <div class="star-row" data-question="q2">
+                    <span class="star" data-value="1">&#9734;</span>
+                    <span class="star" data-value="2">&#9734;</span>
+                    <span class="star" data-value="3">&#9734;</span>
+                    <span class="star" data-value="4">&#9734;</span>
+                    <span class="star" data-value="5">&#9734;</span>
+                </div>
+            </div>
+            <button class="btn btn-primary" onclick="submitRating()">Submit Rating</button>
+        </div>
+        <p class="hint" id="poll-wait-hint">Waiting for poll to open...</p>
     </section>
     {% endif %}
 

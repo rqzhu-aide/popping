@@ -1,8 +1,11 @@
 import os
+import sys
 import csv
 import io
+import json
+import re
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta
 from functools import wraps
 
 from flask import (
@@ -17,14 +20,13 @@ app = Flask(__name__)
 app.config.from_object(config)
 init_app(app)
 
-PHASES = ['setup', 'discussion', 'competition', 'grading', 'ended']
+PHASES = ['setup', 'discussion', 'competition', 'ended']
 
 PHASE_LABELS = {
     'setup': 'Setup',
     'discussion': 'Group Discussion',
-    'competition': 'Competition',
-    'grading': 'Grading',
-    'ended': 'Ended'
+    'competition': 'Group Presentation',
+    'ended': 'End Session'
 }
 
 
@@ -205,7 +207,65 @@ def instructor_login(slug):
 
 @app.route('/demo')
 def demo():
-    return render_template('demo.html')
+    demo_exists = os.path.exists(
+        os.path.join(config.DATA_DIR, 'demo', 'popping.db')
+    )
+    return render_template('demo.html', demo_exists=demo_exists)
+
+
+@app.route('/demo/instructor')
+def demo_instructor():
+    """Log in as the demo instructor — no password needed."""
+    db_path = os.path.join(config.DATA_DIR, 'demo', 'popping.db')
+    if not os.path.exists(db_path):
+        flash('Demo is not available right now. Please try again later.', 'error')
+        return redirect(url_for('demo'))
+    session.clear()
+    instructor = query_db('demo',
+        'SELECT * FROM instructors LIMIT 1', one=True)
+    if not instructor:
+        flash('Demo data not found.', 'error')
+        return redirect(url_for('demo'))
+    session['instructor_id'] = instructor['id']
+    session['instructor_name'] = instructor['name']
+    session['slug'] = 'demo'
+    session['is_demo'] = True
+    return redirect(url_for('instructor_course', slug='demo'))
+
+
+@app.route('/demo/student')
+def demo_student():
+    """Log in as a demo student — no password needed."""
+    db_path = os.path.join(config.DATA_DIR, 'demo', 'popping.db')
+    if not os.path.exists(db_path):
+        flash('Demo is not available right now. Please try again later.', 'error')
+        return redirect(url_for('demo'))
+    session.clear()
+    # Pick the first student (Alice Chen, Team Alpha)
+    student = query_db('demo',
+        'SELECT * FROM students ORDER BY id LIMIT 1', one=True)
+    if not student:
+        flash('Demo data not found.', 'error')
+        return redirect(url_for('demo'))
+    session['student_id'] = student['student_id']
+    session['name'] = student['name'] or student['student_id']
+    session['slug'] = 'demo'
+    session['is_demo'] = True
+    return redirect(url_for('dashboard'))
+
+
+@app.route('/demo/reset')
+def demo_reset():
+    """Reset demo data back to initial state."""
+    import subprocess
+    script = os.path.join(os.path.dirname(__file__), 'scripts', 'init-demo-db.py')
+    try:
+        subprocess.run([sys.executable, script], check=True, capture_output=True)
+        flash('Demo has been reset to its initial state.', 'success')
+    except Exception as e:
+        flash(f'Could not reset demo: {e}', 'error')
+    session.clear()
+    return redirect(url_for('demo'))
 
 
 @app.route('/logout')
@@ -284,6 +344,65 @@ def instructor_course(slug):
         d = dict(s)
         d['is_online'] = s['last_active_at'] and s['last_active_at'] > cutoff
         students_enhanced.append(d)
+
+    # End session stats
+    end_stats = None
+    if state and state['phase'] == 'ended':
+        # Total participants (have team or have activity)
+        participants = query_db(slug,
+            '''SELECT COUNT(*) as c FROM students
+               WHERE course_id = ? AND (team_id IS NOT NULL
+                   OR last_login_at IS NOT NULL
+                   OR last_active_at IS NOT NULL)''',
+            [course['id']], one=True)
+        # Top students by thumbs-up count
+        thumbs = query_db(slug,
+            '''SELECT s.name, s.student_id, COUNT(*) as thumbs
+               FROM peer_reviews p
+               JOIN students s ON p.recipient_id = s.id
+               WHERE p.course_id = ? AND p.score > 0
+               GROUP BY p.recipient_id
+               ORDER BY thumbs DESC''',
+            [course['id']])
+        # Group into tiers by distinct thumb counts
+        top_students = []
+        seen_counts = set()
+        for t in thumbs:
+            if t['thumbs'] not in seen_counts:
+                if len(seen_counts) >= 3:
+                    break
+                seen_counts.add(t['thumbs'])
+            top_students.append({'name': t['name'], 'student_id': t['student_id'], 'thumbs': t['thumbs']})
+        # Top teams by avg presentation rating
+        # Map question_key -> presenting team via presentation_history
+        # (presentation_ratings.student_id is the RATER, not the presenter)
+        import collections
+        history_json = json.loads(state['presentation_history'] or '[]') if state else []
+        key_to_team = {}
+        for h in history_json:
+            qkey = f"pres-{h.get('started_at', '')}"
+            key_to_team[qkey] = h.get('team', 'Unknown')
+        all_ratings = query_db(slug,
+            '''SELECT question_key, q1_developed, q2_easy
+               FROM presentation_ratings WHERE course_id = ?''',
+            [course['id']])
+        team_scores = collections.defaultdict(list)
+        for r in all_ratings:
+            tname = key_to_team.get(r['question_key'])
+            if tname:
+                team_scores[tname].append(r['q1_developed'] + r['q2_easy'])
+        team_ratings = []
+        for tname, scores in team_scores.items():
+            avg = sum(scores) / len(scores) if scores else 0
+            team_ratings.append({'name': tname, 'avg_score': round(avg, 2)})
+        team_ratings.sort(key=lambda x: x['avg_score'], reverse=True)
+        end_stats = {
+            'participants': participants['c'] if participants else 0,
+            'top_students': top_students,
+            'top_teams': [{'name': r['name'], 'avg_score': r['avg_score']}
+                          for r in team_ratings]
+        }
+
     return render_template(
         'instructor.html',
         course=course, teams=teams, students=students_enhanced,
@@ -291,7 +410,8 @@ def instructor_course(slug):
         max_teams=max_teams,
         max_members=get_max_members_per_team(slug, course['id']),
         teams_locked=teams_locked,
-        session_started_at=state['session_started_at'] if state and 'session_started_at' in state.keys() else None
+        session_started_at=state['session_started_at'] if state and 'session_started_at' in state.keys() else None,
+        end_stats=end_stats
     )
 
 
@@ -333,7 +453,7 @@ def api_teams():
 @student_login_required
 def join_team():
     slug = session['slug']
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
     team_id = data.get('team_id')
     if team_id is None:
         return jsonify({'error': 'Team ID required'}), 400
@@ -395,24 +515,27 @@ def join_team():
 
 
 @app.route('/api/state', methods=['GET'])
-@student_login_required
 def api_state():
-    slug = session['slug']
+    """Course state — accessible to both students and instructors."""
+    slug = session.get('slug')
+    if not slug:
+        return jsonify({'error': 'Not logged in'}), 401
     state = query_db(slug, 'SELECT * FROM course_state LIMIT 1', one=True)
     active_team = None
     if state and state['active_team_id']:
         active_team = query_db(slug,
             'SELECT * FROM teams WHERE id = ?', [state['active_team_id']], one=True
         )
-    me = query_db(slug,
-        'SELECT * FROM students WHERE student_id = ?',
-        [session['student_id']], one=True
-    )
     my_team = None
-    if me and me['team_id']:
-        my_team = query_db(slug,
-            'SELECT * FROM teams WHERE id = ?', [me['team_id']], one=True
+    if 'student_id' in session:
+        me = query_db(slug,
+            'SELECT * FROM students WHERE student_id = ?',
+            [session['student_id']], one=True
         )
+        if me and me['team_id']:
+            my_team = query_db(slug,
+                'SELECT * FROM teams WHERE id = ?', [me['team_id']], one=True
+            )
     active_question = None
     if state and state['active_question_id']:
         aq = query_db(slug,
@@ -420,13 +543,41 @@ def api_state():
         )
         if aq:
             active_question = dict(aq)
+    # Compute presentation remaining seconds
+    presentation_remaining = state['presentation_remaining'] if state else None
+    if state and state['presentation_started_at'] and state['presentation_time_cap']:
+        try:
+            started = datetime.fromisoformat(
+                state['presentation_started_at'].replace(' ', 'T')
+            )
+            elapsed = (datetime.utcnow() - started).total_seconds()
+            cap = state['presentation_time_cap'] or 300
+            presentation_remaining = max(0, int(cap - elapsed))
+        except Exception:
+            pass
+    # Poll count
+    poll_count = 0
+    if state and state['poll_active'] and state['poll_question_key']:
+        course = query_db(slug, 'SELECT id FROM courses LIMIT 1', one=True)
+        cnt = query_db(slug,
+            'SELECT COUNT(DISTINCT student_id) as c FROM presentation_ratings '
+            'WHERE course_id = ? AND question_key = ?',
+            [course['id'], state['poll_question_key']], one=True)
+        poll_count = cnt['c'] if cnt else 0
     return jsonify({
         'phase': state['phase'] if state else 'setup',
         'active_team': dict(active_team) if active_team else None,
         'active_question': active_question,
         'my_team': dict(my_team) if my_team else None,
         'current_question': state['current_question'] if state else None,
-        'presentation_started_at': state['presentation_started_at'] if state else None
+        'presentation_started_at': state['presentation_started_at'] if state else None,
+        'presentation_time_cap': state['presentation_time_cap'] if state else 300,
+        'presentation_remaining': presentation_remaining,
+        'teams_locked': bool(state['teams_locked']) if state else False,
+        'poll_active': bool(state['poll_active']) if state else False,
+        'poll_question_key': state['poll_question_key'] if state else None,
+        'poll_count': poll_count,
+        'presentation_history': json.loads(state['presentation_history']) if state and state['presentation_history'] else []
     })
 
 
@@ -434,11 +585,11 @@ def api_state():
 @student_login_required
 def grade_peer():
     slug = session['slug']
-    data = request.get_json()
-    recipient_id = data.get('recipient_id')
+    data = request.get_json(silent=True) or {}
+    recipient_sid = data.get('recipient_id')
     criterion = data.get('criterion')
     score = data.get('score')
-    if recipient_id is None or criterion is None or score is None:
+    if recipient_sid is None or criterion is None or score is None:
         return jsonify({'error': 'Missing fields'}), 400
     try:
         score = float(score)
@@ -450,7 +601,14 @@ def grade_peer():
     )
     if not grader:
         return jsonify({'error': 'Grader not found'}), 404
-    if grader['id'] == recipient_id:
+    # Resolve recipient_id from student_id string to DB id
+    recipient = query_db(slug,
+        'SELECT * FROM students WHERE student_id = ?',
+        [str(recipient_sid)], one=True
+    )
+    if not recipient:
+        return jsonify({'error': 'Recipient not found'}), 404
+    if grader['id'] == recipient['id']:
         return jsonify({'error': 'Cannot grade yourself'}), 400
     course = query_db(slug, 'SELECT id FROM courses LIMIT 1', one=True)
     execute_db(slug,
@@ -458,41 +616,7 @@ def grade_peer():
            VALUES (?, ?, ?, ?, ?)
            ON CONFLICT(course_id, grader_id, recipient_id, criterion)
            DO UPDATE SET score=excluded.score''',
-        [course['id'], grader['id'], recipient_id, criterion, score]
-    )
-    return jsonify({'success': True})
-
-
-@app.route('/api/grade_team', methods=['POST'])
-@student_login_required
-def grade_team():
-    slug = session['slug']
-    data = request.get_json()
-    recipient_team_id = data.get('recipient_team_id')
-    criterion = data.get('criterion')
-    score = data.get('score')
-    if recipient_team_id is None or criterion is None or score is None:
-        return jsonify({'error': 'Missing fields'}), 400
-    try:
-        score = float(score)
-    except ValueError:
-        return jsonify({'error': 'Invalid score'}), 400
-    grader = query_db(slug,
-        'SELECT * FROM students WHERE student_id = ?',
-        [session['student_id']], one=True
-    )
-    if not grader or not grader['team_id']:
-        return jsonify({'error': 'You must be in a team to grade'}), 403
-    if grader['team_id'] == recipient_team_id:
-        return jsonify({'error': 'Cannot grade your own team'}), 400
-    course = query_db(slug, 'SELECT id FROM courses LIMIT 1', one=True)
-    execute_db(slug,
-        '''INSERT INTO team_reviews
-           (course_id, grader_team_id, recipient_team_id, criterion, score)
-           VALUES (?, ?, ?, ?, ?)
-           ON CONFLICT(course_id, grader_team_id, recipient_team_id, criterion)
-           DO UPDATE SET score=excluded.score''',
-        [course['id'], grader['team_id'], recipient_team_id, criterion, score]
+        [course['id'], grader['id'], recipient['id'], criterion, score]
     )
     return jsonify({'success': True})
 
@@ -501,7 +625,7 @@ def grade_team():
 @student_login_required
 def submit_discussion():
     slug = session['slug']
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
     question = data.get('question', '')
     response = data.get('response', '')
     if not question or not response:
@@ -564,7 +688,7 @@ def my_grades():
 @instructor_login_required
 def set_phase():
     slug = session['slug']
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
     phase = data.get('phase')
     if phase not in PHASES:
         return jsonify({'error': 'Invalid phase'}), 400
@@ -580,7 +704,7 @@ def set_phase():
 @instructor_login_required
 def set_active_team():
     slug = session['slug']
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
     team_id = data.get('team_id')
     if team_id is not None:
         team = query_db(slug, 'SELECT id FROM teams WHERE id = ?', [team_id], one=True)
@@ -598,7 +722,7 @@ def set_active_team():
 @instructor_login_required
 def set_question():
     slug = session['slug']
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
     question = data.get('question', '')
     course = query_db(slug, 'SELECT id FROM courses LIMIT 1', one=True)
     execute_db(slug,
@@ -612,7 +736,7 @@ def set_question():
 @instructor_login_required
 def set_max_teams():
     slug = session['slug']
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
     new_max = data.get('max_teams')
     if not isinstance(new_max, int) or new_max < 1 or new_max > 20:
         return jsonify({'error': 'Team count must be between 1 and 20'}), 400
@@ -721,7 +845,7 @@ def stop_session_timer():
 @instructor_login_required
 def set_discussion_week():
     slug = session['slug']
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
     week = data.get('week')
     if not isinstance(week, int) or week < 1:
         return jsonify({'error': 'Invalid week'}), 400
@@ -738,7 +862,7 @@ def set_discussion_week():
 @instructor_login_required
 def toggle_lock_teams():
     slug = session['slug']
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
     locked = 1 if data.get('locked') else 0
     course = query_db(slug, 'SELECT id FROM courses LIMIT 1', one=True)
     if locked:
@@ -758,7 +882,7 @@ def toggle_lock_teams():
 @instructor_login_required
 def set_max_members():
     slug = session['slug']
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
     new_max = data.get('max_members')
     if not isinstance(new_max, int) or new_max < 1 or new_max > 99:
         return jsonify({'error': 'Max members must be between 1 and 99'}), 400
@@ -795,10 +919,11 @@ def set_max_members():
 # ---------------------------------------------------------------------------
 
 @app.route('/api/discussion_questions', methods=['GET'])
-@instructor_login_required
 def discussion_questions():
-    """Load questions from weekly .md files in the course's classes folder."""
-    slug = session['slug']
+    """Load questions from weekly .md + appendix files. Accessible to both roles."""
+    slug = session.get('slug')
+    if not slug:
+        return jsonify({'error': 'Not logged in'}), 401
     import glob as glob_mod
     import re
 
@@ -807,7 +932,6 @@ def discussion_questions():
         [os.path.basename(f) for f in glob_mod.glob(os.path.join(class_dir, 'week-*-questions.md'))]
     )
 
-    # Get saved week from course_state, or use request param, or default to first
     week_param = request.args.get('week')
     course = query_db(slug, 'SELECT id FROM courses LIMIT 1', one=True)
     ensure_schema(slug)
@@ -829,16 +953,17 @@ def discussion_questions():
     else:
         target = None
 
-    if target:
-        filepath = os.path.join(class_dir, target['file'])
+    def _load_md(filepath, prefix=''):
+        """Load questions from a markdown file with YAML frontmatter."""
+        out = []
+        if not os.path.exists(filepath):
+            return out
         try:
             with open(filepath, 'r', encoding='utf-8') as f:
                 content = f.read()
-            # Parse YAML frontmatter blocks separated by ---
             import yaml
             content = content.lstrip('-').lstrip()
             blocks = content.split('\n---\n')
-            # Blocks alternate: [fm1, body1, fm2, body2, ...]
             i = 0
             while i + 1 < len(blocks):
                 fm_block = blocks[i].strip()
@@ -847,15 +972,78 @@ def discussion_questions():
                     try:
                         fm = yaml.safe_load(fm_block)
                         if fm and fm.get('title'):
-                            questions_list.append({
+                            key = f"{prefix}{i//2}"
+                            out.append({
+                                'key': key,
                                 'title': fm.get('title', 'Untitled'),
                                 'content': body_block
                             })
                     except Exception:
                         pass
                 i += 2
-        except Exception as e:
-            return jsonify({'error': str(e)}), 500
+        except Exception:
+            pass
+        return out
+
+    if target:
+        q_path = os.path.join(class_dir, target['file'])
+        questions_list = _load_md(q_path, prefix=f"week-{target['num']}-q")
+        # Also load appendix
+        appendix_path = os.path.join(class_dir, f"week-{target['num']}-appendix.md")
+        appendix = _load_md(appendix_path, prefix=f"week-{target['num']}-a")
+        questions_list.extend(appendix)
+    else:
+        # No week files — still try to load appendix for saved_week
+        appendix_path = os.path.join(class_dir, f"week-{saved_week}-appendix.md")
+        appendix = _load_md(appendix_path, prefix=f"week-{saved_week}-a")
+        questions_list.extend(appendix)
+
+    # Add sign-up metadata
+    is_instructor = 'instructor_id' in session
+    my_student = None
+    my_team_id = None
+    if 'student_id' in session:
+        my_student = query_db(slug,
+            'SELECT id, team_id FROM students WHERE student_id = ?',
+            [session['student_id']], one=True)
+        if my_student:
+            my_team_id = my_student['team_id']
+
+    for q in questions_list:
+        # Count distinct teams with sign-ups
+        teams_presenting = query_db(slug,
+            '''SELECT COUNT(DISTINCT s.team_id) as c
+               FROM discussion_selections ds
+               JOIN students s ON ds.student_id = s.id
+               WHERE ds.course_id = ? AND ds.question_key = ?''',
+            [course['id'], q['key']], one=True)
+        q['teams_presenting'] = teams_presenting['c'] if teams_presenting else 0
+
+        # Count presenters (global for instructor, team-scoped for student)
+        if is_instructor:
+            presenters = query_db(slug,
+                'SELECT COUNT(*) as c FROM discussion_selections '
+                'WHERE course_id = ? AND question_key = ?',
+                [course['id'], q['key']], one=True)
+            q['presenters'] = presenters['c'] if presenters else 0
+        elif my_team_id:
+            presenters = query_db(slug,
+                '''SELECT COUNT(*) as c FROM discussion_selections ds
+                   JOIN students s ON ds.student_id = s.id
+                   WHERE ds.course_id = ? AND ds.question_key = ? AND s.team_id = ?''',
+                [course['id'], q['key'], my_team_id], one=True)
+            q['presenters'] = presenters['c'] if presenters else 0
+        else:
+            q['presenters'] = 0
+
+        # Whether current student has selected this question
+        q['i_selected'] = False
+        if my_student:
+            sel = query_db(slug,
+                'SELECT 1 FROM discussion_selections '
+                'WHERE course_id = ? AND student_id = ? AND question_key = ?',
+                [course['id'], my_student['id'], q['key']], one=True)
+            q['i_selected'] = bool(sel)
 
     return jsonify({
         'weeks': weeks,
@@ -877,23 +1065,144 @@ def get_questions():
 @app.route('/api/questions', methods=['POST'])
 @instructor_login_required
 def add_question():
+    """Add an appendix question — writes to week-N-appendix.md file."""
     slug = session['slug']
-    data = request.get_json()
-    text = data.get('question_text', '').strip()
-    if not text:
-        return jsonify({'error': 'Question text required'}), 400
+    data = request.get_json(silent=True) or {}
+    title = data.get('title', '').strip()
+    content = data.get('content', '').strip()
+    if not title or not content:
+        return jsonify({'error': 'Title and content required'}), 400
+
     course = query_db(slug, 'SELECT id FROM courses LIMIT 1', one=True)
-    # Get next question number
-    max_num = query_db(slug,
-        'SELECT MAX(question_num) as m FROM questions WHERE course_id = ?',
-        [course['id']], one=True
-    )
-    next_num = (max_num['m'] or 0) + 1
-    execute_db(slug,
-        'INSERT INTO questions (course_id, question_num, question_text) VALUES (?, ?, ?)',
-        [course['id'], next_num, text]
-    )
+    ensure_schema(slug)
+    state = query_db(slug, 'SELECT discussion_week FROM course_state WHERE course_id = ?',
+                     [course['id']], one=True)
+    week = state['discussion_week'] if state and state['discussion_week'] else 1
+
+    class_dir = os.path.join(config.CLASSES_DIR, slug)
+    os.makedirs(class_dir, exist_ok=True)
+    appendix_path = os.path.join(class_dir, f'week-{week}-appendix.md')
+
+    # Count existing appendix entries to auto-label
+    existing = 0
+    if os.path.exists(appendix_path):
+        with open(appendix_path, 'r') as f:
+            existing = f.read().count('\n---\n')
+    label = f'A{existing + 1}'
+
+    block = f"""---
+title: "{label}: {title}"
+---
+
+{content}
+"""
+    with open(appendix_path, 'a', encoding='utf-8') as f:
+        f.write(block)
     return jsonify({'success': True})
+
+
+@app.route('/api/delete_appendix_question', methods=['POST'])
+@instructor_login_required
+def delete_appendix_question():
+    """Delete an appendix question by index (0-based)."""
+    slug = session['slug']
+    data = request.get_json(silent=True) or {}
+    index = data.get('index')
+    if index is None:
+        return jsonify({'error': 'Index required'}), 400
+    try:
+        index = int(index)
+    except (ValueError, TypeError):
+        return jsonify({'error': 'Invalid index'}), 400
+
+    course = query_db(slug, 'SELECT id FROM courses LIMIT 1', one=True)
+    state = query_db(slug, 'SELECT discussion_week FROM course_state WHERE course_id = ?',
+                     [course['id']], one=True)
+    week = state['discussion_week'] if state and state['discussion_week'] else 1
+    class_dir = os.path.join(config.CLASSES_DIR, slug)
+    os.makedirs(class_dir, exist_ok=True)
+    appendix_path = os.path.join(class_dir, f'week-{week}-appendix.md')
+    if not os.path.exists(appendix_path):
+        return jsonify({'error': 'Appendix file not found'}), 404
+
+    with open(appendix_path, 'r', encoding='utf-8') as f:
+        content = f.read()
+
+    import yaml
+    content = content.lstrip('-').lstrip()
+    blocks = content.split('\n---\n')
+    entries = []
+    i = 0
+    while i + 1 < len(blocks):
+        entries.append((blocks[i].strip(), blocks[i + 1].strip()))
+        i += 2
+
+    if index < 0 or index >= len(entries):
+        return jsonify({'error': 'Index out of range'}), 400
+
+    del entries[index]
+
+    if not entries:
+        os.remove(appendix_path)
+        return jsonify({'success': True})
+
+    # Rebuild file
+    new_content = ''
+    for fm, body in entries:
+        new_content += f"---\n{fm}\n---\n\n{body}\n\n"
+    with open(appendix_path, 'w', encoding='utf-8') as f:
+        f.write(new_content.strip() + '\n')
+    return jsonify({'success': True})
+
+
+@app.route('/api/toggle_present', methods=['POST'])
+@student_login_required
+def toggle_present():
+    """Toggle student sign-up for a discussion question."""
+    slug = session['slug']
+    data = request.get_json(silent=True) or {}
+    question_key = data.get('question_key', '')
+    if not question_key:
+        return jsonify({'error': 'question_key required'}), 400
+
+    student = query_db(slug,
+        'SELECT * FROM students WHERE student_id = ?',
+        [session['student_id']], one=True)
+    if not student:
+        return jsonify({'error': 'Student not found'}), 404
+    course = query_db(slug, 'SELECT id FROM courses LIMIT 1', one=True)
+
+    # Check if already selected
+    existing = query_db(slug,
+        'SELECT id FROM discussion_selections '
+        'WHERE course_id = ? AND student_id = ? AND question_key = ?',
+        [course['id'], student['id'], question_key], one=True)
+
+    if existing:
+        execute_db(slug,
+            'DELETE FROM discussion_selections WHERE id = ?',
+            [existing['id']])
+        return jsonify({'success': True, 'selected': False})
+    else:
+        execute_db(slug,
+            'INSERT INTO discussion_selections (course_id, student_id, question_key) VALUES (?, ?, ?)',
+            [course['id'], student['id'], question_key])
+        return jsonify({'success': True, 'selected': True})
+
+
+@app.route('/api/unassign_all', methods=['POST'])
+@instructor_login_required
+def unassign_all():
+    """Clear all team assignments."""
+    slug = session['slug']
+    course = query_db(slug, 'SELECT id FROM courses LIMIT 1', one=True)
+    execute_db(slug,
+        'UPDATE students SET team_id = NULL WHERE course_id = ?',
+        [course['id']])
+    count = query_db(slug,
+        'SELECT COUNT(*) as c FROM students WHERE course_id = ?',
+        [course['id']], one=True)
+    return jsonify({'success': True, 'count': count['c'] if count else 0})
 
 
 @app.route('/api/questions/<int:qid>', methods=['DELETE'])
@@ -911,6 +1220,7 @@ def delete_question(qid):
 @app.route('/api/upload_roster', methods=['POST'])
 @instructor_login_required
 def upload_roster():
+    """Replace-mode CSV roster upload with validation."""
     slug = session['slug']
     course = query_db(slug, 'SELECT id FROM courses LIMIT 1', one=True)
     if 'file' not in request.files:
@@ -925,53 +1235,93 @@ def upload_roster():
     except Exception:
         return jsonify({'error': 'Failed to read CSV file'}), 400
 
-    if not rows or rows[0][:3] != ['student_id', 'name', 'pin']:
-        return jsonify({'error': 'CSV must have columns: student_id, name, pin'}), 400
+    if not rows:
+        return jsonify({'error': 'Empty CSV'}), 400
 
-    added, updated = 0, 0
-    for row in rows[1:]:
-        if not row or not row[0].strip():
+    # Detect header format
+    header = [h.strip().lower() for h in rows[0]]
+    if header[:3] == ['student_id', 'name', 'pin']:
+        sid_col, name_col, pin_col = 0, 1, 2
+    elif header[:3] == ['id', 'name', 'pin']:
+        sid_col, name_col, pin_col = 0, 1, 2
+    else:
+        return jsonify({'error': 'CSV header must be: student_id, name, pin (or ID, Name, PIN)'}), 400
+
+    # Parse and validate
+    parsed = []
+    errors = []
+    seen_ids = set()
+    for i, row in enumerate(rows[1:], start=2):
+        if not row or not row[sid_col].strip():
             continue
-        sid = row[0].strip()
-        name = row[1].strip() if len(row) > 1 else ''
-        pin = row[2].strip() if len(row) > 2 and row[2].strip() else sid[-4:]  # default PIN: last 4 chars of student_id
+        sid = row[sid_col].strip()
+        name = row[name_col].strip() if len(row) > name_col else ''
+        pin = row[pin_col].strip() if len(row) > pin_col else sid[-4:]
+        if sid in seen_ids:
+            errors.append(f'Line {i}: duplicate student ID "{sid}"')
+            continue
+        seen_ids.add(sid)
+        if not re.match(r'^\d{4}$', pin):
+            errors.append(f'Line {i}: PIN must be exactly 4 digits for "{sid}"')
+            continue
+        parsed.append({'student_id': sid, 'name': name or None, 'pin': pin})
 
-        existing = query_db(slug,
-            'SELECT id FROM students WHERE student_id = ? AND course_id = ?',
-            [sid, course['id']], one=True
-        )
-        if existing:
+    if errors:
+        return jsonify({'error': 'Validation failed', 'details': errors}), 400
+
+    # Get existing students
+    existing_rows = query_db(slug,
+        'SELECT id, student_id FROM students WHERE course_id = ?',
+        [course['id']])
+    existing_by_sid = {r['student_id']: r['id'] for r in existing_rows}
+    csv_sids = {p['student_id'] for p in parsed}
+
+    added, updated, removed = 0, 0, 0
+    # Remove students not in CSV
+    for sid, db_id in existing_by_sid.items():
+        if sid not in csv_sids:
+            execute_db(slug, 'DELETE FROM students WHERE id = ?', [db_id])
+            removed += 1
+
+    # Add/update
+    for p in parsed:
+        if p['student_id'] in existing_by_sid:
             execute_db(slug,
                 'UPDATE students SET name = ?, pin = ? WHERE id = ?',
-                [name or None, pin, existing['id']]
-            )
+                [p['name'], p['pin'], existing_by_sid[p['student_id']]])
             updated += 1
         else:
             execute_db(slug,
                 'INSERT INTO students (course_id, student_id, name, pin) VALUES (?, ?, ?, ?)',
-                [course['id'], sid, name or None, pin]
-            )
+                [course['id'], p['student_id'], p['name'], p['pin']])
             added += 1
 
-    return jsonify({'success': True, 'added': added, 'updated': updated})
+    return jsonify({'success': True, 'added': added, 'updated': updated, 'removed': removed})
 
 
 @app.route('/api/start_presentation', methods=['POST'])
 @instructor_login_required
 def start_presentation():
     slug = session['slug']
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
     team_id = data.get('team_id')
     question_id = data.get('question_id')
+    time_cap = data.get('time_cap', 300)
+    question_text = data.get('question_text', '')
     if not team_id or not question_id:
         return jsonify({'error': 'Team and question required'}), 400
+    if not isinstance(time_cap, int) or time_cap < 10 or time_cap > 3600:
+        time_cap = 300
     course = query_db(slug, 'SELECT id FROM courses LIMIT 1', one=True)
     execute_db(slug,
         '''UPDATE course_state
            SET phase = 'competition', active_team_id = ?, active_question_id = ?,
-               presentation_started_at = CURRENT_TIMESTAMP
+               current_question = ?,
+               presentation_started_at = CURRENT_TIMESTAMP,
+               presentation_time_cap = ?, presentation_remaining = NULL,
+               poll_active = 0, poll_question_key = NULL
            WHERE course_id = ?''',
-        [team_id, question_id, course['id']]
+        [team_id, question_id, question_text, time_cap, course['id']]
     )
     return jsonify({'success': True})
 
@@ -979,13 +1329,45 @@ def start_presentation():
 @app.route('/api/stop_presentation', methods=['POST'])
 @instructor_login_required
 def stop_presentation():
+    """Pause the presentation timer — save remaining time."""
     slug = session['slug']
+    state = query_db(slug, 'SELECT * FROM course_state LIMIT 1', one=True)
+    if not state or not state['presentation_started_at']:
+        return jsonify({'error': 'No active presentation'}), 400
+    course = query_db(slug, 'SELECT id FROM courses LIMIT 1', one=True)
+    # Compute elapsed and remaining
+    from datetime import datetime as dt
+    started = dt.fromisoformat(state['presentation_started_at'].replace(' ', 'T'))
+    elapsed = (dt.utcnow() - started).total_seconds()
+    cap = state['presentation_time_cap'] or 300
+    remaining = max(0, int(cap - elapsed))
+    execute_db(slug,
+        '''UPDATE course_state
+           SET presentation_started_at = NULL, presentation_remaining = ?
+           WHERE course_id = ?''',
+        [remaining, course['id']]
+    )
+    return jsonify({'success': True, 'remaining': remaining})
+
+
+@app.route('/api/resume_presentation', methods=['POST'])
+@instructor_login_required
+def resume_presentation():
+    """Resume a paused presentation — remaining time becomes the new cap."""
+    slug = session['slug']
+    state = query_db(slug, 'SELECT * FROM course_state LIMIT 1', one=True)
+    if not state:
+        return jsonify({'error': 'No state'}), 400
+    remaining = state['presentation_remaining']
+    if remaining is None or remaining <= 0:
+        return jsonify({'error': 'No remaining time to resume'}), 400
     course = query_db(slug, 'SELECT id FROM courses LIMIT 1', one=True)
     execute_db(slug,
         '''UPDATE course_state
-           SET presentation_started_at = NULL
+           SET presentation_started_at = CURRENT_TIMESTAMP,
+               presentation_time_cap = ?, presentation_remaining = NULL
            WHERE course_id = ?''',
-        [course['id']]
+        [remaining, course['id']]
     )
     return jsonify({'success': True})
 
@@ -993,15 +1375,127 @@ def stop_presentation():
 @app.route('/api/next_presentation', methods=['POST'])
 @instructor_login_required
 def next_presentation():
-    """Stop current presentation, clear team/question, ready for next."""
+    """Stop current presentation, save to history, clear for next."""
     slug = session['slug']
+    state = query_db(slug, 'SELECT * FROM course_state LIMIT 1', one=True)
     course = query_db(slug, 'SELECT id FROM courses LIMIT 1', one=True)
+    # Save to presentation history
+    history = []
+    if state and state['presentation_history']:
+        try:
+            import json
+            history = json.loads(state['presentation_history'])
+        except Exception:
+            history = []
+    # Build history entry
+    if state and state['active_team_id'] and state['active_question_id']:
+        team = query_db(slug, 'SELECT name FROM teams WHERE id = ?',
+                        [state['active_team_id']], one=True)
+        q_text = state['current_question'] or ''
+        if len(q_text) > 80:
+            q_text = q_text[:77] + '...'
+        # Count ratings for this presentation
+        count = query_db(slug,
+            'SELECT COUNT(DISTINCT student_id) as c FROM presentation_ratings '
+            'WHERE course_id = ? AND question_key = ?',
+            [course['id'], state['poll_question_key'] or ''], one=True)
+        history.append({
+            'title': q_text,
+            'team': team['name'] if team else 'Unknown',
+            'responses': count['c'] if count else 0,
+            'started_at': state['presentation_started_at'] or ''
+        })
+        # Keep last 20
+        history = history[-20:]
     execute_db(slug,
         '''UPDATE course_state
            SET active_team_id = NULL, active_question_id = NULL,
-               presentation_started_at = NULL
+               current_question = NULL,
+               presentation_started_at = NULL, presentation_time_cap = 300,
+               presentation_remaining = NULL,
+               poll_active = 0, poll_question_key = NULL,
+               presentation_history = ?
            WHERE course_id = ?''',
+        [json.dumps(history), course['id']]
+    )
+    return jsonify({'success': True})
+
+
+@app.route('/api/start_poll', methods=['POST'])
+@instructor_login_required
+def start_poll():
+    """Start a rating poll for the active presentation."""
+    slug = session['slug']
+    data = request.get_json(silent=True) or {}
+    question_key = data.get('question_key', '')
+    course = query_db(slug, 'SELECT id FROM courses LIMIT 1', one=True)
+    if not question_key:
+        # Auto-generate from active presentation
+        state = query_db(slug, 'SELECT * FROM course_state LIMIT 1', one=True)
+        if state and state['presentation_started_at']:
+            question_key = f"pres-{state['presentation_started_at']}"
+        else:
+            question_key = f"poll-{datetime.now().isoformat()}"
+    execute_db(slug,
+        '''UPDATE course_state
+           SET poll_active = 1, poll_question_key = ?
+           WHERE course_id = ?''',
+        [question_key, course['id']]
+    )
+    return jsonify({'success': True})
+
+
+@app.route('/api/stop_poll', methods=['POST'])
+@instructor_login_required
+def stop_poll():
+    """Stop the active rating poll."""
+    slug = session['slug']
+    course = query_db(slug, 'SELECT id FROM courses LIMIT 1', one=True)
+    execute_db(slug,
+        'UPDATE course_state SET poll_active = 0 WHERE course_id = ?',
         [course['id']]
+    )
+    return jsonify({'success': True})
+
+
+@app.route('/api/submit_rating', methods=['POST'])
+@student_login_required
+def submit_rating():
+    """Student submits star ratings (1–5) for the current presentation."""
+    slug = session['slug']
+    data = request.get_json(silent=True) or {}
+    q1 = data.get('q1_developed')
+    q2 = data.get('q2_easy')
+    if q1 is None or q2 is None:
+        return jsonify({'error': 'Both ratings required'}), 400
+    try:
+        q1 = int(q1)
+        q2 = int(q2)
+    except (ValueError, TypeError):
+        return jsonify({'error': 'Ratings must be integers'}), 400
+    if not (1 <= q1 <= 5 and 1 <= q2 <= 5):
+        return jsonify({'error': 'Ratings must be 1–5'}), 400
+
+    state = query_db(slug, 'SELECT * FROM course_state LIMIT 1', one=True)
+    if not state or not state['poll_active']:
+        return jsonify({'error': 'No active poll'}), 403
+
+    student = query_db(slug,
+        'SELECT * FROM students WHERE student_id = ?',
+        [session['student_id']], one=True
+    )
+    if not student:
+        return jsonify({'error': 'Student not found'}), 404
+    course = query_db(slug, 'SELECT id FROM courses LIMIT 1', one=True)
+    question_key = state['poll_question_key'] or ''
+    execute_db(slug,
+        '''INSERT INTO presentation_ratings
+           (course_id, student_id, question_key, q1_developed, q2_easy)
+           VALUES (?, ?, ?, ?, ?)
+           ON CONFLICT(course_id, student_id, question_key)
+           DO UPDATE SET q1_developed=excluded.q1_developed,
+                         q2_easy=excluded.q2_easy''',
+        [course['id'], student['id'], question_key, q1, q2]
     )
     return jsonify({'success': True})
 
@@ -1084,7 +1578,7 @@ def api_students():
 @instructor_login_required
 def add_student():
     slug = session['slug']
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
     student_id = data.get('student_id', '').strip()
     name = data.get('name', '').strip()
     pin = data.get('pin', '').strip()
@@ -1105,7 +1599,7 @@ def add_student():
 @instructor_login_required
 def assign_student():
     slug = session['slug']
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
     student_id = data.get('student_id')  # DB row id
     team_id = data.get('team_id')  # None or '' to unassign
     if not student_id:
@@ -1141,10 +1635,25 @@ def reset_data():
     execute_db(slug, 'DELETE FROM peer_reviews WHERE course_id = ?', [course['id']])
     execute_db(slug, 'DELETE FROM team_reviews WHERE course_id = ?', [course['id']])
     execute_db(slug, 'DELETE FROM discussion_responses WHERE course_id = ?', [course['id']])
+    execute_db(slug, 'DELETE FROM presentation_ratings WHERE course_id = ?', [course['id']])
+    execute_db(slug, 'DELETE FROM discussion_selections WHERE course_id = ?', [course['id']])
     execute_db(slug, 'UPDATE students SET team_id = NULL WHERE course_id = ?', [course['id']])
     execute_db(slug,
-        'UPDATE course_state SET phase = ?, active_team_id = NULL, current_question = NULL WHERE course_id = ?',
-        ['setup', course['id']]
+        '''UPDATE course_state SET
+               phase = 'setup',
+               active_team_id = NULL,
+               active_question_id = NULL,
+               current_question = NULL,
+               presentation_started_at = NULL,
+               presentation_time_cap = 300,
+               presentation_remaining = NULL,
+               poll_active = 0,
+               poll_question_key = NULL,
+               presentation_history = '[]',
+               teams_locked = 0,
+               session_started_at = NULL
+           WHERE course_id = ?''',
+        [course['id']]
     )
     return jsonify({'success': True})
 
@@ -1157,81 +1666,105 @@ def export_data(slug):
         return redirect(url_for('index'))
 
     course = query_db(slug, 'SELECT * FROM courses LIMIT 1', one=True)
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment
+    wb = Workbook()
 
-    output = io.StringIO()
-    writer = csv.writer(output)
+    # Header style
+    header_font = Font(bold=True, color='FFFFFF')
+    header_fill = PatternFill(start_color='13294B', end_color='13294B', fill_type='solid')
+    header_align = Alignment(horizontal='center')
 
-    writer.writerow(['=== POPPING COURSE EXPORT ==='])
-    writer.writerow(['Course', course['name']])
-    writer.writerow(['Code', course['code'] or ''])
-    writer.writerow(['Exported at', datetime.now().isoformat()])
-    state = query_db(slug, 'SELECT * FROM course_state WHERE course_id = ?', [course['id']], one=True)
-    if state and state['session_started_at']:
-        writer.writerow(['Session started', state['session_started_at']])
-    writer.writerow([])
+    def style_header(ws, headers):
+        for col, h in enumerate(headers, 1):
+            cell = ws.cell(row=1, column=col, value=h)
+            cell.font = header_font
+            cell.fill = header_fill
+            cell.alignment = header_align
 
-    writer.writerow(['--- STUDENTS ---'])
-    writer.writerow(['student_id', 'name', 'pin', 'current_team', 'joined_current_team_at', 'last_login_at'])
-    for row in query_db(slug,
+    # Sheet 1: Students
+    ws1 = wb.active
+    ws1.title = 'Students'
+    headers1 = ['student_id', 'name', 'PIN', 'current_team', 'joined_team_at', 'last_login']
+    style_header(ws1, headers1)
+    for i, row in enumerate(query_db(slug,
         '''SELECT s.student_id, s.name, s.pin, t.name as current_team,
                   s.last_team_joined_at, s.last_login_at
            FROM students s LEFT JOIN teams t ON s.team_id = t.id
-           ORDER BY s.name'''
-    ):
-        writer.writerow([
-            row['student_id'], row['name'] or '', row['pin'],
-            row['current_team'] or '',
-            row['last_team_joined_at'] or '' if row['current_team'] else '',
-            row['last_login_at'] or ''
-        ])
-    writer.writerow([])
+           ORDER BY s.name'''), start=2):
+        ws1.cell(row=i, column=1, value=row['student_id'])
+        ws1.cell(row=i, column=2, value=row['name'])
+        ws1.cell(row=i, column=3, value=row['pin'])
+        ws1.cell(row=i, column=4, value=row['current_team'])
+        ws1.cell(row=i, column=5, value=row['last_team_joined_at'])
+        ws1.cell(row=i, column=6, value=row['last_login_at'])
+    for col in range(1, 7):
+        ws1.column_dimensions[chr(64 + col)].auto_size = True
 
-    writer.writerow(['--- PEER REVIEWS ---'])
-    writer.writerow(['grader', 'recipient', 'criterion', 'score', 'time'])
-    for row in query_db(slug,
-        '''SELECT g.name as grader, r.name as recipient,
-                  p.criterion, p.score, p.created_at
+    # Sheet 2: Group Discussion (thumbs-up only)
+    ws2 = wb.create_sheet('Group Discussion')
+    headers2 = ['grader', 'recipient', 'time']
+    style_header(ws2, headers2)
+    for i, row in enumerate(query_db(slug,
+        '''SELECT g.name as grader, r.name as recipient, p.created_at
            FROM peer_reviews p
            JOIN students g ON p.grader_id = g.id
            JOIN students r ON p.recipient_id = r.id
-           ORDER BY p.created_at'''
-    ):
-        writer.writerow([row['grader'], row['recipient'], row['criterion'],
-                         row['score'], row['created_at']])
-    writer.writerow([])
+           WHERE p.score > 0
+           ORDER BY p.created_at'''), start=2):
+        ws2.cell(row=i, column=1, value=row['grader'])
+        ws2.cell(row=i, column=2, value=row['recipient'])
+        ws2.cell(row=i, column=3, value=row['created_at'])
 
-    writer.writerow(['--- TEAM REVIEWS ---'])
-    writer.writerow(['grader_team', 'recipient_team', 'criterion', 'score', 'time'])
-    for row in query_db(slug,
-        '''SELECT gt.name as grader, rt.name as recipient,
-                  t.criterion, t.score, t.created_at
-           FROM team_reviews t
-           JOIN teams gt ON t.grader_team_id = gt.id
-           JOIN teams rt ON t.recipient_team_id = rt.id
-           ORDER BY t.created_at'''
-    ):
-        writer.writerow([row['grader'], row['recipient'], row['criterion'],
-                         row['score'], row['created_at']])
-    writer.writerow([])
+    # Per-question sheets for presentation ratings
+    q_keys = query_db(slug,
+        'SELECT DISTINCT question_key FROM presentation_ratings WHERE course_id = ? ORDER BY question_key',
+        [course['id']])
+    for qk in q_keys:
+        key = qk['question_key'] or 'unknown'
+        # Excel sheet names cannot contain: \ / ? * [ ] :
+        safe_key = re.sub(r'[\\/?*\[\]:]', '-', key)[:31] or 'unknown'
+        ws = wb.create_sheet(safe_key)
+        headers_q = ['student', 'developed', 'easy', 'time']
+        style_header(ws, headers_q)
+        for i, row in enumerate(query_db(slug,
+            '''SELECT s.name, pr.q1_developed, pr.q2_easy, pr.created_at
+               FROM presentation_ratings pr
+               JOIN students s ON pr.student_id = s.id
+               WHERE pr.course_id = ? AND pr.question_key = ?
+               ORDER BY pr.created_at''',
+            [course['id'], key]), start=2):
+            ws.cell(row=i, column=1, value=row['name'])
+            ws.cell(row=i, column=2, value=row['q1_developed'])
+            ws.cell(row=i, column=3, value=row['q2_easy'])
+            ws.cell(row=i, column=4, value=row['created_at'])
 
-    writer.writerow(['--- DISCUSSION RESPONSES ---'])
-    writer.writerow(['student', 'question', 'response', 'time'])
-    for row in query_db(slug,
-        '''SELECT s.name, d.question, d.response, d.created_at
-           FROM discussion_responses d
-           JOIN students s ON d.student_id = s.id
-           ORDER BY d.created_at'''
-    ):
-        writer.writerow([row['name'], row['question'], row['response'],
-                         row['created_at']])
+    # Summary sheet
+    ws_sum = wb.create_sheet('Summary')
+    ws_sum.cell(row=1, column=1, value='Course').font = Font(bold=True)
+    ws_sum.cell(row=1, column=2, value=course['name'])
+    ws_sum.cell(row=2, column=1, value='Code').font = Font(bold=True)
+    ws_sum.cell(row=2, column=2, value=course['code'] or '')
+    ws_sum.cell(row=4, column=1, value='Student Count').font = Font(bold=True)
+    cnt = query_db(slug, 'SELECT COUNT(*) as c FROM students WHERE course_id = ?',
+                   [course['id']], one=True)
+    ws_sum.cell(row=4, column=2, value=cnt['c'] if cnt else 0)
+    ws_sum.cell(row=5, column=1, value='Team Count').font = Font(bold=True)
+    tcnt = query_db(slug, 'SELECT COUNT(*) as c FROM teams WHERE course_id = ?',
+                    [course['id']], one=True)
+    ws_sum.cell(row=5, column=2, value=tcnt['c'] if tcnt else 0)
 
-    output.seek(0)
-    filename = f"popping_{course['code'] or slug}_export.csv"
+    # Save to bytes
+    from io import BytesIO
+    buf = BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    filename = f"popping_{course['code'] or slug}_export.xlsx"
     return (
-        output.getvalue(),
+        buf.getvalue(),
         200,
         {
-            'Content-Type': 'text/csv',
+            'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
             'Content-Disposition': f'attachment; filename={filename}'
         }
     )

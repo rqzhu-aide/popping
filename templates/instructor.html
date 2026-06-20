@@ -3,7 +3,12 @@
 {% block title %}Instructor - {{ course.name }}{% endblock %}
 
 {% block content %}
-<div class="instructor" data-slug="{{ course.slug }}" data-presentation-started="{{ state.presentation_started_at or '' }}" data-session-started="{{ session_started_at or '' }}">
+<div class="instructor" data-slug="{{ course.slug }}"
+     data-presentation-started="{{ state.presentation_started_at or '' }}"
+     data-session-started="{{ session_started_at or '' }}"
+     data-presentation-remaining="{{ state.presentation_remaining or '' }}"
+     data-presentation-time-cap="{{ state.presentation_time_cap or 300 }}"
+     data-presentation-history="{{ state.presentation_history or '[]' }}">
     <header class="dash-header">
         <div>
             <h1>{{ course.name }}</h1>
@@ -57,6 +62,8 @@
                 <button class="btn btn-sm {% if session_started_at %}btn-danger{% else %}btn-primary{% endif %}" id="btn-session-timer" onclick="toggleSessionTimer()">
                     {% if session_started_at %}Stop Timer{% else %}Start Timer{% endif %}
                 </button>
+                <button class="btn btn-sm btn-secondary" onclick="unassignAll()">Clear All Teams</button>
+                <button class="btn btn-sm btn-danger" onclick="resetData()">Reset Course Data</button>
             </div>
         {% endif %}
     </section>
@@ -150,36 +157,18 @@
     </section>
 
     <section class="card">
-        <h2>📝 Question Bank (Manual)</h2>
-        <div class="add-student-form">
-            <input type="text" id="new-question" placeholder="Enter question text..." style="flex:3">
-            <button class="btn btn-primary" onclick="addQuestion()">Add Question</button>
+        <h2>➕ Add Appendix Question</h2>
+        <div class="add-student-form" style="flex-direction:column; gap:8px;">
+            <input type="text" id="appendix-title" placeholder="Question title" style="width:100%">
+            <textarea id="appendix-content" placeholder="Question content (supports Markdown)..." rows="4" style="width:100%"></textarea>
+            <button class="btn btn-primary" onclick="addAppendixQuestion()">Add to Appendix</button>
         </div>
-        <div class="table-wrapper">
-            <table class="data-table" id="question-table">
-                <thead>
-                    <tr>
-                        <th style="width:60px">#</th>
-                        <th>Question</th>
-                        <th style="width:80px">Action</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    {% for q in questions %}
-                    <tr data-id="{{ q.id }}">
-                        <td>{{ q.question_num }}</td>
-                        <td>{{ q.question_text }}</td>
-                        <td>
-                            <button class="btn btn-sm btn-danger" onclick="deleteQuestion({{ q.id }})">Delete</button>
-                        </td>
-                    </tr>
-                    {% else %}
-                    <tr>
-                        <td colspan="3" class="empty">No questions yet. Add one above.</td>
-                    </tr>
-                    {% endfor %}
-                </tbody>
-            </table>
+    </section>
+
+    <section class="card">
+        <h2>📝 Appendix Questions</h2>
+        <div id="appendix-table-wrapper">
+            <p class="hint">No appendix questions yet.</p>
         </div>
     </section>
 
@@ -187,12 +176,13 @@
     {% elif state.phase == 'competition' %}
 
     <section class="card">
-        <h2>🎯 Competition Control</h2>
+        <h2>🎯 Group Presentation</h2>
         <div class="competition-control">
             {% if state.active_team_id and state.active_question_id %}
+            {# --- Active presentation --- #}
             <div class="timer-display" id="instructor-timer">
-                <span class="timer-label">⏱️ Elapsed:</span>
-                <span class="timer-value" id="timer-value">00:00</span>
+                <span class="timer-label">⏱ Remaining:</span>
+                <span class="timer-value" id="timer-value">--:--</span>
             </div>
             <div class="active-info" id="active-info">
                 <div class="info-row">
@@ -208,11 +198,28 @@
                     </span>
                 </div>
             </div>
+
             <div class="comp-actions">
-                <button class="btn btn-secondary" id="btn-stop" onclick="stopPresentation()">⏹ Stop Timer</button>
-                <button class="btn btn-danger" id="btn-next" onclick="nextPresentation()">⏭ Next Team</button>
+                <button class="btn btn-warning" id="btn-stop" onclick="stopPresentation()">⏸ Pause</button>
+                <button class="btn btn-primary" id="btn-resume" onclick="resumePresentation()" style="display:none">▶ Resume</button>
+                <button class="btn btn-secondary" id="btn-start-poll" onclick="startPoll()">⭐ Start Poll</button>
+                <button class="btn btn-danger" id="btn-next" onclick="nextPresentation()">⏭ Next</button>
+            </div>
+
+            {# Poll status #}
+            <div class="poll-status" id="poll-status" style="display:none; margin-top:12px;">
+                <span class="poll-badge">⭐ Poll active</span>
+                <span class="hint" id="poll-count">0 responses</span>
+                <button class="btn btn-sm btn-secondary" onclick="stopPoll()">Stop Poll</button>
+            </div>
+
+            {# History panel #}
+            <div class="history-panel" id="history-panel" style="margin-top:20px;">
+                <h4>Presentation History</h4>
+                <div id="history-list"></div>
             </div>
             {% else %}
+            {# --- No active presentation --- #}
             <div class="form-row">
                 <div class="form-group">
                     <label>Select Team</label>
@@ -232,10 +239,10 @@
                         {% endfor %}
                     </select>
                 </div>
-            </div>
-            <div class="timer-display" id="instructor-timer">
-                <span class="timer-label">⏱️ Elapsed:</span>
-                <span class="timer-value" id="timer-value">00:00</span>
+                <div class="form-group">
+                    <label>Time Cap (sec)</label>
+                    <input type="number" id="time-cap" value="300" min="10" max="3600">
+                </div>
             </div>
             <div class="comp-actions">
                 <button class="btn btn-primary btn-full" id="btn-start" onclick="startPresentation()">▶ Start Presentation</button>
@@ -244,7 +251,7 @@
         </div>
     </section>
 
-    <!-- ===== GRADING PHASE ===== -->
+    <!-- ===== GRADING PHASE (legacy — merged into competition) ===== -->
     {% elif state.phase == 'grading' %}
 
     <section class="card">
@@ -260,10 +267,33 @@
 
     <section class="card">
         <h2>🏁 Class Ended</h2>
-        <p class="hint">The class session has ended. Download the CSV export for your records.</p>
-        <a href="{{ url_for('export_data', slug=course.slug) }}" class="btn btn-primary">Download CSV</a>
+        <p class="hint">The class session has ended. Download the results export for your records.</p>
+        <a href="{{ url_for('export_data', slug=course.slug) }}" class="btn btn-primary">⬇ Download Results</a>
         <button class="btn btn-danger" onclick="resetData()">Reset Course Data</button>
     </section>
+
+    {% if end_stats %}
+    <section class="card">
+        <h2>📊 Session Summary</h2>
+        <p><strong>Total participants:</strong> {{ end_stats.participants }}</p>
+        {% if end_stats.top_students %}
+        <h4>Top Students (by thumbs-up)</h4>
+        <ul>
+            {% for s in end_stats.top_students %}
+            <li>{{ s.name }} — {{ s.thumbs }} thumbs-up</li>
+            {% endfor %}
+        </ul>
+        {% endif %}
+        {% if end_stats.top_teams %}
+        <h4>Top Teams (by avg rating)</h4>
+        <ul>
+            {% for t in end_stats.top_teams %}
+            <li>{{ t.name }} — {{ t.avg_score }}</li>
+            {% endfor %}
+        </ul>
+        {% endif %}
+    </section>
+    {% endif %}
 
     {% endif %}
 

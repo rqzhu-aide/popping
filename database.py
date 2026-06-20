@@ -40,21 +40,31 @@ def init_app(app):
 
 
 def ensure_schema(slug):
-    """Add missing columns to existing databases (migration)."""
+    """Add missing columns/tables to existing databases (migration)."""
     db = get_db(slug)
 
     # course_state columns
     cs_cols = [row['name'] for row in db.execute('PRAGMA table_info(course_state)').fetchall()]
     if 'max_teams' not in cs_cols:
-        db.execute('ALTER TABLE course_state ADD COLUMN max_teams INTEGER DEFAULT 5')
+        db.execute('ALTER TABLE course_state ADD COLUMN max_teams INTEGER DEFAULT 8')
     if 'max_members_per_team' not in cs_cols:
-        db.execute('ALTER TABLE course_state ADD COLUMN max_members_per_team INTEGER DEFAULT 10')
+        db.execute('ALTER TABLE course_state ADD COLUMN max_members_per_team INTEGER DEFAULT 5')
     if 'teams_locked' not in cs_cols:
         db.execute('ALTER TABLE course_state ADD COLUMN teams_locked INTEGER DEFAULT 0')
     if 'discussion_week' not in cs_cols:
         db.execute('ALTER TABLE course_state ADD COLUMN discussion_week INTEGER DEFAULT 1')
     if 'session_started_at' not in cs_cols:
         db.execute('ALTER TABLE course_state ADD COLUMN session_started_at TIMESTAMP')
+    if 'presentation_time_cap' not in cs_cols:
+        db.execute('ALTER TABLE course_state ADD COLUMN presentation_time_cap INTEGER DEFAULT 300')
+    if 'presentation_remaining' not in cs_cols:
+        db.execute('ALTER TABLE course_state ADD COLUMN presentation_remaining INTEGER')
+    if 'poll_active' not in cs_cols:
+        db.execute('ALTER TABLE course_state ADD COLUMN poll_active INTEGER DEFAULT 0')
+    if 'poll_question_key' not in cs_cols:
+        db.execute('ALTER TABLE course_state ADD COLUMN poll_question_key TEXT')
+    if 'presentation_history' not in cs_cols:
+        db.execute("ALTER TABLE course_state ADD COLUMN presentation_history TEXT DEFAULT '[]'")
 
     # students columns
     st_cols = [row['name'] for row in db.execute('PRAGMA table_info(students)').fetchall()]
@@ -66,6 +76,30 @@ def ensure_schema(slug):
         db.execute('ALTER TABLE students ADD COLUMN last_team_id INTEGER')
     if 'last_active_at' not in st_cols:
         db.execute('ALTER TABLE students ADD COLUMN last_active_at TIMESTAMP')
+
+    # New tables for existing DBs
+    db.execute('''CREATE TABLE IF NOT EXISTS presentation_ratings (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        course_id INTEGER NOT NULL,
+        student_id INTEGER NOT NULL,
+        question_key TEXT NOT NULL,
+        q1_developed INTEGER CHECK(q1_developed >= 1 AND q1_developed <= 5),
+        q2_easy INTEGER CHECK(q2_easy >= 1 AND q2_easy <= 5),
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (course_id) REFERENCES courses (id),
+        FOREIGN KEY (student_id) REFERENCES students (id),
+        UNIQUE(course_id, student_id, question_key)
+    )''')
+    db.execute('''CREATE TABLE IF NOT EXISTS discussion_selections (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        course_id INTEGER NOT NULL,
+        student_id INTEGER NOT NULL,
+        question_key TEXT NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (course_id) REFERENCES courses (id),
+        FOREIGN KEY (student_id) REFERENCES students (id),
+        UNIQUE(course_id, student_id, question_key)
+    )''')
 
     db.commit()
 

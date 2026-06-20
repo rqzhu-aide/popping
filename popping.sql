@@ -1,4 +1,6 @@
 DROP TABLE IF EXISTS discussion_responses;
+DROP TABLE IF EXISTS presentation_ratings;
+DROP TABLE IF EXISTS discussion_selections;
 DROP TABLE IF EXISTS team_reviews;
 DROP TABLE IF EXISTS peer_reviews;
 DROP TABLE IF EXISTS course_state;
@@ -62,9 +64,9 @@ CREATE TABLE questions (
 CREATE TABLE course_state (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     course_id INTEGER NOT NULL UNIQUE,
-    phase TEXT DEFAULT 'setup' CHECK(phase IN ('setup', 'discussion', 'competition', 'grading', 'ended')),
-    max_teams INTEGER DEFAULT 5,
-    max_members_per_team INTEGER DEFAULT 10,
+    phase TEXT DEFAULT 'setup' CHECK(phase IN ('setup', 'discussion', 'competition', 'ended')),
+    max_teams INTEGER DEFAULT 8,
+    max_members_per_team INTEGER DEFAULT 5,
     teams_locked INTEGER DEFAULT 0,
     discussion_week INTEGER DEFAULT 1,
     session_started_at TIMESTAMP,
@@ -72,6 +74,11 @@ CREATE TABLE course_state (
     active_question_id INTEGER,
     current_question TEXT,
     presentation_started_at TIMESTAMP,
+    presentation_time_cap INTEGER DEFAULT 300,
+    presentation_remaining INTEGER,
+    poll_active INTEGER DEFAULT 0,
+    poll_question_key TEXT,
+    presentation_history TEXT DEFAULT '[]',
     FOREIGN KEY (course_id) REFERENCES courses (id),
     FOREIGN KEY (active_team_id) REFERENCES teams (id),
     FOREIGN KEY (active_question_id) REFERENCES questions (id)
@@ -114,4 +121,28 @@ CREATE TABLE discussion_responses (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (course_id) REFERENCES courses (id),
     FOREIGN KEY (student_id) REFERENCES students (id)
+);
+
+CREATE TABLE presentation_ratings (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    course_id INTEGER NOT NULL,
+    student_id INTEGER NOT NULL,
+    question_key TEXT NOT NULL,
+    q1_developed INTEGER CHECK(q1_developed >= 1 AND q1_developed <= 5),
+    q2_easy INTEGER CHECK(q2_easy >= 1 AND q2_easy <= 5),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (course_id) REFERENCES courses (id),
+    FOREIGN KEY (student_id) REFERENCES students (id),
+    UNIQUE(course_id, student_id, question_key)
+);
+
+CREATE TABLE discussion_selections (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    course_id INTEGER NOT NULL,
+    student_id INTEGER NOT NULL,
+    question_key TEXT NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (course_id) REFERENCES courses (id),
+    FOREIGN KEY (student_id) REFERENCES students (id),
+    UNIQUE(course_id, student_id, question_key)
 );

@@ -8,6 +8,42 @@
         <a href="{{ url_for('index') }}" class="btn btn-sm btn-secondary">← Back</a>
     </div>
 
+    {# ===== INTERACTIVE DEMO ===== #}
+    <section class="card demo-hero">
+        <h2>🍿 Try Popping Live</h2>
+        <p class="demo-subtitle">
+            Jump right in — no account needed. Pick a role below to explore
+            the full classroom experience.
+        </p>
+
+        {% if demo_exists %}
+        <div class="demo-role-picker">
+            <a href="{{ url_for('demo_instructor') }}" class="demo-role-card demo-role-instructor">
+                <span class="demo-role-icon">👩‍🏫</span>
+                <span class="demo-role-label">Enter as Instructor</span>
+                <span class="demo-role-desc">Control phases, manage teams, start grading</span>
+            </a>
+            <a href="{{ url_for('demo_student') }}" class="demo-role-card demo-role-student">
+                <span class="demo-role-icon">🧑‍🎓</span>
+                <span class="demo-role-label">Enter as Student</span>
+                <span class="demo-role-desc">Join a team, submit answers, grade peers</span>
+            </a>
+        </div>
+
+        <div class="demo-actions">
+            <a href="{{ url_for('demo_reset') }}" class="btn btn-sm btn-outline"
+               onclick="return confirm('Reset all demo data to its initial state?')">
+                🔄 Reset Demo Data
+            </a>
+        </div>
+        {% else %}
+        <div class="demo-unavailable">
+            <p>🔧 The demo is being set up. Please check back shortly.</p>
+        </div>
+        {% endif %}
+    </section>
+
+    {# ===== HOW IT WORKS GUIDE ===== #}
     <section class="card">
         <h2>How Popping Works</h2>
 

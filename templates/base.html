@@ -6,13 +6,13 @@
     <title>{% block title %}Popping{% endblock %}</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
     <script>
         MathJax = {
             tex: { inlineMath: [['$', '$'], ['\\(', '\\)']], displayMath: [['$$', '$$'], ['\\[', '\\]']] },
-            options: { ignoreHtmlClass: 'no-math' }
+            options: { ignoreHtmlClass: 'no-math', displayAlign: 'left' }
         };
     </script>
     <script id="MathJax-script" async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
@@ -27,6 +27,9 @@
             </a>
         </div>
         <div class="nav-links">
+            <button class="theme-toggle" id="theme-toggle" onclick="toggleTheme()" title="Toggle theme">
+                <span id="theme-icon">☀</span>
+            </button>
             {% if session.student_id %}
                 <a href="{{ url_for('dashboard') }}" class="nav-link">Dashboard</a>
                 <a href="{{ url_for('logout') }}" class="nav-link logout">Logout ({{ session.name }})</a>
@@ -43,6 +46,20 @@
             {% endif %}
         </div>
     </nav>
+
+    {% if session.get('is_demo') %}
+    <div class="demo-banner">
+        <span class="demo-banner-text">
+            🎮 <strong>Demo Mode</strong> — You're exploring a sandbox.
+            Data may be modified or reset at any time.
+        </span>
+        <a href="{{ url_for('demo_reset') }}" class="demo-banner-reset"
+           onclick="return confirm('Reset demo data? This will restore everything to its initial state.')">
+            🔄 Reset
+        </a>
+        <a href="{{ url_for('demo') }}" class="demo-banner-exit">Exit Demo →</a>
+    </div>
+    {% endif %}
 
     <main class="container">
         {% with messages = get_flashed_messages(with_categories=true) %}
