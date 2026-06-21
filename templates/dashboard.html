@@ -26,18 +26,32 @@
         <div id="discussion-list" class="discussion-list"></div>
     </section>
 
+    <!-- Now Presenting: banner, question, timer -->
     <section class="card team-grading" id="team-section" style="display:none;">
-        <h2>Presentation Rating</h2>
+        <h2>Now Presenting</h2>
         <div class="presenting-banner" id="presenting-banner">
             <span class="presenting-label">🎯 Now Presenting:</span>
             <span class="presenting-name" id="presenting-name">---</span>
         </div>
-        <div class="question-display" id="question-display" style="display:none; margin: 12px 0; padding: 12px; background: #eef2ff; border-radius: 8px;">
-            <span style="font-size:0.8rem; color:#64748b; display:block; margin-bottom:4px;">Question:</span>
+        <div class="question-display" id="question-display" style="display:none; margin: 12px 0; padding: 12px; background: var(--accent-bg); border-radius: 8px;">
+            <span style="font-size:0.8rem; color: var(--text-muted); display:block; margin-bottom:4px;">Question:</span>
             <span id="active-question-text" style="font-weight:600;"></span>
+        </div>
+        <div class="student-timer" id="student-timer" style="display:none;">
+            <span class="timer-label">⏱ Time Remaining</span>
+            <span class="timer-value" id="student-timer-value">--:--</span>
         </div>
         <div class="you-are-up" id="you-are-up" style="display:none;">
             🎉 Your team is up! Good luck!
+        </div>
+    </section>
+
+    <!-- Rate the Presentation: grading cards + poll pulse -->
+    <section class="card team-grading" id="team-grading-section" style="display:none;">
+        <h2>Rate the Presentation</h2>
+        <div class="poll-pulse" id="poll-pulse" style="display:none;">
+            <span class="pulse-dot"></span>
+            <span id="poll-pulse-text">⏱ 30s left to rate!</span>
         </div>
         <div class="poll-section" id="poll-section" style="display:none;">
             <div class="poll-card">
@@ -60,9 +74,8 @@
                     <span class="star" data-value="5">&#9734;</span>
                 </div>
             </div>
-            <button class="btn btn-primary" onclick="submitRating()">Submit Rating</button>
+            <button class="btn btn-primary" id="btn-submit-rating" onclick="submitRating()">Submit Rating</button>
         </div>
-        <p class="hint" id="poll-wait-hint">Waiting for poll to open...</p>
     </section>
     {% endif %}
 

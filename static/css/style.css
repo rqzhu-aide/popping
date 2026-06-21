@@ -30,11 +30,11 @@
 
 html.light {
     /* Light theme */
-    --bg: #f8fafc;
+    --bg: #eef2f6;
     --surface: #ffffff;
     --text: #0f172a;
     --text-muted: #64748b;
-    --border: #e2e8f0;
+    --border: #cbd5e1;
     --primary: #4f46e5;
     --primary-hover: #4338ca;
     --danger: #ef4444;
@@ -66,6 +66,18 @@ html, body {
     line-height: 1.55;
     scrollbar-gutter: stable;
 }
+
+/* Prevent visited links from going invisible (dark purple on dark bg) */
+a { color: var(--primary); text-decoration: none; }
+a:hover { color: var(--primary-hover); }
+a:visited { color: var(--primary); }
+a:visited:hover { color: var(--primary-hover); }
+/* Buttons keep their own colors even when visited */
+.btn:visited, .btn-primary:visited { color: #fff; }
+.btn-secondary:visited, .btn-outline:visited { color: var(--text); }
+/* Course title links stay as heading color */
+.course-card .course-name a,
+.course-card .course-name a:visited { color: var(--text); }
 
 .navbar {
     background: var(--surface);
@@ -235,6 +247,7 @@ html, body {
 
 .btn-primary { background: var(--primary); }
 .btn-primary:hover { background: var(--primary-hover); }
+.btn-submitted { background: var(--success, #22c55e) !important; cursor: default; }
 
 .btn-secondary {
     background: var(--surface);
@@ -1631,6 +1644,93 @@ input:focus, textarea:focus {
     border-radius: 999px;
     font-size: 0.85rem;
     font-weight: 600;
+}
+
+/* ===== Student Presentation Timer ===== */
+.student-timer {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    background: var(--timer-bg, rgba(99, 102, 241, 0.08));
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 10px 16px;
+    margin: 10px 0;
+}
+.student-timer .timer-label {
+    font-size: 0.85rem;
+    color: var(--text-muted, #64748b);
+    font-weight: 600;
+}
+.student-timer .timer-value {
+    font-size: 1.4rem;
+    font-weight: 700;
+    font-family: 'SF Mono', 'Consolas', monospace;
+    color: var(--text, #e2e8f0);
+}
+
+/* ===== Instructor Poll Glide Button ===== */
+.poll-btn {
+    position: relative;
+    overflow: hidden;
+    z-index: 0;
+}
+.poll-btn .btn-glide {
+    position: absolute;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    width: 0;
+    background: linear-gradient(90deg, rgba(245, 158, 11, 0.3), rgba(245, 158, 11, 0.5));
+    z-index: -1;
+    transition: none;
+}
+.poll-btn.gliding {
+    cursor: default;
+    pointer-events: none;
+}
+.poll-btn.gliding .btn-label {
+    color: #f59e0b;
+}
+
+/* ===== Student Poll Pulse Badge ===== */
+.poll-pulse {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    background: linear-gradient(90deg, #fef3c7, #fde68a);
+    color: #92400e;
+    padding: 10px 16px;
+    border-radius: 10px;
+    font-weight: 700;
+    font-size: 1rem;
+    margin: 10px 0;
+    animation: poll-pulse-anim 0.8s ease-in-out infinite alternate;
+}
+.poll-pulse .pulse-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: #ef4444;
+    animation: pulse-dot-anim 0.8s ease-in-out infinite alternate;
+}
+@keyframes poll-pulse-anim {
+    from { transform: scale(1); }
+    to   { transform: scale(1.03); }
+}
+@keyframes pulse-dot-anim {
+    from { opacity: 0.4; transform: scale(0.8); }
+    to   { opacity: 1;   transform: scale(1.2); }
+}
+
+/* Light theme overrides for poll pulse + student timer */
+html.light .poll-pulse {
+    background: linear-gradient(90deg, #fef3c7, #fde68a);
+    color: #92400e;
+}
+html.light .student-timer {
+    background: rgba(99, 102, 241, 0.06);
 }
 
 /* ===== Logo ===== */

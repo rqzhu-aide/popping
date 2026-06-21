@@ -8,7 +8,9 @@
      data-session-started="{{ session_started_at or '' }}"
      data-presentation-remaining="{{ state.presentation_remaining or '' }}"
      data-presentation-time-cap="{{ state.presentation_time_cap or 300 }}"
-     data-presentation-history="{{ state.presentation_history or '[]' }}">
+     data-presentation-history="{{ state.presentation_history or '[]' }}"
+     data-poll-active="{{ 1 if state.poll_active else 0 }}"
+     data-poll-started="{{ state.poll_started_at or '' }}">
     <header class="dash-header">
         <div>
             <h1>{{ course.name }}</h1>
@@ -208,7 +210,10 @@
             </div>
 
             <div class="comp-actions">
-                <button class="btn btn-secondary" id="btn-start-poll" onclick="startPoll()">⭐ Start Poll</button>
+                <button class="btn btn-secondary poll-btn" id="btn-start-poll" onclick="startPoll()">
+                    <span class="btn-glide"></span>
+                    <span class="btn-label">⭐ Start Poll</span>
+                </button>
                 <button class="btn btn-danger" id="btn-next" onclick="nextPresentation()">⏭ Next</button>
             </div>
 

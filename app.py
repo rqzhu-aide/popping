@@ -29,6 +29,11 @@ PHASE_LABELS = {
     'ended': 'End Session'
 }
 
+# Duration (seconds) of the "Start Poll" highlight window. Grading itself is
+# always available during a presentation; the poll is just a synced 30s nudge
+# shown as a gliding bar (instructor) and a pulsing countdown (students).
+POLL_DURATION = 30
+
 
 @app.before_request
 def track_student_activity():
@@ -567,14 +572,33 @@ def api_state():
             presentation_remaining = max(0, int(cap - elapsed))
         except Exception:
             pass
-    # Poll count
+    # Auto-close the poll highlight once POLL_DURATION has elapsed (server-authoritative)
+    poll_active_bool = bool(state['poll_active']) if state else False
+    if state and state['poll_active'] and state['poll_started_at']:
+        try:
+            poll_started = datetime.fromisoformat(
+                state['poll_started_at'].replace(' ', 'T')
+            )
+            if (datetime.utcnow() - poll_started).total_seconds() >= POLL_DURATION:
+                execute_db(slug,
+                    'UPDATE course_state SET poll_active = 0, poll_started_at = NULL '
+                    'WHERE course_id = ?', [state['course_id']]
+                )
+                state = query_db(slug, 'SELECT * FROM course_state LIMIT 1', one=True)
+                poll_active_bool = False
+        except Exception:
+            pass
+    # Poll count — count ratings for the active presentation (grading is always open)
     poll_count = 0
-    if state and state['poll_active'] and state['poll_question_key']:
+    pres_key = None
+    if state and state['presentation_started_at']:
+        pres_key = f"pres-{state['presentation_started_at']}"
+    if state and pres_key:
         course = query_db(slug, 'SELECT id FROM courses LIMIT 1', one=True)
         cnt = query_db(slug,
             'SELECT COUNT(DISTINCT student_id) as c FROM presentation_ratings '
             'WHERE course_id = ? AND question_key = ?',
-            [course['id'], state['poll_question_key']], one=True)
+            [course['id'], pres_key], one=True)
         poll_count = cnt['c'] if cnt else 0
     return jsonify({
         'phase': state['phase'] if state else 'setup',
@@ -586,7 +610,9 @@ def api_state():
         'presentation_time_cap': state['presentation_time_cap'] if state else 300,
         'presentation_remaining': presentation_remaining,
         'teams_locked': bool(state['teams_locked']) if state else False,
-        'poll_active': bool(state['poll_active']) if state else False,
+        'poll_active': poll_active_bool,
+        'poll_started_at': state['poll_started_at'] if state else None,
+        'poll_duration': POLL_DURATION,
         'poll_question_key': state['poll_question_key'] if state else None,
         'poll_count': poll_count,
         'presentation_history': json.loads(state['presentation_history']) if state and state['presentation_history'] else []
@@ -705,10 +731,26 @@ def set_phase():
     if phase not in PHASES:
         return jsonify({'error': 'Invalid phase'}), 400
     course = query_db(slug, 'SELECT id FROM courses LIMIT 1', one=True)
-    execute_db(slug,
-        'UPDATE course_state SET phase = ? WHERE course_id = ?',
-        [phase, course['id']]
-    )
+    state = query_db(slug, 'SELECT phase FROM course_state LIMIT 1', one=True)
+    old_phase = state['phase'] if state else 'setup'
+    # When leaving competition, clean up all in-flight presentation state
+    # to prevent ghost timers/polls from haunting the next phase.
+    if old_phase == 'competition' and phase != 'competition':
+        execute_db(slug,
+            '''UPDATE course_state
+               SET phase = ?,
+                   active_team_id = NULL, active_question_id = NULL,
+                   current_question = NULL,
+                   presentation_started_at = NULL, presentation_remaining = NULL,
+                   poll_active = 0, poll_question_key = NULL, poll_started_at = NULL
+               WHERE course_id = ?''',
+            [phase, course['id']]
+        )
+    else:
+        execute_db(slug,
+            'UPDATE course_state SET phase = ? WHERE course_id = ?',
+            [phase, course['id']]
+        )
     return jsonify({'success': True, 'phase': phase})
 
 
@@ -1319,11 +1361,13 @@ def start_presentation():
     team_id = data.get('team_id')
     question_id = data.get('question_id')
     time_cap = data.get('time_cap', 300)
-    question_text = data.get('question_text', '')
     if not team_id or not question_id:
         return jsonify({'error': 'Team and question required'}), 400
     if not isinstance(time_cap, int) or time_cap < 10 or time_cap > 3600:
         time_cap = 300
+    # Look up the canonical question text from the DB (the client sends truncated display text)
+    q = query_db(slug, 'SELECT question_text FROM questions WHERE id = ?', [question_id], one=True)
+    question_text = q['question_text'] if q else ''
     course = query_db(slug, 'SELECT id FROM courses LIMIT 1', one=True)
     execute_db(slug,
         '''UPDATE course_state
@@ -1331,7 +1375,7 @@ def start_presentation():
                current_question = ?,
                presentation_started_at = CURRENT_TIMESTAMP,
                presentation_time_cap = ?, presentation_remaining = NULL,
-               poll_active = 0, poll_question_key = NULL
+               poll_active = 0, poll_question_key = NULL, poll_started_at = NULL
            WHERE course_id = ?''',
         [team_id, question_id, question_text, time_cap, course['id']]
     )
@@ -1434,11 +1478,12 @@ def next_presentation():
         q_text = state['current_question'] or ''
         if len(q_text) > 80:
             q_text = q_text[:77] + '...'
-        # Count ratings for this presentation
+        # Count ratings for this presentation (keyed on its start time)
+        pres_key = f"pres-{state['presentation_started_at'] or ''}"
         count = query_db(slug,
             'SELECT COUNT(DISTINCT student_id) as c FROM presentation_ratings '
             'WHERE course_id = ? AND question_key = ?',
-            [course['id'], state['poll_question_key'] or ''], one=True)
+            [course['id'], pres_key], one=True)
         history.append({
             'title': q_text,
             'team': team['name'] if team else 'Unknown',
@@ -1453,7 +1498,7 @@ def next_presentation():
                current_question = NULL,
                presentation_started_at = NULL, presentation_time_cap = 300,
                presentation_remaining = NULL,
-               poll_active = 0, poll_question_key = NULL,
+               poll_active = 0, poll_question_key = NULL, poll_started_at = NULL,
                presentation_history = ?
            WHERE course_id = ?''',
         [json.dumps(history), course['id']]
@@ -1464,35 +1509,40 @@ def next_presentation():
 @app.route('/api/start_poll', methods=['POST'])
 @instructor_login_required
 def start_poll():
-    """Start a rating poll for the active presentation."""
+    """Start a 30-second rating-poll highlight for the active presentation."""
     slug = session['slug']
     data = request.get_json(silent=True) or {}
     question_key = data.get('question_key', '')
-    course = query_db(slug, 'SELECT id FROM courses LIMIT 1', one=True)
+    state = query_db(slug, 'SELECT * FROM course_state LIMIT 1', one=True)
+    if not state:
+        return jsonify({'error': 'No course state'}), 400
+    if not state['presentation_started_at']:
+        return jsonify({'error': 'No active presentation'}), 400
     if not question_key:
-        # Auto-generate from active presentation
-        state = query_db(slug, 'SELECT * FROM course_state LIMIT 1', one=True)
-        if state and state['presentation_started_at']:
-            question_key = f"pres-{state['presentation_started_at']}"
-        else:
-            question_key = f"poll-{datetime.now().isoformat()}"
+        question_key = f"pres-{state['presentation_started_at']}"
+    course = query_db(slug, 'SELECT id FROM courses LIMIT 1', one=True)
     execute_db(slug,
         '''UPDATE course_state
-           SET poll_active = 1, poll_question_key = ?
+           SET poll_active = 1, poll_question_key = ?, poll_started_at = CURRENT_TIMESTAMP
            WHERE course_id = ?''',
         [question_key, course['id']]
     )
-    return jsonify({'success': True})
+    fresh = query_db(slug, 'SELECT poll_started_at FROM course_state LIMIT 1', one=True)
+    return jsonify({
+        'success': True,
+        'poll_started_at': fresh['poll_started_at'] if fresh else None,
+        'poll_duration': POLL_DURATION
+    })
 
 
 @app.route('/api/stop_poll', methods=['POST'])
 @instructor_login_required
 def stop_poll():
-    """Stop the active rating poll."""
+    """Stop the active rating poll highlight."""
     slug = session['slug']
     course = query_db(slug, 'SELECT id FROM courses LIMIT 1', one=True)
     execute_db(slug,
-        'UPDATE course_state SET poll_active = 0 WHERE course_id = ?',
+        'UPDATE course_state SET poll_active = 0, poll_started_at = NULL WHERE course_id = ?',
         [course['id']]
     )
     return jsonify({'success': True})
@@ -1517,8 +1567,10 @@ def submit_rating():
         return jsonify({'error': 'Ratings must be 1–5'}), 400
 
     state = query_db(slug, 'SELECT * FROM course_state LIMIT 1', one=True)
-    if not state or not state['poll_active']:
-        return jsonify({'error': 'No active poll'}), 403
+    # Grading is always open during an active presentation — the poll is just a
+    # 30s highlight, not a gate. Key on the active presentation's start time.
+    if not state or not state['presentation_started_at']:
+        return jsonify({'error': 'No active presentation to rate'}), 403
 
     student = query_db(slug,
         'SELECT * FROM students WHERE student_id = ?',
@@ -1526,8 +1578,13 @@ def submit_rating():
     )
     if not student:
         return jsonify({'error': 'Student not found'}), 404
+
+    # Block self-grading — the presenting team cannot rate their own presentation.
+    if student['team_id'] and state['active_team_id'] and \
+       student['team_id'] == state['active_team_id']:
+        return jsonify({'error': 'You cannot rate your own presentation'}), 403
     course = query_db(slug, 'SELECT id FROM courses LIMIT 1', one=True)
-    question_key = state['poll_question_key'] or ''
+    question_key = f"pres-{state['presentation_started_at']}"
     execute_db(slug,
         '''INSERT INTO presentation_ratings
            (course_id, student_id, question_key, q1_developed, q2_easy)

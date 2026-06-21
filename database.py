@@ -63,6 +63,8 @@ def ensure_schema(slug):
         db.execute('ALTER TABLE course_state ADD COLUMN poll_active INTEGER DEFAULT 0')
     if 'poll_question_key' not in cs_cols:
         db.execute('ALTER TABLE course_state ADD COLUMN poll_question_key TEXT')
+    if 'poll_started_at' not in cs_cols:
+        db.execute('ALTER TABLE course_state ADD COLUMN poll_started_at TIMESTAMP')
     if 'presentation_history' not in cs_cols:
         db.execute("ALTER TABLE course_state ADD COLUMN presentation_history TEXT DEFAULT '[]'")
 

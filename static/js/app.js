@@ -73,6 +73,8 @@ const PHASES_WITH_TEAM = ['competition'];
 // Track poll state
 let pollSelections = { q1: 0, q2: 0 };
 let pollInterval = null;
+let ratingSubmitted = false;       // has the student submitted for the current presentation?
+let lastRatedTeamId = null;        // track which team was rated to detect new presentations
 
 const dashboard = document.querySelector('.dashboard');
 if (dashboard) {
@@ -167,9 +169,36 @@ if (dashboard) {
             discSec.style.display = PHASES_WITH_DISCUSSION.includes(state.phase) ? 'block' : 'none';
         }
         const teamSec = document.getElementById('team-section');
+        const teamGradeSec = document.getElementById('team-grading-section');
         if (teamSec) {
             const show = PHASES_WITH_TEAM.includes(state.phase);
             teamSec.style.display = show ? 'block' : 'none';
+
+            // Compute amPresenting early so we can also hide the grading card
+            const amPresenting = !!(state.active_team && state.active_team.id === MY_TEAM_ID);
+            // "Now Presenting" card shows for all teams; grading card hidden for presenting team
+            if (teamGradeSec) teamGradeSec.style.display = (show && !amPresenting) ? 'block' : 'none';
+
+            // Detect new presentation — reset rating UI when active team changes
+            const currentTeamId = state.active_team ? state.active_team.id : null;
+            if (currentTeamId !== lastRatedTeamId) {
+                lastRatedTeamId = currentTeamId;
+                ratingSubmitted = false;
+                pollSelections = { q1: 0, q2: 0 };
+                // Reset star visuals
+                document.querySelectorAll('.star').forEach(s => {
+                    s.classList.remove('active');
+                    s.textContent = '☆';
+                });
+                // Reset submit button
+                const sBtn = document.getElementById('btn-submit-rating');
+                if (sBtn) {
+                    sBtn.disabled = false;
+                    sBtn.textContent = 'Submit Rating';
+                    sBtn.classList.remove('btn-submitted');
+                }
+            }
+
             if (show) {
                 const banner = document.getElementById('presenting-name');
                 if (banner && state.active_team) {
@@ -185,42 +214,45 @@ if (dashboard) {
                 } else if (qDisplay) {
                     qDisplay.style.display = 'none';
                 }
-                // Show/hide timer
+                // --- Presentation countdown timer (visible to ALL teams) ---
                 const timer = document.getElementById('student-timer');
+                const hasPres = !!state.presentation_started_at;
+                const hasRemaining = state.presentation_remaining != null;
                 if (timer) {
-                    timer.style.display = state.presentation_started_at ? 'block' : 'none';
+                    timer.style.display = (hasPres || hasRemaining) ? 'flex' : 'none';
                 }
-                if (state.presentation_started_at) {
-                    startTimer(state.presentation_started_at);
+                if (hasPres) {
+                    startTimer(state.presentation_started_at, state.presentation_time_cap);
+                } else if (hasRemaining) {
+                    // Paused — show the frozen remaining value
+                    stopTimer();
+                    const tv = document.getElementById('student-timer-value');
+                    if (tv) tv.textContent = formatDuration(parseInt(state.presentation_remaining, 10));
                 } else {
                     stopTimer();
                 }
 
-                // --- Poll control ---
+                // --- Grading + poll highlight ---
                 const pollSection = document.getElementById('poll-section');
-                const pollWaitHint = document.getElementById('poll-wait-hint');
                 const youAreUp = document.getElementById('you-are-up');
 
-                // "You are up!" banner
-                if (youAreUp && state.active_team && state.active_team.id === MY_TEAM_ID) {
-                    youAreUp.style.display = 'block';
-                    if (pollSection) pollSection.style.display = 'none';
-                    if (pollWaitHint) pollWaitHint.style.display = 'none';
+                // "You are up!" banner — presenting team does not grade
+                if (youAreUp) youAreUp.style.display = amPresenting ? 'block' : 'none';
+                // Grading cards are always available to non-presenting teams
+                if (pollSection) pollSection.style.display = amPresenting ? 'none' : 'block';
+
+                // Pulsing 30s poll countdown (non-presenting teams only)
+                if (!amPresenting && state.poll_active && state.poll_started_at) {
+                    startPollPulse(state.poll_started_at, state.poll_duration || 30);
                 } else {
-                    if (youAreUp) youAreUp.style.display = 'none';
-                    if (state.poll_active) {
-                        if (pollSection) pollSection.style.display = 'block';
-                        if (pollWaitHint) pollWaitHint.style.display = 'none';
-                    } else {
-                        if (pollSection) pollSection.style.display = 'none';
-                        if (pollWaitHint) {
-                            pollWaitHint.textContent = 'Waiting for poll to open...';
-                            pollWaitHint.style.display = '';
-                        }
-                    }
+                    stopPollPulse();
                 }
 
-                initStarRows();
+                // Initialize star rows ONCE — not on every 3-second poll (prevents listener leak)
+                if (!window._starRowsBound) {
+                    initStarRows();
+                    window._starRowsBound = true;
+                }
             } else {
                 stopTimer();
             }
@@ -494,6 +526,30 @@ if (instructor) {
         const hint = card.querySelector('.hint');
         // Try to refresh the whole page if it seems stale
     }, 5000);
+
+    // Competition-phase live state: update poll response count + poll status panel
+    setInterval(async () => {
+        const timerBox = document.getElementById('timer-box');
+        if (!timerBox) return; // not on competition page
+        try {
+            const res = await fetch('/api/state');
+            if (!res.ok) return;
+            const state = await res.json();
+            // Update poll response count
+            const pollCount = document.getElementById('poll-count');
+            if (pollCount) {
+                pollCount.textContent = `${state.poll_count || 0} response${state.poll_count === 1 ? '' : 's'}`;
+            }
+            // Toggle poll status panel based on server state
+            const ps = document.getElementById('poll-status');
+            if (ps) {
+                const btn = document.getElementById('btn-start-poll');
+                const isGliding = btn && btn.classList.contains('gliding');
+                // Show panel when poll is active (server-authoritative) or glide is running
+                ps.style.display = (state.poll_active || isGliding) ? 'flex' : 'none';
+            }
+        } catch (e) { /* network blip — ignore */ }
+    }, 3000);
 }
 
 let _originalMaxTeams = null;
@@ -972,12 +1028,107 @@ window.nextPresentation = async function() {
     window.location.reload();
 };
 
-// ===== POLL FUNCTIONS =====
+// ===== POLL GLIDE (instructor) / POLL PULSE (student) =====
+
+let pollGlideTimeout = null;
+
+/**
+ * Instructor: animate a left→right fill across the Start Poll button for the
+ * poll duration.  Called on click (client-side) or restored from server
+ * state on page load (synced to the real start time).
+ */
+function startPollGlide(startedAtIso, durationSec) {
+    const btn = document.getElementById('btn-start-poll');
+    if (!btn) return;
+    const glide = btn.querySelector('.btn-glide');
+    const label = btn.querySelector('.btn-label');
+    if (!glide) return;
+
+    btn.classList.add('gliding');
+    if (label) label.textContent = '⏳ Poll Active';
+
+    const startTime = new Date(startedAtIso.replace(' ', 'T') + 'Z').getTime();
+    const totalMs = durationSec * 1000;
+
+    function step() {
+        const elapsed = Date.now() - startTime;
+        const pct = Math.min(100, (elapsed / totalMs) * 100);
+        glide.style.width = pct + '%';
+
+        const remaining = Math.max(0, Math.ceil((totalMs - elapsed) / 1000));
+        if (label) label.textContent = `⏳ ${remaining}s`;
+
+        if (pct >= 100) {
+            btn.classList.remove('gliding');
+            glide.style.width = '0%';
+            if (label) label.textContent = '⭐ Start Poll';
+            if (pollGlideTimeout) { clearTimeout(pollGlideTimeout); pollGlideTimeout = null; }
+            return;
+        }
+        pollGlideTimeout = setTimeout(step, 200);
+    }
+    step();
+}
+
+function stopPollGlide() {
+    const btn = document.getElementById('btn-start-poll');
+    if (!btn) return;
+    const glide = btn.querySelector('.btn-glide');
+    const label = btn.querySelector('.btn-label');
+    btn.classList.remove('gliding');
+    if (glide) glide.style.width = '0%';
+    if (label) label.textContent = '⭐ Start Poll';
+    if (pollGlideTimeout) { clearTimeout(pollGlideTimeout); pollGlideTimeout = null; }
+}
+
+/**
+ * Student: pulsing countdown badge on the grading card during the 30s poll.
+ */
+let pollPulseInterval = null;
+
+function startPollPulse(startedAtIso, durationSec) {
+    const pulse = document.getElementById('poll-pulse');
+    const pulseText = document.getElementById('poll-pulse-text');
+    if (!pulse) return;
+
+    if (pollPulseInterval) clearInterval(pollPulseInterval);
+    pulse.style.display = 'flex';
+
+    const startTime = new Date(startedAtIso.replace(' ', 'T') + 'Z').getTime();
+    const totalMs = durationSec * 1000;
+
+    function tick() {
+        const elapsed = Date.now() - startTime;
+        const remaining = Math.max(0, Math.ceil((totalMs - elapsed) / 1000));
+        if (pulseText) pulseText.textContent = `⏱ ${remaining}s left to rate!`;
+
+        if (remaining <= 0) {
+            clearInterval(pollPulseInterval);
+            pollPulseInterval = null;
+            pulse.style.display = 'none';
+        }
+    }
+    tick();
+    pollPulseInterval = setInterval(tick, 250);
+}
+
+function stopPollPulse() {
+    const pulse = document.getElementById('poll-pulse');
+    if (pulse) pulse.style.display = 'none';
+    if (pollPulseInterval) { clearInterval(pollPulseInterval); pollPulseInterval = null; }
+}
+
+// ===== POLL API =====
 
 window.startPoll = async function() {
+    const btn = document.getElementById('btn-start-poll');
+    if (btn && btn.classList.contains('gliding')) return; // already running
     const data = await postJSON('/api/start_poll', {});
-    if (data.success) {
-        window.location.reload();
+    if (data.success && data.poll_started_at) {
+        startPollGlide(data.poll_started_at, data.poll_duration || 30);
+        // Reveal the Stop-Poll panel so the instructor can cancel early
+        const ps = document.getElementById('poll-status');
+        if (ps) ps.style.display = 'flex';
     } else {
         alert(data.error || 'Failed to start poll');
     }
@@ -986,7 +1137,7 @@ window.startPoll = async function() {
 window.stopPoll = async function() {
     const data = await postJSON('/api/stop_poll', {});
     if (data.success) {
-        window.location.reload();
+        stopPollGlide();
     } else {
         alert(data.error || 'Failed to stop poll');
     }
@@ -997,13 +1148,20 @@ window.submitRating = async function() {
         alert('Please rate both questions');
         return;
     }
+    const btn = document.getElementById('btn-submit-rating');
+    if (btn) btn.disabled = true;
     const data = await postJSON('/api/submit_rating', {
         q1_developed: pollSelections.q1,
         q2_easy: pollSelections.q2
     });
     if (data.success) {
-        alert('Rating submitted!');
+        if (btn) {
+            btn.textContent = '✓ Submitted';
+            btn.classList.add('btn-submitted');
+        }
+        ratingSubmitted = true;
     } else {
+        if (btn) btn.disabled = false;
         alert(data.error || 'Failed to submit rating');
     }
 };
@@ -1117,12 +1275,17 @@ function stopCountdownTimer() {
     }
 }
 
-function startTimer(startedAt) {
+function startTimer(startedAt, capOverride) {
     // FIX: append 'Z' — SQLite CURRENT_TIMESTAMP is UTC
     const startTime = new Date(startedAt.replace(' ', 'T') + 'Z').getTime();
     const elapsed = Math.floor((Date.now() - startTime) / 1000);
-    const instructorEl = document.querySelector('.instructor[data-slug]');
-    const cap = instructorEl ? parseInt(instructorEl.dataset.presentationTimeCap || '300', 10) : 300;
+    let cap;
+    if (capOverride != null) {
+        cap = parseInt(capOverride, 10) || 300;
+    } else {
+        const instructorEl = document.querySelector('.instructor[data-slug]');
+        cap = instructorEl ? parseInt(instructorEl.dataset.presentationTimeCap || '300', 10) : 300;
+    }
     startCountdownTimer(Math.max(0, cap - elapsed));
 }
 
@@ -1167,9 +1330,14 @@ if (instructorEl) {
         const st = document.getElementById('session-timer');
         if (st) st.style.display = 'none';
     }
-    // Poll status
+    // Poll status — restore gliding fill if poll is active on page load
     const pollStatus = document.getElementById('poll-status');
-    if (pollStatus && window.__initialPollActive) {
+    const pollStarted = instructorEl.dataset.pollStarted;
+    const pollActive = instructorEl.dataset.pollActive === '1';
+    if (pollActive && pollStarted) {
+        startPollGlide(pollStarted, 30);
+    }
+    if (pollStatus && pollActive) {
         pollStatus.style.display = 'flex';
     }
     // History

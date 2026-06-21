@@ -78,6 +78,7 @@ CREATE TABLE course_state (
     presentation_remaining INTEGER,
     poll_active INTEGER DEFAULT 0,
     poll_question_key TEXT,
+    poll_started_at TIMESTAMP,
     presentation_history TEXT DEFAULT '[]',
     FOREIGN KEY (course_id) REFERENCES courses (id),
     FOREIGN KEY (active_team_id) REFERENCES teams (id),
