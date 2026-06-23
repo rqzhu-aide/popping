@@ -1,0 +1,24 @@
+<!-- Q4: Regularization Analysis -->
+<p>Consider a regularized empirical risk minimization problem:</p>
+
+<p>$$\hat{\theta} = \arg\min_{\theta} \sum_{i=1}^{n} \ell(y_i, f_\theta(x_i)) + \lambda \|\theta\|_2^2$$</p>
+
+<p>Answer the following:</p>
+
+<ol>
+  <li>How does increasing $\lambda$ affect <strong>bias</strong>?</li>
+  <li>How does increasing $\lambda$ affect <strong>variance</strong>?</li>
+  <li>Write code to demonstrate the bias-variance trade-off using cross-validation:</li>
+</ol>
+
+<pre><code class="language-python">import numpy as np
+from sklearn.linear_model import Ridge
+from sklearn.model_selection import cross_val_score
+
+lambdas = [0.001, 0.01, 0.1, 1.0, 10.0, 100.0]
+for lam in lambdas:
+    model = Ridge(alpha=lam)
+    scores = cross_val_score(model, X, y, cv=5)
+    print(f"λ={lam:>7.3f}  MSE={-scores.mean():.4f}  ±{scores.std():.4f}")</code></pre>
+
+<p>Which value of $\lambda$ would you choose, and why? Plot the validation curve if needed.</p>

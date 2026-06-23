@@ -75,6 +75,7 @@ let pollSelections = { q1: 0, q2: 0 };
 let pollInterval = null;
 let ratingSubmitted = false;       // has the student submitted for the current presentation?
 let lastRatedTeamId = null;        // track which team was rated to detect new presentations
+let lastRenderedQuestionKey = null; // track active question to avoid re-rendering same HTML
 
 const dashboard = document.querySelector('.dashboard');
 if (dashboard) {
@@ -205,14 +206,26 @@ if (dashboard) {
                     banner.textContent = state.active_team.name;
                     banner.style.color = state.active_team.color;
                 }
-                // Show active question
+                // Show active question — only re-render when question changes
                 const qDisplay = document.getElementById('question-display');
                 const qText = document.getElementById('active-question-text');
                 if (qDisplay && qText && state.active_question) {
                     qDisplay.style.display = 'block';
-                    qText.textContent = `#${state.active_question.question_num}: ${state.active_question.question_text}`;
+                    const qKey = `${state.active_question.id}-${state.active_question.question_num}`;
+                    if (qKey !== lastRenderedQuestionKey) {
+                        lastRenderedQuestionKey = qKey;
+                        if (state.active_question.html_content) {
+                            qText.innerHTML = state.active_question.html_content;
+                        } else {
+                            const md = state.active_question.content || state.active_question.question_text || '';
+                            qText.innerHTML = marked.parse(`#${state.active_question.question_num}: ${state.active_question.title || ''}\n\n${md}`);
+                        }
+                        if (window.MathJax) MathJax.typesetPromise([qText]);
+                        if (window.hljs) hljs.highlightAll();
+                    }
                 } else if (qDisplay) {
                     qDisplay.style.display = 'none';
+                    lastRenderedQuestionKey = null;
                 }
                 // --- Presentation countdown timer (visible to ALL teams) ---
                 const timer = document.getElementById('student-timer');
@@ -498,6 +511,27 @@ window.randomAssign = async function() {
 /* ===== INSTRUCTOR PANEL ===== */
 const instructor = document.querySelector('.instructor[data-slug]');
 if (instructor) {
+    // Render active question markdown on page load (competition phase)
+    (async function renderInstructorActiveQuestion() {
+        const qText = document.getElementById('active-question-text');
+        if (!qText) return;
+        try {
+            const res = await fetch('/api/state');
+            const state = await res.json();
+            if (state.active_question) {
+                lastRenderedQuestionKey = `${state.active_question.id}-${state.active_question.question_num}`;
+                if (state.active_question.html_content) {
+                    qText.innerHTML = state.active_question.html_content;
+                } else {
+                    const md = state.active_question.content || state.active_question.question_text || '';
+                    qText.innerHTML = marked.parse(`#${state.active_question.question_num}: ${state.active_question.title || ''}\n\n${md}`);
+                }
+                if (window.MathJax) MathJax.typesetPromise([qText]);
+                if (window.hljs) hljs.highlightAll();
+            }
+        } catch (e) {}
+    })();
+
     setInterval(async () => {
         // Auto-refresh the team roster in SETUP phase
         const rosterGrid = document.querySelector('.roster-grid');
@@ -539,6 +573,21 @@ if (instructor) {
             const pollCount = document.getElementById('poll-count');
             if (pollCount) {
                 pollCount.textContent = `${state.poll_count || 0} response${state.poll_count === 1 ? '' : 's'}`;
+            }
+            // Update active question markdown — only re-render when question changes
+            const qText = document.getElementById('active-question-text');
+            if (qText && state.active_question) {
+                const qKey = `${state.active_question.id}-${state.active_question.question_num}`;
+                if (qKey !== lastRenderedQuestionKey) {
+                    lastRenderedQuestionKey = qKey;
+                    const newHtml = state.active_question.html_content || marked.parse(`#${state.active_question.question_num}: ${state.active_question.title || ''}\n\n${state.active_question.content || state.active_question.question_text || ''}`);
+                    qText.innerHTML = newHtml;
+                    if (window.MathJax) MathJax.typesetPromise([qText]);
+                    if (window.hljs) hljs.highlightAll();
+                }
+            } else if (qText) {
+                qText.innerHTML = '';
+                lastRenderedQuestionKey = null;
             }
             // Toggle poll status panel based on server state
             const ps = document.getElementById('poll-status');

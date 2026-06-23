@@ -203,8 +203,8 @@
                 </div>
                 <div class="info-row">
                     <span class="info-label">Question:</span>
-                    <span class="info-value" id="active-question-text">
-                        {% for q in questions %}{% if q.id == state.active_question_id %}#{{ q.question_num }}: {{ q.question_text }}{% endif %}{% endfor %}
+                    <span class="info-value markdown-content" id="active-question-text" data-qnum="{{ state.active_question_id }}">
+                        {% for q in questions %}{% if q.id == state.active_question_id %}#{{ q.question_num }}: {% if q.title %}{{ q.title }}{% else %}{{ q.question_text }}{% endif %}{% endif %}{% endfor %}
                     </span>
                 </div>
             </div>
@@ -223,12 +223,6 @@
                 <span class="hint" id="poll-count">0 responses</span>
                 <button class="btn btn-sm btn-secondary" onclick="stopPoll()">Stop Poll</button>
             </div>
-
-            {# History panel #}
-            <div class="history-panel" id="history-panel" style="margin-top:20px;">
-                <h4>Presentation History</h4>
-                <div id="history-list"></div>
-            </div>
             {% else %}
             {# --- No active presentation --- #}
             <div class="form-row">
@@ -246,7 +240,9 @@
                     <select id="comp-question">
                         <option value="">-- Choose question --</option>
                         {% for q in questions %}
-                        <option value="{{ q.id }}">#{{ q.question_num }}: {{ q.question_text[:60] }}{% if q.question_text|length > 60 %}...{% endif %}</option>
+                        {% if q.id not in presented_question_ids %}
+                        <option value="{{ q.id }}">#{{ q.question_num }}: {% if q.title %}{{ q.title[:60] }}{% if q.title|length > 60 %}...{% endif %}{% else %}{{ q.question_text[:60] }}{% if q.question_text|length > 60 %}...{% endif %}{% endif %}</option>
+                        {% endif %}
                         {% endfor %}
                     </select>
                 </div>
@@ -259,6 +255,12 @@
                 <button class="btn btn-primary btn-full" id="btn-start" onclick="startPresentation()">▶ Start Presentation</button>
             </div>
             {% endif %}
+
+            {# History panel — always visible in competition phase #}
+            <div class="history-panel" id="history-panel" style="margin-top:20px;">
+                <h4>Presentation History</h4>
+                <div id="history-list"></div>
+            </div>
         </div>
     </section>
 

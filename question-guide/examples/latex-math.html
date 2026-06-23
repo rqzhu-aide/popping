@@ -1,0 +1,8 @@
+<!-- Q2: Bias-Variance Decomposition -->
+<p>As the number of trees $B$ increases in a random forest: does bias change? Does variance change? Justify your answer.</p>
+
+<p>The variance of a random forest prediction is given by:</p>
+
+<p>$$\text{Var}(\hat{f}) = \rho \sigma^2 + \frac{1 - \rho}{B} \sigma^2$$</p>
+
+<p>where $\rho$ is the pairwise correlation between individual trees and $\sigma^2$ is the variance of a single tree. Explain what happens to each term as $B \to \infty$.</p>

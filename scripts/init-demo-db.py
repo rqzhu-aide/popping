@@ -109,23 +109,35 @@ def init_demo_db():
             (course_id, sid, name, 'demo', team['id'])
         )
 
-    # 10 questions
-    questions = [
-        "Explain the key differences between bagging and boosting. How does each method reduce variance and bias?",
-        "A random forest reports high feature importance for X1 and X2. Discuss why this does not imply causality.",
-        "As the number of trees B increases in a random forest: does bias change? Does variance change? Justify.",
-        "In gradient boosting, what happens when the learning rate is very small (0.001) vs very large (1.0)?",
-        "XGBoost adds regularization. How does the tree penalty parameter control model complexity?",
-        "In AdaBoost, misclassified examples get higher weights. Why does this focus on 'hard' examples?",
-        "Compare stacking and blending: how are base predictions combined? What is the role of the holdout set?",
-        "Explain why out-of-bag (OOB) error is an unbiased estimate. What are its limitations vs k-fold CV?",
-        "The universal approximation theorem says a single hidden layer can approximate any function. Why prefer deep networks?",
-        "A neural network has 99% training accuracy but 72% validation. Propose 3 regularization strategies and explain.",
-    ]
-    for i, q in enumerate(questions, 1):
+    # Read questions from classes/demo/week1/index.md
+    import re
+    week_dir = os.path.join(BASE_DIR, 'classes', 'demo', 'week1')
+    index_path = os.path.join(week_dir, 'index.md')
+    questions = []
+    if os.path.exists(index_path):
+        with open(index_path, 'r', encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                m = re.match(r'^(\d+)\.\s+(.+)$', line)
+                if m:
+                    qnum = int(m.group(1))
+                    title = m.group(2).strip()
+                    questions.append({'num': qnum, 'title': title})
+    else:
+        # Fallback: inline questions if folder doesn't exist
+        questions = [
+            {'num': 1, 'title': 'Bagging vs Boosting'},
+            {'num': 2, 'title': 'Bias-Variance Decomposition'},
+            {'num': 3, 'title': 'Gradient Boosting Parameters'},
+            {'num': 4, 'title': 'Regularization Analysis'},
+        ]
+
+    for q in questions:
         conn.execute(
-            "INSERT INTO questions (course_id, question_num, question_text) VALUES (?, ?, ?)",
-            (course_id, i, q)
+            "INSERT INTO questions (course_id, question_num, question_text, title, week_num) VALUES (?, ?, ?, ?, ?)",
+            (course_id, q['num'], q['title'][:200], q['title'], 1)
         )
 
     # Course state — start in setup
@@ -141,7 +153,7 @@ def init_demo_db():
     print(f"  Instructor: demo_instructor")
     print(f"  Students:   20 (demo001-demo020, PIN='demo')")
     print(f"  Teams:      4 (Alpha, Beta, Gamma, Delta)")
-    print(f"  Questions:  10")
+    print(f"  Questions:  {len(questions)}")
 
 
 if __name__ == '__main__':

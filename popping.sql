@@ -57,6 +57,9 @@ CREATE TABLE questions (
     course_id INTEGER NOT NULL,
     question_num INTEGER NOT NULL,
     question_text TEXT NOT NULL,
+    title TEXT,
+    content TEXT,
+    week_num INTEGER DEFAULT 1,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (course_id) REFERENCES courses (id)
 );

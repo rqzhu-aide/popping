@@ -1,0 +1,23 @@
+<!-- Q3: Gradient Boosting Parameters -->
+<p>In gradient boosting, what happens when the learning rate is very small (e.g., 0.001) versus very large (e.g., 1.0)?</p>
+
+<p>Consider the following XGBoost setup:</p>
+
+<pre><code class="language-python">import xgboost as xgb
+from sklearn.model_selection import train_test_split
+
+# Small learning rate — slow learning, needs more trees
+model_slow = xgb.XGBClassifier(
+    learning_rate=0.01,
+    n_estimators=500,
+    max_depth=3
+)
+
+# Large learning rate — fast learning, fewer trees
+model_fast = xgb.XGBClassifier(
+    learning_rate=1.0,
+    n_estimators=50,
+    max_depth=3
+)</code></pre>
+
+<p>Which model would you expect to generalize better, and why? What is the trade-off?</p>

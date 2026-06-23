@@ -68,6 +68,15 @@ def ensure_schema(slug):
     if 'presentation_history' not in cs_cols:
         db.execute("ALTER TABLE course_state ADD COLUMN presentation_history TEXT DEFAULT '[]'")
 
+    # questions columns
+    q_cols = [row['name'] for row in db.execute('PRAGMA table_info(questions)').fetchall()]
+    if 'title' not in q_cols:
+        db.execute('ALTER TABLE questions ADD COLUMN title TEXT')
+    if 'content' not in q_cols:
+        db.execute('ALTER TABLE questions ADD COLUMN content TEXT')
+    if 'week_num' not in q_cols:
+        db.execute('ALTER TABLE questions ADD COLUMN week_num INTEGER DEFAULT 1')
+
     # students columns
     st_cols = [row['name'] for row in db.execute('PRAGMA table_info(students)').fetchall()]
     if 'last_login_at' not in st_cols:

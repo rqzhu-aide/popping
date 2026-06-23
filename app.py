@@ -35,6 +35,20 @@ PHASE_LABELS = {
 POLL_DURATION = 30
 
 
+def load_question_html(slug, week_num, question_num):
+    """Read pre-rendered HTML for a question from the week folder.
+    
+    Path: classes/<slug>/week<N>/q<NN>.html  (zero-padded, e.g. q01.html)
+    Returns HTML string or None if file not found.
+    """
+    filepath = os.path.join(config.CLASSES_DIR, slug, f'week{week_num}', f'q{question_num:02d}.html')
+    try:
+        with open(filepath, 'r', encoding='utf-8') as f:
+            return f.read()
+    except (FileNotFoundError, IOError):
+        return None
+
+
 @app.before_request
 def track_student_activity():
     if 'student_id' in session and 'slug' in session:
@@ -271,6 +285,13 @@ def demo_student():
     return redirect(url_for('dashboard'))
 
 
+@app.route('/demo/exit')
+def demo_exit():
+    """Exit demo mode — clear session and return to the main site."""
+    session.clear()
+    return redirect(url_for('index'))
+
+
 @app.route('/demo/reset')
 def demo_reset():
     """Reset demo data back to initial state."""
@@ -420,6 +441,16 @@ def instructor_course(slug):
                           for r in team_ratings]
         }
 
+    # Track which questions have already been presented
+    presented_question_ids = set()
+    if state and state['presentation_history']:
+        try:
+            for h in json.loads(state['presentation_history']):
+                if 'question_id' in h:
+                    presented_question_ids.add(h['question_id'])
+        except Exception:
+            pass
+
     return render_template(
         'instructor.html',
         course=course, teams=teams, students=students_enhanced,
@@ -428,7 +459,8 @@ def instructor_course(slug):
         max_members=get_max_members_per_team(slug, course['id']),
         teams_locked=teams_locked,
         session_started_at=state['session_started_at'] if state and 'session_started_at' in state.keys() else None,
-        end_stats=end_stats
+        end_stats=end_stats,
+        presented_question_ids=list(presented_question_ids)
     )
 
 
@@ -560,6 +592,11 @@ def api_state():
         )
         if aq:
             active_question = dict(aq)
+            # Load pre-rendered HTML from the week folder
+            week = active_question.get('week_num', state['discussion_week'] if state and state['discussion_week'] else 1)
+            html = load_question_html(slug, week, active_question['question_num'])
+            if html:
+                active_question['html_content'] = html
     # Compute presentation remaining seconds
     presentation_remaining = state['presentation_remaining'] if state else None
     if state and state['presentation_started_at'] and state['presentation_time_cap']:
@@ -1116,6 +1153,55 @@ def get_questions():
     return jsonify([dict(r) for r in rows])
 
 
+@app.route('/api/sync_questions', methods=['POST'])
+@instructor_login_required
+def sync_questions():
+    """Sync questions from a week folder into the database.
+    
+    Reads classes/<slug>/week<N>/index.md for titles and q*.html files.
+    Clears existing questions for the course and inserts new ones.
+    """
+    slug = session['slug']
+    data = request.get_json(silent=True) or {}
+    week_num = data.get('week_num', 1)
+
+    week_dir = os.path.join(config.CLASSES_DIR, slug, f'week{week_num}')
+    index_path = os.path.join(week_dir, 'index.md')
+
+    if not os.path.exists(index_path):
+        return jsonify({'error': f'No questions found for week {week_num}'}), 404
+
+    # Parse index.md for question titles
+    questions = []
+    with open(index_path, 'r', encoding='utf-8') as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            m = re.match(r'^(\d+)\.\s+(.+)$', line)
+            if m:
+                qnum = int(m.group(1))
+                title = m.group(2).strip()
+                questions.append({
+                    'num': qnum,
+                    'title': title
+                })
+
+    course = query_db(slug, 'SELECT id FROM courses LIMIT 1', one=True)
+    if not course:
+        return jsonify({'error': 'Course not found'}), 404
+
+    # Clear existing questions and insert fresh
+    execute_db(slug, 'DELETE FROM questions WHERE course_id = ?', [course['id']])
+    for q in questions:
+        execute_db(slug,
+            'INSERT INTO questions (course_id, question_num, question_text, title, week_num) VALUES (?, ?, ?, ?, ?)',
+            [course['id'], q['num'], q['title'][:200], q['title'], week_num]
+        )
+
+    return jsonify({'success': True, 'count': len(questions), 'week_num': week_num})
+
+
 @app.route('/api/questions', methods=['POST'])
 @instructor_login_required
 def add_question():
@@ -1488,7 +1574,8 @@ def next_presentation():
             'title': q_text,
             'team': team['name'] if team else 'Unknown',
             'responses': count['c'] if count else 0,
-            'started_at': state['presentation_started_at'] or ''
+            'started_at': state['presentation_started_at'] or '',
+            'question_id': state['active_question_id']
         })
         # Keep last 20
         history = history[-20:]
