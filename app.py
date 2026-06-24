@@ -1852,12 +1852,14 @@ def export_data(slug):
     course = query_db(slug, 'SELECT * FROM courses LIMIT 1', one=True)
     from openpyxl import Workbook
     from openpyxl.styles import Font, PatternFill, Alignment
+    from io import BytesIO
+
     wb = Workbook()
 
-    # Header style
     header_font = Font(bold=True, color='FFFFFF')
     header_fill = PatternFill(start_color='13294B', end_color='13294B', fill_type='solid')
     header_align = Alignment(horizontal='center')
+    bold_font = Font(bold=True)
 
     def style_header(ws, headers):
         for col, h in enumerate(headers, 1):
@@ -1866,80 +1868,194 @@ def export_data(slug):
             cell.fill = header_fill
             cell.alignment = header_align
 
-    # Sheet 1: Students
-    ws1 = wb.active
-    ws1.title = 'Students'
-    headers1 = ['student_id', 'name', 'PIN', 'current_team', 'joined_team_at', 'last_login']
-    style_header(ws1, headers1)
-    for i, row in enumerate(query_db(slug,
-        '''SELECT s.student_id, s.name, s.pin, t.name as current_team,
-                  s.last_team_joined_at, s.last_login_at
-           FROM students s LEFT JOIN teams t ON s.team_id = t.id
-           ORDER BY s.name'''), start=2):
-        ws1.cell(row=i, column=1, value=row['student_id'])
-        ws1.cell(row=i, column=2, value=row['name'])
-        ws1.cell(row=i, column=3, value=row['pin'])
-        ws1.cell(row=i, column=4, value=row['current_team'])
-        ws1.cell(row=i, column=5, value=row['last_team_joined_at'])
-        ws1.cell(row=i, column=6, value=row['last_login_at'])
-    for col in range(1, 7):
-        ws1.column_dimensions[chr(64 + col)].auto_size = True
+    def auto_width(ws, headers):
+        for col in range(1, len(headers) + 1):
+            ws.column_dimensions[chr(64 + col) if col <= 26 else 'A'].auto_size = True
 
-    # Sheet 2: Group Discussion (thumbs-up only)
-    ws2 = wb.create_sheet('Group Discussion')
-    headers2 = ['grader', 'recipient', 'time']
-    style_header(ws2, headers2)
-    for i, row in enumerate(query_db(slug,
-        '''SELECT g.name as grader, r.name as recipient, p.created_at
+    cid = course['id']
+
+    # ── gather data ──
+    import collections
+
+    students = query_db(slug,
+        '''SELECT s.*, t.name as team_name
+           FROM students s LEFT JOIN teams t ON s.team_id = t.id
+           WHERE s.course_id = ? ORDER BY s.name''', [cid])
+
+    teams = query_db(slug,
+        '''SELECT t.*,
+                (SELECT COUNT(*) FROM students s WHERE s.team_id = t.id) as member_count
+           FROM teams t WHERE t.course_id = ? ORDER BY t.name''', [cid])
+
+    thumbs = query_db(slug,
+        '''SELECT g.name as grader, r.name as recipient, p.created_at, p.criterion
            FROM peer_reviews p
            JOIN students g ON p.grader_id = g.id
            JOIN students r ON p.recipient_id = r.id
-           WHERE p.score > 0
-           ORDER BY p.created_at'''), start=2):
-        ws2.cell(row=i, column=1, value=row['grader'])
-        ws2.cell(row=i, column=2, value=row['recipient'])
-        ws2.cell(row=i, column=3, value=row['created_at'])
+           WHERE p.course_id = ? AND p.score > 0
+           ORDER BY p.created_at''', [cid])
 
-    # Per-question sheets for presentation ratings
-    q_keys = query_db(slug,
-        'SELECT DISTINCT question_key FROM presentation_ratings WHERE course_id = ? ORDER BY question_key',
-        [course['id']])
-    for qk in q_keys:
-        key = qk['question_key'] or 'unknown'
-        # Excel sheet names cannot contain: \ / ? * [ ] :
-        safe_key = re.sub(r'[\\/?*\[\]:]', '-', key)[:31] or 'unknown'
-        ws = wb.create_sheet(safe_key)
-        headers_q = ['student', 'developed', 'easy', 'time']
-        style_header(ws, headers_q)
-        for i, row in enumerate(query_db(slug,
-            '''SELECT s.name, pr.q1_developed, pr.q2_easy, pr.created_at
-               FROM presentation_ratings pr
-               JOIN students s ON pr.student_id = s.id
-               WHERE pr.course_id = ? AND pr.question_key = ?
-               ORDER BY pr.created_at''',
-            [course['id'], key]), start=2):
-            ws.cell(row=i, column=1, value=row['name'])
-            ws.cell(row=i, column=2, value=row['q1_developed'])
-            ws.cell(row=i, column=3, value=row['q2_easy'])
-            ws.cell(row=i, column=4, value=row['created_at'])
+    ratings = query_db(slug,
+        '''SELECT pr.question_key, s.name as rater, pr.q1_developed, pr.q2_easy, pr.created_at
+           FROM presentation_ratings pr
+           JOIN students s ON pr.student_id = s.id
+           WHERE pr.course_id = ?
+           ORDER BY pr.question_key, pr.created_at''', [cid])
 
-    # Summary sheet
-    ws_sum = wb.create_sheet('Summary')
-    ws_sum.cell(row=1, column=1, value='Course').font = Font(bold=True)
-    ws_sum.cell(row=1, column=2, value=course['name'])
-    ws_sum.cell(row=2, column=1, value='Code').font = Font(bold=True)
-    ws_sum.cell(row=2, column=2, value=course['code'] or '')
-    ws_sum.cell(row=4, column=1, value='Student Count').font = Font(bold=True)
-    cnt = query_db(slug, 'SELECT COUNT(*) as c FROM students WHERE course_id = ?',
-                   [course['id']], one=True)
-    ws_sum.cell(row=4, column=2, value=cnt['c'] if cnt else 0)
-    ws_sum.cell(row=5, column=1, value='Team Count').font = Font(bold=True)
-    tcnt = query_db(slug, 'SELECT COUNT(*) as c FROM teams WHERE course_id = ?',
-                    [course['id']], one=True)
-    ws_sum.cell(row=5, column=2, value=tcnt['c'] if tcnt else 0)
+    # Map question_key → presenting team from presentation_history
+    state_row = query_db(slug, 'SELECT * FROM course_state WHERE course_id = ?', [cid], one=True)
+    key_to_team = {}
+    if state_row and state_row['presentation_history']:
+        for h in json.loads(state_row['presentation_history']):
+            qkey = f"pres-{h.get('started_at', '')}"
+            key_to_team[qkey] = h.get('team', 'Unknown')
 
-    # Save to bytes
-    from io import BytesIO
+    # ── TAB 1: Summary ──
+    ws1 = wb.active
+    ws1.title = 'Summary'
+    r = 1
+    ws1.cell(row=r, column=1, value='Course').font = bold_font
+    ws1.cell(row=r, column=2, value=course['name']); r += 1
+    ws1.cell(row=r, column=1, value='Code').font = bold_font
+    ws1.cell(row=r, column=2, value=course['code'] or ''); r += 1
+    ws1.cell(row=r, column=1, value='Semester').font = bold_font
+    ws1.cell(row=r, column=2, value=course['semester'] or ''); r += 1
+    ws1.cell(row=r, column=1, value='Export Date').font = bold_font
+    ws1.cell(row=r, column=2, value=datetime.now().strftime('%Y-%m-%d %H:%M')); r += 1
+    ws1.cell(row=r, column=1, value='Total Students').font = bold_font
+    ws1.cell(row=r, column=2, value=len(students)); r += 1
+    ws1.cell(row=r, column=1, value='Total Teams').font = bold_font
+    ws1.cell(row=r, column=2, value=len(teams)); r += 1
+    ws1.cell(row=r, column=1, value='Total Thumbs-up').font = bold_font
+    ws1.cell(row=r, column=2, value=len(thumbs)); r += 1
+    ws1.cell(row=r, column=1, value='Total Presentation Ratings').font = bold_font
+    ws1.cell(row=r, column=2, value=len(ratings)); r += 2
+
+    # Team leaderboard
+    ws1.cell(row=r, column=1, value='Team Leaderboard').font = bold_font; r += 1
+    style_header_row = r
+    for col, h in enumerate(['Team', 'Members', 'Avg Developed', 'Avg Easy', 'Total Avg'], 1):
+        cell = ws1.cell(row=r, column=col, value=h)
+        cell.font = header_font; cell.fill = header_fill; cell.alignment = header_align
+    r += 1
+    team_scores = collections.defaultdict(lambda: {'dev': [], 'easy': []})
+    for rt in ratings:
+        tname = key_to_team.get(rt['question_key'], 'Unknown')
+        if rt['q1_developed'] is not None:
+            team_scores[tname]['dev'].append(rt['q1_developed'])
+        if rt['q2_easy'] is not None:
+            team_scores[tname]['easy'].append(rt['q2_easy'])
+    team_sorted = sorted(team_scores.items(), key=lambda x: sum(x[1]['dev']+x[1]['easy'])/max(1, len(x[1]['dev'])), reverse=True)
+    for tname, sc in team_sorted:
+        avg_d = round(sum(sc['dev'])/len(sc['dev']), 2) if sc['dev'] else ''
+        avg_e = round(sum(sc['easy'])/len(sc['easy']), 2) if sc['easy'] else ''
+        total = round((sum(sc['dev'])+sum(sc['easy']))/(len(sc['dev'])+len(sc['easy'])), 2) if (sc['dev'] or sc['easy']) else ''
+        ws1.cell(row=r, column=1, value=tname)
+        member_cnt = next((t['member_count'] for t in teams if t['name'] == tname), '')
+        ws1.cell(row=r, column=2, value=member_cnt)
+        ws1.cell(row=r, column=3, value=avg_d)
+        ws1.cell(row=r, column=4, value=avg_e)
+        ws1.cell(row=r, column=5, value=total)
+        r += 1
+    r += 1
+
+    # Top students by thumbs-up received
+    ws1.cell(row=r, column=1, value='Top Students (by thumbs-up received)').font = bold_font; r += 1
+    for col, h in enumerate(['Student', 'Thumbs Received'], 1):
+        cell = ws1.cell(row=r, column=col, value=h)
+        cell.font = header_font; cell.fill = header_fill; cell.alignment = header_align
+    r += 1
+    thumbs_received = collections.Counter(t['recipient'] for t in thumbs)
+    for name, cnt in thumbs_received.most_common(10):
+        ws1.cell(row=r, column=1, value=name)
+        ws1.cell(row=r, column=2, value=cnt)
+        r += 1
+    r += 1
+
+    # Per-question summary
+    ws1.cell(row=r, column=1, value='Per-Question Summary').font = bold_font; r += 1
+    for col, h in enumerate(['Question', 'Presenting Team', '# Ratings', 'Avg Developed', 'Avg Easy'], 1):
+        cell = ws1.cell(row=r, column=col, value=h)
+        cell.font = header_font; cell.fill = header_fill; cell.alignment = header_align
+    r += 1
+    q_groups = collections.defaultdict(list)
+    for rt in ratings:
+        q_groups[rt['question_key']].append(rt)
+    for qkey in sorted(q_groups.keys()):
+        items = q_groups[qkey]
+        devs = [x['q1_developed'] for x in items if x['q1_developed'] is not None]
+        easys = [x['q2_easy'] for x in items if x['q2_easy'] is not None]
+        ws1.cell(row=r, column=1, value=qkey)
+        ws1.cell(row=r, column=2, value=key_to_team.get(qkey, 'Unknown'))
+        ws1.cell(row=r, column=3, value=len(items))
+        ws1.cell(row=r, column=4, value=round(sum(devs)/len(devs), 2) if devs else '')
+        ws1.cell(row=r, column=5, value=round(sum(easys)/len(easys), 2) if easys else '')
+        r += 1
+    ws1.column_dimensions['A'].width = 30
+    ws1.column_dimensions['B'].width = 18
+    ws1.column_dimensions['C'].width = 15
+    ws1.column_dimensions['D'].width = 15
+    ws1.column_dimensions['E'].width = 12
+
+    # ── TAB 2: Student Activities ──
+    ws2 = wb.create_sheet('Student Activities')
+    headers2 = ['student_id', 'name', 'team', 'thumbs_given', 'thumbs_received',
+                'discussion_selections', 'presentation_ratings_given',
+                'last_login', 'last_active']
+    style_header(ws2, headers2)
+    # Pre-compute counts
+    given = collections.Counter()
+    received = collections.Counter()
+    ratings_given = collections.Counter()
+    sel_given = collections.Counter()
+    for t in thumbs:
+        given[t['grader']] += 1
+        received[t['recipient']] += 1
+    for rt in ratings:
+        ratings_given[rt['rater']] += 1
+    sels = query_db(slug,
+        '''SELECT s.name, COUNT(*) as c FROM discussion_selections ds
+           JOIN students s ON ds.student_id = s.id
+           WHERE ds.course_id = ? GROUP BY s.id''', [cid])
+    for s in sels:
+        sel_given[s['name']] = s['c']
+    for i, stu in enumerate(students, 2):
+        ws2.cell(row=i, column=1, value=stu['student_id'])
+        ws2.cell(row=i, column=2, value=stu['name'])
+        ws2.cell(row=i, column=3, value=stu['team_name'])
+        ws2.cell(row=i, column=4, value=given.get(stu['name'], 0))
+        ws2.cell(row=i, column=5, value=received.get(stu['name'], 0))
+        ws2.cell(row=i, column=6, value=sel_given.get(stu['name'], 0))
+        ws2.cell(row=i, column=7, value=ratings_given.get(stu['name'], 0))
+        ws2.cell(row=i, column=8, value=stu['last_login_at'])
+        ws2.cell(row=i, column=9, value=stu['last_active_at'])
+    auto_width(ws2, headers2)
+
+    # ── TAB 3: Group Discussion ──
+    ws3 = wb.create_sheet('Group Discussion')
+    headers3 = ['grader', 'recipient', 'criterion', 'time']
+    style_header(ws3, headers3)
+    for i, t in enumerate(thumbs, 2):
+        ws3.cell(row=i, column=1, value=t['grader'])
+        ws3.cell(row=i, column=2, value=t['recipient'])
+        ws3.cell(row=i, column=3, value=t['criterion'])
+        ws3.cell(row=i, column=4, value=t['created_at'])
+    auto_width(ws3, headers3)
+
+    # ── TAB 4: Presentation ──
+    ws4 = wb.create_sheet('Presentation')
+    headers4 = ['question_key', 'presenting_team', 'rater', 'developed', 'easy', 'time']
+    style_header(ws4, headers4)
+    for i, rt in enumerate(ratings, 2):
+        ws4.cell(row=i, column=1, value=rt['question_key'])
+        ws4.cell(row=i, column=2, value=key_to_team.get(rt['question_key'], 'Unknown'))
+        ws4.cell(row=i, column=3, value=rt['rater'])
+        ws4.cell(row=i, column=4, value=rt['q1_developed'])
+        ws4.cell(row=i, column=5, value=rt['q2_easy'])
+        ws4.cell(row=i, column=6, value=rt['created_at'])
+    auto_width(ws4, headers4)
+
+    # Save
     buf = BytesIO()
     wb.save(buf)
     buf.seek(0)
