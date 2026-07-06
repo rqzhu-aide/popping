@@ -35,6 +35,79 @@ PHASE_LABELS = {
 POLL_DURATION = 30
 
 
+def is_valid_slug(slug):
+    return isinstance(slug, str) and re.fullmatch(r'[A-Za-z0-9_-]+', slug)
+
+
+def course_db_path(slug):
+    if not is_valid_slug(slug):
+        return None
+    return os.path.join(config.DATA_DIR, slug, 'popping.db')
+
+
+def active_presentation_key(state):
+    """Stable key for the current presentation, even if its timer is paused."""
+    if not state:
+        return None
+    if 'poll_question_key' in state.keys() and state['poll_question_key']:
+        return state['poll_question_key']
+    if 'presentation_started_at' in state.keys() and state['presentation_started_at']:
+        return f"pres-{state['presentation_started_at']}"
+    return None
+
+
+def parse_question_blocks(content):
+    """Parse repeated YAML-frontmatter question blocks from a markdown file."""
+    content = content.strip()
+    if content.startswith('---'):
+        content = content[3:].lstrip()
+    blocks = content.split('\n---\n')
+    entries = []
+    i = 0
+    while i + 1 < len(blocks):
+        fm_block = blocks[i].strip()
+        body_block = blocks[i + 1].strip()
+        if fm_block:
+            entries.append((fm_block, body_block))
+        i += 2
+    return entries
+
+
+def read_presentation_question_index(slug, week_num):
+    week_dir = os.path.join(config.CLASSES_DIR, slug, f'week{week_num}')
+    index_path = os.path.join(week_dir, 'index.md')
+    if not os.path.exists(index_path):
+        return None
+
+    questions = []
+    with open(index_path, 'r', encoding='utf-8') as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            m = re.match(r'^(\d+)\.\s+(.+)$', line)
+            if m:
+                qnum = int(m.group(1))
+                title = m.group(2).strip()
+                questions.append({'num': qnum, 'title': title})
+    return questions
+
+
+def sync_presentation_questions(slug, course_id, week_num):
+    """Sync classes/<slug>/weekN/index.md into the presentation question table."""
+    questions = read_presentation_question_index(slug, week_num)
+    if questions is None:
+        return None
+
+    execute_db(slug, 'DELETE FROM questions WHERE course_id = ?', [course_id])
+    for q in questions:
+        execute_db(slug,
+            'INSERT INTO questions (course_id, question_num, question_text, title, week_num) VALUES (?, ?, ?, ?, ?)',
+            [course_id, q['num'], q['title'][:200], q['title'], week_num]
+        )
+    return len(questions)
+
+
 def load_question_html(slug, week_num, question_num):
     """Read pre-rendered HTML for a question from the week folder.
     
@@ -156,8 +229,8 @@ def index():
 
 @app.route('/login/<slug>', methods=['GET', 'POST'])
 def login(slug):
-    db_path = os.path.join(config.DATA_DIR, slug, 'popping.db')
-    if not os.path.exists(db_path):
+    db_path = course_db_path(slug)
+    if not db_path or not os.path.exists(db_path):
         flash('Course not found.', 'error')
         return redirect(url_for('index'))
 
@@ -198,8 +271,8 @@ def login(slug):
 
 @app.route('/instructor_login/<slug>', methods=['GET', 'POST'])
 def instructor_login(slug):
-    db_path = os.path.join(config.DATA_DIR, slug, 'popping.db')
-    if not os.path.exists(db_path):
+    db_path = course_db_path(slug)
+    if not db_path or not os.path.exists(db_path):
         flash('Course not found.', 'error')
         return redirect(url_for('index'))
 
@@ -522,9 +595,21 @@ def join_team():
     if not team_id:
         execute_db(slug, 'UPDATE students SET team_id = NULL WHERE id = ?', [student['id']])
         return jsonify({'success': True})
+    try:
+        team_id = int(team_id)
+    except (TypeError, ValueError):
+        return jsonify({'error': 'Invalid team ID'}), 400
 
     # Check team capacity
     course = query_db(slug, 'SELECT id FROM courses LIMIT 1', one=True)
+    max_teams = get_max_teams(slug, course['id'])
+    visible_teams = query_db(slug,
+        'SELECT id FROM teams WHERE course_id = ? ORDER BY id LIMIT ?',
+        [course['id'], max_teams]
+    )
+    if team_id not in {t['id'] for t in visible_teams}:
+        return jsonify({'error': 'Team is not available'}), 400
+
     max_members = get_max_members_per_team(slug, course['id'])
     member_count = query_db(slug,
         'SELECT COUNT(*) as c FROM students WHERE team_id = ?', [team_id], one=True
@@ -627,9 +712,7 @@ def api_state():
             pass
     # Poll count — count ratings for the active presentation (grading is always open)
     poll_count = 0
-    pres_key = None
-    if state and state['presentation_started_at']:
-        pres_key = f"pres-{state['presentation_started_at']}"
+    pres_key = active_presentation_key(state)
     if state and pres_key:
         course = query_db(slug, 'SELECT id FROM courses LIMIT 1', one=True)
         cnt = query_db(slug,
@@ -685,6 +768,11 @@ def grade_peer():
         return jsonify({'error': 'Recipient not found'}), 404
     if grader['id'] == recipient['id']:
         return jsonify({'error': 'Cannot grade yourself'}), 400
+    state = query_db(slug, 'SELECT phase FROM course_state LIMIT 1', one=True)
+    if not state or state['phase'] not in ('discussion', 'competition'):
+        return jsonify({'error': 'Peer grading is not open'}), 403
+    if not grader['team_id'] or recipient['team_id'] != grader['team_id']:
+        return jsonify({'error': 'You can only grade teammates'}), 403
     course = query_db(slug, 'SELECT id FROM courses LIMIT 1', one=True)
     execute_db(slug,
         '''INSERT INTO peer_reviews (course_id, grader_id, recipient_id, criterion, score)
@@ -705,6 +793,9 @@ def submit_discussion():
     response = data.get('response', '')
     if not question or not response:
         return jsonify({'error': 'Question and response required'}), 400
+    state = query_db(slug, 'SELECT phase FROM course_state LIMIT 1', one=True)
+    if not state or state['phase'] != 'discussion':
+        return jsonify({'error': 'Discussion responses are not open'}), 403
     student = query_db(slug,
         'SELECT id FROM students WHERE student_id = ?',
         [session['student_id']], one=True
@@ -946,7 +1037,12 @@ def set_discussion_week():
         'UPDATE course_state SET discussion_week = ? WHERE course_id = ?',
         [week, course['id']]
     )
-    return jsonify({'success': True})
+    synced_count = sync_presentation_questions(slug, course['id'], week)
+    return jsonify({
+        'success': True,
+        'question_count': synced_count,
+        'question_sync': 'not_found' if synced_count is None else 'synced'
+    })
 
 
 @app.route('/api/toggle_lock_teams', methods=['POST'])
@@ -1053,25 +1149,18 @@ def discussion_questions():
             with open(filepath, 'r', encoding='utf-8') as f:
                 content = f.read()
             import yaml
-            content = content.lstrip('-').lstrip()
-            blocks = content.split('\n---\n')
-            i = 0
-            while i + 1 < len(blocks):
-                fm_block = blocks[i].strip()
-                body_block = blocks[i + 1].strip()
-                if fm_block:
-                    try:
-                        fm = yaml.safe_load(fm_block)
-                        if fm and fm.get('title'):
-                            key = f"{prefix}{i//2}"
-                            out.append({
-                                'key': key,
-                                'title': fm.get('title', 'Untitled'),
-                                'content': body_block
-                            })
-                    except Exception:
-                        pass
-                i += 2
+            for i, (fm_block, body_block) in enumerate(parse_question_blocks(content)):
+                try:
+                    fm = yaml.safe_load(fm_block)
+                    if fm and fm.get('title'):
+                        key = f"{prefix}{i}"
+                        out.append({
+                            'key': key,
+                            'title': fm.get('title', 'Untitled'),
+                            'content': body_block
+                        })
+                except Exception:
+                    pass
         except Exception:
             pass
         return out
@@ -1165,41 +1254,15 @@ def sync_questions():
     data = request.get_json(silent=True) or {}
     week_num = data.get('week_num', 1)
 
-    week_dir = os.path.join(config.CLASSES_DIR, slug, f'week{week_num}')
-    index_path = os.path.join(week_dir, 'index.md')
-
-    if not os.path.exists(index_path):
-        return jsonify({'error': f'No questions found for week {week_num}'}), 404
-
-    # Parse index.md for question titles
-    questions = []
-    with open(index_path, 'r', encoding='utf-8') as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            m = re.match(r'^(\d+)\.\s+(.+)$', line)
-            if m:
-                qnum = int(m.group(1))
-                title = m.group(2).strip()
-                questions.append({
-                    'num': qnum,
-                    'title': title
-                })
-
     course = query_db(slug, 'SELECT id FROM courses LIMIT 1', one=True)
     if not course:
         return jsonify({'error': 'Course not found'}), 404
 
-    # Clear existing questions and insert fresh
-    execute_db(slug, 'DELETE FROM questions WHERE course_id = ?', [course['id']])
-    for q in questions:
-        execute_db(slug,
-            'INSERT INTO questions (course_id, question_num, question_text, title, week_num) VALUES (?, ?, ?, ?, ?)',
-            [course['id'], q['num'], q['title'][:200], q['title'], week_num]
-        )
+    count = sync_presentation_questions(slug, course['id'], week_num)
+    if count is None:
+        return jsonify({'error': f'No questions found for week {week_num}'}), 404
 
-    return jsonify({'success': True, 'count': len(questions), 'week_num': week_num})
+    return jsonify({'success': True, 'count': count, 'week_num': week_num})
 
 
 @app.route('/api/questions', methods=['POST'])
@@ -1226,12 +1289,13 @@ def add_question():
     # Count existing appendix entries to auto-label
     existing = 0
     if os.path.exists(appendix_path):
-        with open(appendix_path, 'r') as f:
-            existing = f.read().count('\n---\n')
+        with open(appendix_path, 'r', encoding='utf-8') as f:
+            existing = len(parse_question_blocks(f.read()))
     label = f'A{existing + 1}'
+    frontmatter_title = json.dumps(f"{label}: {title}")
 
     block = f"""---
-title: "{label}: {title}"
+title: {frontmatter_title}
 ---
 
 {content}
@@ -1268,14 +1332,7 @@ def delete_appendix_question():
     with open(appendix_path, 'r', encoding='utf-8') as f:
         content = f.read()
 
-    import yaml
-    content = content.lstrip('-').lstrip()
-    blocks = content.split('\n---\n')
-    entries = []
-    i = 0
-    while i + 1 < len(blocks):
-        entries.append((blocks[i].strip(), blocks[i + 1].strip()))
-        i += 2
+    entries = parse_question_blocks(content)
 
     if index < 0 or index >= len(entries):
         return jsonify({'error': 'Index out of range'}), 400
@@ -1311,6 +1368,10 @@ def toggle_present():
     if not student:
         return jsonify({'error': 'Student not found'}), 404
     course = query_db(slug, 'SELECT id FROM courses LIMIT 1', one=True)
+    state = query_db(slug, 'SELECT phase FROM course_state WHERE course_id = ?',
+                     [course['id']], one=True)
+    if not state or state['phase'] != 'discussion':
+        return jsonify({'error': 'Question sign-up is not open'}), 403
 
     # Check if already selected
     existing = query_db(slug,
@@ -1449,21 +1510,41 @@ def start_presentation():
     time_cap = data.get('time_cap', 300)
     if not team_id or not question_id:
         return jsonify({'error': 'Team and question required'}), 400
-    if not isinstance(time_cap, int) or time_cap < 10 or time_cap > 3600:
+    try:
+        team_id = int(team_id)
+        question_id = int(question_id)
+        time_cap = int(time_cap)
+    except (TypeError, ValueError):
+        return jsonify({'error': 'Invalid team, question, or time cap'}), 400
+    if time_cap < 10 or time_cap > 3600:
         time_cap = 300
-    # Look up the canonical question text from the DB (the client sends truncated display text)
-    q = query_db(slug, 'SELECT question_text FROM questions WHERE id = ?', [question_id], one=True)
-    question_text = q['question_text'] if q else ''
     course = query_db(slug, 'SELECT id FROM courses LIMIT 1', one=True)
+    max_teams = get_max_teams(slug, course['id'])
+    visible_teams = query_db(slug,
+        'SELECT id FROM teams WHERE course_id = ? ORDER BY id LIMIT ?',
+        [course['id'], max_teams]
+    )
+    if team_id not in {t['id'] for t in visible_teams}:
+        return jsonify({'error': 'Team is not available'}), 400
+    # Look up the canonical question text from the DB (the client sends truncated display text)
+    q = query_db(slug,
+        'SELECT question_text FROM questions WHERE id = ? AND course_id = ?',
+        [question_id, course['id']], one=True)
+    if not q:
+        return jsonify({'error': 'Question not found'}), 404
+    question_text = q['question_text']
+    started_at = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
     execute_db(slug,
         '''UPDATE course_state
            SET phase = 'competition', active_team_id = ?, active_question_id = ?,
                current_question = ?,
-               presentation_started_at = CURRENT_TIMESTAMP,
+               presentation_started_at = ?,
                presentation_time_cap = ?, presentation_remaining = NULL,
-               poll_active = 0, poll_question_key = NULL, poll_started_at = NULL
+               poll_active = 0, poll_question_key = ?,
+               poll_started_at = NULL
            WHERE course_id = ?''',
-        [team_id, question_id, question_text, time_cap, course['id']]
+        [team_id, question_id, question_text, started_at, time_cap,
+         f'pres-{started_at}', course['id']]
     )
     return jsonify({'success': True})
 
@@ -1564,17 +1645,19 @@ def next_presentation():
         q_text = state['current_question'] or ''
         if len(q_text) > 80:
             q_text = q_text[:77] + '...'
-        # Count ratings for this presentation (keyed on its start time)
-        pres_key = f"pres-{state['presentation_started_at'] or ''}"
+        # Count ratings for this presentation using its stable key. The timer's
+        # started_at can shift on resume, so do not derive the key from it here.
+        pres_key = active_presentation_key(state)
         count = query_db(slug,
             'SELECT COUNT(DISTINCT student_id) as c FROM presentation_ratings '
             'WHERE course_id = ? AND question_key = ?',
             [course['id'], pres_key], one=True)
+        started_at = pres_key[5:] if pres_key and pres_key.startswith('pres-') else ''
         history.append({
             'title': q_text,
             'team': team['name'] if team else 'Unknown',
             'responses': count['c'] if count else 0,
-            'started_at': state['presentation_started_at'] or '',
+            'started_at': started_at,
             'question_id': state['active_question_id']
         })
         # Keep last 20
@@ -1603,10 +1686,12 @@ def start_poll():
     state = query_db(slug, 'SELECT * FROM course_state LIMIT 1', one=True)
     if not state:
         return jsonify({'error': 'No course state'}), 400
-    if not state['presentation_started_at']:
+    if not state['active_team_id'] or not state['active_question_id']:
         return jsonify({'error': 'No active presentation'}), 400
     if not question_key:
-        question_key = f"pres-{state['presentation_started_at']}"
+        question_key = active_presentation_key(state)
+    if not question_key:
+        return jsonify({'error': 'No active presentation'}), 400
     course = query_db(slug, 'SELECT id FROM courses LIMIT 1', one=True)
     execute_db(slug,
         '''UPDATE course_state
@@ -1656,7 +1741,7 @@ def submit_rating():
     state = query_db(slug, 'SELECT * FROM course_state LIMIT 1', one=True)
     # Grading is always open during an active presentation — the poll is just a
     # 30s highlight, not a gate. Key on the active presentation's start time.
-    if not state or not state['presentation_started_at']:
+    if not state or not state['active_team_id'] or not state['active_question_id']:
         return jsonify({'error': 'No active presentation to rate'}), 403
 
     student = query_db(slug,
@@ -1671,7 +1756,9 @@ def submit_rating():
        student['team_id'] == state['active_team_id']:
         return jsonify({'error': 'You cannot rate your own presentation'}), 403
     course = query_db(slug, 'SELECT id FROM courses LIMIT 1', one=True)
-    question_key = f"pres-{state['presentation_started_at']}"
+    question_key = active_presentation_key(state)
+    if not question_key:
+        return jsonify({'error': 'No active presentation to rate'}), 403
     execute_db(slug,
         '''INSERT INTO presentation_ratings
            (course_id, student_id, question_key, q1_developed, q2_easy)

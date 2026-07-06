@@ -1189,6 +1189,14 @@ input:focus, textarea:focus {
     font-weight: 600;
     font-size: 0.92rem;
 }
+.disc-question-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-left: auto;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+}
 .disc-question-body {
     display: none;
     padding: 16px 18px;
@@ -1749,6 +1757,9 @@ html.light .student-timer {
     background: #e0e7ff;
     color: #3730a3;
     margin-left: auto;
+}
+.disc-question-actions .presenting-badge {
+    margin-left: 0;
 }
 .toggle-present-btn {
     background: var(--surface);

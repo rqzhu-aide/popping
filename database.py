@@ -1,10 +1,20 @@
 import os
+import re
 import sqlite3
 from flask import g
 import config
 
+SLUG_RE = re.compile(r'^[A-Za-z0-9_-]+$')
+
+
+def validate_slug(slug):
+    if not isinstance(slug, str) or not SLUG_RE.fullmatch(slug):
+        raise RuntimeError(f"Invalid course slug: {slug!r}")
+    return slug
+
 
 def get_db(slug):
+    slug = validate_slug(slug)
     db_key = f'db_{slug}'
     if not hasattr(g, db_key):
         db_path = os.path.join(config.DATA_DIR, slug, 'popping.db')
@@ -26,6 +36,7 @@ def close_db(e=None):
 
 
 def init_db(slug):
+    slug = validate_slug(slug)
     course_dir = os.path.join(config.DATA_DIR, slug)
     os.makedirs(course_dir, exist_ok=True)
     db_path = os.path.join(course_dir, 'popping.db')

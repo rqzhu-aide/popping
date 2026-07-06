@@ -27,6 +27,19 @@ name: "$NAME"
 code: "$CODE"
 semester: "$SEMESTER"
 active: true
+max_teams: 5
+max_members_per_team: 10
+teams:
+  - name: Team Alpha
+    color: "#ef4444"
+  - name: Team Beta
+    color: "#3b82f6"
+  - name: Team Gamma
+    color: "#10b981"
+  - name: Team Delta
+    color: "#f59e0b"
+  - name: Team Epsilon
+    color: "#8b5cf6"
 EOF
 if [ -n "$URL" ]; then
   echo "url: \"$URL\"" >> "$CLASS_DIR/course.yaml"

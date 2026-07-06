@@ -3,12 +3,14 @@ import os
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # DATA_DIR: where SQLite databases live.
-# On Render with a mounted disk, use /data.
-# Fallback to local project data/ folder.
-if os.path.isdir('/data'):
-    DATA_DIR = '/data'
-else:
-    DATA_DIR = os.path.join(BASE_DIR, 'data')
+# On Render, point this at the persistent disk mount. Locally, use data/.
+DATA_DIR = os.environ.get('DATA_DIR')
+if not DATA_DIR:
+    if os.path.isdir('/data'):
+        DATA_DIR = '/data'
+    else:
+        DATA_DIR = os.path.join(BASE_DIR, 'data')
+DATA_DIR = os.path.abspath(DATA_DIR)
 
 # CLASSES_DIR: where course.yaml configs live (in the git repo).
 # One subfolder per course slug, each with a course.yaml.

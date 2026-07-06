@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import sys
 import os
+import re
 import yaml
 import sqlite3
 import getpass
@@ -24,7 +25,56 @@ slug = cfg['slug']
 name = cfg['name']
 code = cfg['code']
 semester = cfg['semester']
-teams = cfg['teams']
+
+COLORS = [
+    '#ef4444', '#3b82f6', '#10b981', '#f59e0b', '#8b5cf6',
+    '#ec4899', '#06b6d4', '#84cc16', '#f97316', '#6366f1',
+    '#14b8a6', '#e11d48', '#0ea5e9', '#a855f7', '#22c55e',
+    '#eab308', '#dc2626', '#2563eb', '#059669', '#d97706'
+]
+
+
+def build_team_rows(config):
+    configured = config.get('teams') or []
+    pool_size = int(config.get('team_pool_size', max(20, len(configured) or 0)))
+    rows = []
+
+    for i, team in enumerate(configured):
+        rows.append({
+            'name': team.get('name') or f"Team {i + 1}",
+            'color': team.get('color') or COLORS[i % len(COLORS)]
+        })
+
+    while len(rows) < pool_size:
+        i = len(rows)
+        rows.append({
+            'name': f"Team {i + 1}",
+            'color': COLORS[i % len(COLORS)]
+        })
+
+    return rows
+
+
+def read_presentation_question_index(project_root, slug, week_num):
+    index_path = os.path.join(project_root, 'classes', slug, f'week{week_num}', 'index.md')
+    if not os.path.exists(index_path):
+        return []
+
+    questions = []
+    with open(index_path, 'r', encoding='utf-8') as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            m = re.match(r'^(\d+)\.\s+(.+)$', line)
+            if m:
+                questions.append({'num': int(m.group(1)), 'title': m.group(2).strip()})
+    return questions
+
+
+team_rows = build_team_rows(cfg)
+default_max_teams = int(cfg.get('max_teams', min(len(cfg.get('teams') or []) or 5, len(team_rows))))
+default_max_members = int(cfg.get('max_members_per_team', 10))
 
 # Determine where to write the database
 # Priority: /data (Render disk) > local data/ folder
@@ -84,24 +134,29 @@ cur = conn.execute(
 )
 course_id = cur.lastrowid
 
-# Insert 20 teams with auto-generated names and colors
-COLORS = [
-    '#ef4444', '#3b82f6', '#10b981', '#f59e0b', '#8b5cf6',
-    '#ec4899', '#06b6d4', '#84cc16', '#f97316', '#6366f1',
-    '#14b8a6', '#e11d48', '#0ea5e9', '#a855f7', '#22c55e',
-    '#eab308', '#dc2626', '#2563eb', '#059669', '#d97706'
-]
-for i in range(20):
+# Insert configured teams, plus spare generated teams for in-class expansion.
+for team in team_rows:
     conn.execute(
         "INSERT INTO teams (course_id, name, color) VALUES (?, ?, ?)",
-        (course_id, f"Team {i+1}", COLORS[i])
+        (course_id, team['name'], team['color'])
     )
 
-# Insert course state with default 5 teams
+# Insert course state
 conn.execute(
     "INSERT INTO course_state (course_id, phase, max_teams, max_members_per_team) VALUES (?, 'setup', 5, 10)",
     (course_id,)
 )
+conn.execute(
+    "UPDATE course_state SET max_teams = ?, max_members_per_team = ? WHERE course_id = ?",
+    (default_max_teams, default_max_members, course_id)
+)
+
+# Seed initial presentation questions from week1/index.md when available.
+for q in read_presentation_question_index(project_root, slug, 1):
+    conn.execute(
+        "INSERT INTO questions (course_id, question_num, question_text, title, week_num) VALUES (?, ?, ?, ?, ?)",
+        (course_id, q['num'], q['title'][:200], q['title'], 1)
+    )
 
 conn.commit()
 conn.close()

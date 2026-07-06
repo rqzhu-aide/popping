@@ -9,7 +9,9 @@ services:
         generateValue: true
       - key: PYTHON_VERSION
         value: 3.11.0
+      - key: DATA_DIR
+        value: /data
     disk:
       name: popping-data
-      mountPath: /opt/render/project/src/instance
+      mountPath: /data
       sizeGB: 1

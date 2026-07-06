@@ -12,9 +12,9 @@ Each course lives in its own folder with its own SQLite database. This keeps cou
 - **Discussion Phase**: Students respond to instructor questions.
 - **Peer Grading**: Students grade teammates during discussion.
 - **Competition Mode**: Teams present; instructor selects active team.
-- **Team Grading**: Non-presenting teams grade the presenting team.
+- **Presentation Ratings**: Non-presenting students rate the active presentation.
 - **Instructor Panel**: Control phases, pick presenting team, manage students.
-- **Data Export**: Download per-course grades & responses as CSV.
+- **Data Export**: Download per-course grades & responses as an XLSX workbook.
 
 ## Tech Stack
 
@@ -40,10 +40,10 @@ bash scripts/create-course.sh
 #   - Course name (e.g. "Basics of Statistical Learning")
 #   - Course code (e.g. STAT 432)
 #   - Semester (e.g. Fall 2026)
-#   Then it creates the folder under data/{slug}/
+#   Then it creates the folder under classes/{slug}/
 
 # 4. Initialize the course database
-cd data/432fall2026
+cd classes/432fall2026
 bash init-db.sh
 #   It will prompt you for instructor credentials
 
@@ -59,16 +59,20 @@ Open http://127.0.0.1:5000
 After creating a course, you get:
 
 ```
-data/432fall2026/
-├── course.json          # Course metadata (name, code, teams, etc.)
+classes/432fall2026/
+├── course.yaml          # Course metadata (name, code, active teams, etc.)
 ├── init-db.sh           # Script to reset/reinitialize this course's DB
+├── week-1-questions.md  # Discussion questions
+└── week1/               # Pre-rendered presentation questions
+
+data/432fall2026/
 └── popping.db           # The SQLite database (created by init-db.sh)
 ```
 
 ### To Reset a Course (change instructor password, wipe student data)
 
 ```bash
-cd data/432fall2026
+cd classes/432fall2026
 bash init-db.sh
 ```
 
@@ -76,7 +80,7 @@ This will:
 - Delete `popping.db`
 - Recreate the schema
 - Prompt you for new instructor credentials
-- Keep the same course name, code, semester, and team structure from `course.json`
+- Keep the same course name, code, semester, and team structure from `course.yaml`
 
 ### To Create Another Course
 
@@ -84,7 +88,7 @@ This will:
 bash scripts/create-course.sh
 ```
 
-Then `cd data/{new-slug} && bash init-db.sh`
+Then `cd classes/{new-slug} && bash init-db.sh`
 
 ## Deploy to Render
 
@@ -100,7 +104,7 @@ Then `cd data/{new-slug} && bash init-db.sh`
 7. After first deploy, open Render Shell and init your courses:
    ```bash
    # STAT 432
-   cd data/432fall2026
+   cd classes/432fall2026
    bash init-db.sh
    # Enter instructor credentials when prompted
 
@@ -123,12 +127,16 @@ popping/
 ├── requirements.txt        # Python dependencies
 ├── render.yaml             # Render Blueprint (optional)
 ├── scripts/
-│   ├── create-course.sh    # Create a new course folder + course.json
+│   ├── create-course.sh    # Create a new course folder + course.yaml
 │   └── init-course-db.py   # Python helper called by per-course init-db.sh
-├── data/                   # Course configs (committed to git)
+├── classes/                # Course configs and authored questions (committed to git)
 │   └── 432fall2026/
-│       ├── course.json
-│       └── init-db.sh
+│       ├── course.yaml
+│       ├── init-db.sh
+│       └── week1/
+├── data/                   # Runtime SQLite databases (not committed)
+│   └── 432fall2026/
+│       └── popping.db
 ├── static/
 │   ├── css/style.css
 │   └── js/app.js
@@ -141,7 +149,7 @@ popping/
     └── dashboard.html
 ```
 
-> On Render with a mounted disk, the actual SQLite databases live under `/data/{slug}/popping.db` (persistent), while the course configs (`course.json`, `init-db.sh`) stay in the git repo under `data/{slug}/`.
+> On Render with a mounted disk, the actual SQLite databases live under `/data/{slug}/popping.db` (persistent), while the course configs (`course.yaml`, `init-db.sh`, and question files) stay in the git repo under `classes/{slug}/`.
 
 ## User Flow
 
@@ -157,15 +165,15 @@ popping/
 1. Click **Instructor Login** on your course → enter username + PIN.
 2. Go directly to the control panel for that course.
 3. Control phases, manage students, set questions, select presenting teams.
-4. Export CSV at the end of class.
+4. Export the XLSX workbook at the end of class.
 
 ## Course Flow
 
 1. **SETUP** → Students log in and select teams.
 2. **DISCUSSION** → Instructor posts a question; students discuss and peer-grade.
 3. **COMPETITION** → Teams present one at a time (instructor selects active team).
-4. **GRADING** → Other teams grade the presenting team.
-5. **ENDED** → Instructor exports CSV and uploads to Canvas.
+4. **COMPETITION** → Non-presenting teams rate the active presentation.
+5. **ENDED** → Instructor exports the XLSX workbook and uploads results to Canvas.
 
 ## Managing Courses
 
@@ -175,11 +183,11 @@ popping/
 bash scripts/create-course.sh
 ```
 
-Follow the prompts. Then `cd data/{slug}` and `bash init-db.sh`.
+Follow the prompts. Then `cd classes/{slug}` and `bash init-db.sh`.
 
 ### Customizing Teams
 
-Edit the `teams` array in `data/{slug}/course.json`, then run `bash init-db.sh` to recreate the database.
+Edit the `teams` array in `classes/{slug}/course.yaml`, then run `bash init-db.sh` to recreate the database.
 
 ### Adding Students
 
@@ -196,7 +204,7 @@ INSERT INTO students (course_id, student_id, name, pin) VALUES (1, 'netid123', '
 ## Data Isolation
 
 - Each course folder has its own `popping.db`.
-- No global database. Courses are discovered by scanning the `data/` directory.
+- No global database. Courses are discovered by scanning the `classes/` directory for active `course.yaml` files.
 - Deleting a course folder completely removes that course's data.
 - Resetting a course (running `init-db.sh`) only affects that one course.
 

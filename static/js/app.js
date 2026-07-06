@@ -17,6 +17,16 @@ function getCourseId() {
     return el ? parseInt(el.dataset.courseId, 10) : null;
 }
 
+function escapeHtmlValue(value) {
+    const div = document.createElement('div');
+    div.textContent = value == null ? '' : String(value);
+    return div.innerHTML;
+}
+
+function escapeAttrValue(value) {
+    return escapeHtmlValue(value).replace(/'/g, '&#39;');
+}
+
 /* ===== NAV DROPDOWN ===== */
 window.toggleToolsDropdown = function() {
     const menu = document.getElementById('tools-menu');
@@ -74,7 +84,7 @@ const PHASES_WITH_TEAM = ['competition'];
 let pollSelections = { q1: 0, q2: 0 };
 let pollInterval = null;
 let ratingSubmitted = false;       // has the student submitted for the current presentation?
-let lastRatedTeamId = null;        // track which team was rated to detect new presentations
+let lastRatedPresentationKey = null; // track active presentation to reset the rating UI
 let lastRenderedQuestionKey = null; // track active question to avoid re-rendering same HTML
 
 const dashboard = document.querySelector('.dashboard');
@@ -112,10 +122,10 @@ if (dashboard) {
                 <span class="team-name" style="color:var(--text-muted)">Remove me from my team</span>
             </button>
         ` + teams.map(t => `
-            <button class="team-card" style="--team-color: ${t.color}"
+            <button class="team-card" style="--team-color: ${escapeAttrValue(t.color)}"
                     onclick="joinTeam(${t.id})">
-                <span class="team-dot" style="background: ${t.color}"></span>
-                <span class="team-name">${t.name}</span>
+                <span class="team-dot" style="background: ${escapeAttrValue(t.color)}"></span>
+                <span class="team-name">${escapeHtmlValue(t.name)}</span>
             </button>
         `).join('');
     };
@@ -141,11 +151,11 @@ if (dashboard) {
                     ? `${m.name} (${m.student_id})`
                     : m.student_id;
                 return `<div class="roster-member">
-                    <span class="team-dot" style="background:${team.color}"></span>
-                    <span class="${isYou ? 'you' : ''}">${display} ${isYou ? '(You)' : ''}</span>
+                    <span class="team-dot" style="background:${escapeAttrValue(team.color)}"></span>
+                    <span class="${isYou ? 'you' : ''}">${escapeHtmlValue(display)} ${isYou ? '(You)' : ''}</span>
                 </div>`;
             }).join('');
-            div.innerHTML = `<h3><span class="team-dot" style="background:${team.color}"></span>${team.name}</h3>${members || '<em>No members</em>'}`;
+            div.innerHTML = `<h3><span class="team-dot" style="background:${escapeAttrValue(team.color)}"></span>${escapeHtmlValue(team.name)}</h3>${members || '<em>No members</em>'}`;
             container.appendChild(div);
         });
     }
@@ -161,8 +171,8 @@ if (dashboard) {
         }
 
         const qEl = document.getElementById('current-question');
-        if (qEl && state.current_question) {
-            qEl.textContent = state.current_question;
+        if (qEl) {
+            qEl.textContent = state.current_question || 'Waiting for question...';
         }
 
         const discSec = document.getElementById('discussion-section');
@@ -174,16 +184,21 @@ if (dashboard) {
         if (teamSec) {
             const show = PHASES_WITH_TEAM.includes(state.phase);
             teamSec.style.display = show ? 'block' : 'none';
+            const hasActivePresentation = !!(show && state.active_team && state.active_question);
 
             // Compute amPresenting early so we can also hide the grading card
-            const amPresenting = !!(state.active_team && state.active_team.id === MY_TEAM_ID);
+            const amPresenting = !!(hasActivePresentation && state.active_team.id === MY_TEAM_ID);
             // "Now Presenting" card shows for all teams; grading card hidden for presenting team
-            if (teamGradeSec) teamGradeSec.style.display = (show && !amPresenting) ? 'block' : 'none';
+            if (teamGradeSec) teamGradeSec.style.display = (hasActivePresentation && !amPresenting) ? 'block' : 'none';
 
-            // Detect new presentation — reset rating UI when active team changes
+            // Detect new presentation — reset rating UI even if the same team presents again
             const currentTeamId = state.active_team ? state.active_team.id : null;
-            if (currentTeamId !== lastRatedTeamId) {
-                lastRatedTeamId = currentTeamId;
+            const currentPresentationKey = state.poll_question_key ||
+                (state.active_team && state.active_question
+                    ? `team-${state.active_team.id}-q-${state.active_question.id}`
+                    : currentTeamId);
+            if (currentPresentationKey !== lastRatedPresentationKey) {
+                lastRatedPresentationKey = currentPresentationKey;
                 ratingSubmitted = false;
                 pollSelections = { q1: 0, q2: 0 };
                 // Reset star visuals
@@ -202,12 +217,31 @@ if (dashboard) {
 
             if (show) {
                 const banner = document.getElementById('presenting-name');
-                if (banner && state.active_team) {
+                const qDisplay = document.getElementById('question-display');
+                const timer = document.getElementById('student-timer');
+                const pollSection = document.getElementById('poll-section');
+                const youAreUp = document.getElementById('you-are-up');
+
+                if (!hasActivePresentation) {
+                    if (banner) {
+                        banner.textContent = 'Waiting for next presentation...';
+                        banner.style.color = 'var(--text-muted)';
+                    }
+                    if (qDisplay) qDisplay.style.display = 'none';
+                    if (timer) timer.style.display = 'none';
+                    if (youAreUp) youAreUp.style.display = 'none';
+                    if (pollSection) pollSection.style.display = 'none';
+                    stopTimer();
+                    stopPollPulse();
+                    lastRenderedQuestionKey = null;
+                    return;
+                }
+
+                if (banner) {
                     banner.textContent = state.active_team.name;
                     banner.style.color = state.active_team.color;
                 }
                 // Show active question — only re-render when question changes
-                const qDisplay = document.getElementById('question-display');
                 const qText = document.getElementById('active-question-text');
                 if (qDisplay && qText && state.active_question) {
                     qDisplay.style.display = 'block';
@@ -228,7 +262,6 @@ if (dashboard) {
                     lastRenderedQuestionKey = null;
                 }
                 // --- Presentation countdown timer (visible to ALL teams) ---
-                const timer = document.getElementById('student-timer');
                 const hasPres = !!state.presentation_started_at;
                 const hasRemaining = state.presentation_remaining != null;
                 if (timer) {
@@ -246,9 +279,6 @@ if (dashboard) {
                 }
 
                 // --- Grading + poll highlight ---
-                const pollSection = document.getElementById('poll-section');
-                const youAreUp = document.getElementById('you-are-up');
-
                 // "You are up!" banner — presenting team does not grade
                 if (youAreUp) youAreUp.style.display = amPresenting ? 'block' : 'none';
                 // Grading cards are always available to non-presenting teams
@@ -296,7 +326,7 @@ if (dashboard) {
                 : r.student_id;
             return `
             <div class="discussion-item">
-                <div class="meta">${display} · ${r.team_name || 'No team'} · ${r.created_at}</div>
+                <div class="meta">${escapeHtmlValue(display)} · ${escapeHtmlValue(r.team_name || 'No team')} · ${escapeHtmlValue(r.created_at)}</div>
                 <div>${escapeHtml(r.response)}</div>
             </div>
         `}).join('');
@@ -549,9 +579,9 @@ if (instructor) {
             div.className = 'roster-team';
             const membersHtml = team.members.map(m => {
                 const display = m.name && m.name !== m.student_id ? `${m.name} (${m.student_id})` : m.student_id;
-                return `<div class="roster-member"><span class="team-dot" style="background:${team.color}"></span>${display}</div>`;
+                return `<div class="roster-member"><span class="team-dot" style="background:${escapeAttrValue(team.color)}"></span>${escapeHtmlValue(display)}</div>`;
             }).join('');
-            div.innerHTML = `<h3><span class="team-dot" style="background:${team.color}"></span>${team.name}</h3>${membersHtml || '<em>No members</em>'}`;
+            div.innerHTML = `<h3><span class="team-dot" style="background:${escapeAttrValue(team.color)}"></span>${escapeHtmlValue(team.name)}</h3>${membersHtml || '<em>No members</em>'}`;
             rosterGrid.appendChild(div);
             unassignedCount += team.members.length;
         });
@@ -821,7 +851,7 @@ window.loadStudentTable = async function() {
 
     data.students.forEach(s => {
         const teamHtml = s.team_name
-            ? `<span class="team-tag clickable" style="background:${s.team_color || '#ccc'}" onclick="toggleTeamPicker(event, ${s.id})" data-student="${s.id}">${s.team_name}</span>`
+            ? `<span class="team-tag clickable" style="background:${escapeAttrValue(s.team_color || '#ccc')}" onclick="toggleTeamPicker(event, ${s.id})" data-student="${s.id}">${escapeHtmlValue(s.team_name)}</span>`
             : `<span class="team-tag unassigned-tag clickable" onclick="toggleTeamPicker(event, ${s.id})" data-student="${s.id}">Unassigned</span>`;
         const statusHtml = s.is_online
             ? '<span class="online-dot"></span> Online'
@@ -832,11 +862,11 @@ window.loadStudentTable = async function() {
         const tr = document.createElement('tr');
         tr.setAttribute('data-id', s.id);
         tr.innerHTML = `
-            <td>${s.student_id}</td>
-            <td>${name}</td>
+            <td>${escapeHtmlValue(s.student_id)}</td>
+            <td>${escapeHtmlValue(name)}</td>
             <td>${teamHtml}</td>
             <td>${statusHtml}</td>
-            <td class="text-muted small">${loginTime}</td>
+            <td class="text-muted small">${escapeHtmlValue(loginTime)}</td>
             <td><button class="btn btn-sm btn-danger" onclick="removeStudent(${s.id})">Remove</button></td>
         `;
         tbody.appendChild(tr);
@@ -891,7 +921,7 @@ window.toggleTeamPicker = function(e, studentId) {
     const teams = window._lastTeams || [];
     let html = '<div class="team-picker-item" onclick="pickTeam(' + studentId + ', null)">Unassigned</div>';
     teams.forEach(t => {
-        html += `<div class="team-picker-item" style="border-left:3px solid ${t.color}" onclick="pickTeam(${studentId}, ${t.id})">${t.name}</div>`;
+        html += `<div class="team-picker-item" style="border-left:3px solid ${escapeAttrValue(t.color)}" onclick="pickTeam(${studentId}, ${t.id})">${escapeHtmlValue(t.name)}</div>`;
     });
     picker.innerHTML = html;
     picker.style.position = 'fixed';
@@ -956,32 +986,6 @@ async function initWeekSelector() {
     }
 }
 
-function renderDiscussionQuestions(data) {
-    const container = document.getElementById('disc-questions-list');
-    if (!container) return;
-
-    if (!data.questions || data.questions.length === 0) {
-        container.innerHTML = '<p class="empty">No questions found. Add <code>week-N-questions.md</code> files in the course folder, then select a week during setup.</p>';
-        return;
-    }
-
-    container.innerHTML = data.questions.map((q, i) => `
-        <div class="disc-question-card">
-            <div class="disc-question-header" onclick="this.parentElement.classList.toggle('expanded')">
-                <span class="disc-question-num">#${i + 1}</span>
-                <span class="disc-question-title">${q.title}</span>
-                <button class="btn btn-sm btn-primary" onclick="event.stopPropagation(); postActiveQuestion('${q.title.replace(/'/g, "\\'")}')">Post to Class</button>
-            </div>
-            <div class="disc-question-body">
-                <div class="markdown-content">${marked.parse(q.content)}</div>
-            </div>
-        </div>
-    `).join('');
-
-    if (window.MathJax) MathJax.typesetPromise([container]);
-    if (window.hljs) container.querySelectorAll('pre code').forEach(hljs.highlightElement);
-}
-
 window.setDiscussionWeek = async function() {
     const week = document.getElementById('setup-week-select')?.value;
     if (!week) return;
@@ -1001,7 +1005,7 @@ if (document.getElementById('setup-week-select') || document.getElementById('dis
 window.addQuestion = async function() {
     const text = document.getElementById('new-question').value.trim();
     if (!text) { alert('Question text required'); return; }
-    const data = await postJSON('/api/questions', { question_text: text });
+    const data = await postJSON('/api/questions', { title: text, content: text });
     if (data.success) {
         window.location.reload();
     } else {
@@ -1443,8 +1447,8 @@ function renderHistory() {
     }
     container.innerHTML = history.map(h => `
         <div class="history-item">
-            <span>${h.title || 'Untitled'} — <strong>${h.team || '?'}</strong></span>
-            <span>${h.responses || 0} responses</span>
+            <span>${escapeHtmlValue(h.title || 'Untitled')} — <strong>${escapeHtmlValue(h.team || '?')}</strong></span>
+            <span>${escapeHtmlValue(h.responses || 0)} responses</span>
         </div>
     `).join('');
 }
@@ -1462,22 +1466,27 @@ function renderDiscussionQuestions(data) {
     const isInstructor = !!document.querySelector('.instructor[data-slug]');
 
     container.innerHTML = data.questions.map((q, i) => {
-        const key = q._key || `week-${data.current_week}-q${i}`;
+        const key = q.key || q._key || `week-${data.current_week}-q${i}`;
         const presenting = q.teams_presenting || 0;
         const presenters = q.presenters || 0;
         const selected = q.i_selected ? 'selected' : '';
-        const btn = isInstructor
-            ? `<span class="presenting-badge">${presenting} team${presenting !== 1 ? 's' : ''}</span>`
-            : `<button class="toggle-present-btn ${selected}" onclick="togglePresent('${key}', this)">${q.i_selected ? 'Signed Up' : 'Sign Up'}</button>`;
+        const safeTitle = escapeHtmlValue(q.title || 'Untitled');
+        const safeKey = escapeAttrValue(key);
+        const action = isInstructor
+            ? `<div class="disc-question-actions">
+                   <button class="btn btn-sm btn-primary" data-question-title="${escapeAttrValue(q.title || '')}" onclick="event.stopPropagation(); postActiveQuestionFromButton(this)">Post to Class</button>
+                   <span class="presenting-badge">${presenting} team${presenting !== 1 ? 's' : ''}${presenters ? `, ${presenters} presenter${presenters !== 1 ? 's' : ''}` : ''}</span>
+               </div>`
+            : `<button class="toggle-present-btn ${selected}" data-question-key="${safeKey}" onclick="event.stopPropagation(); togglePresent(this.dataset.questionKey, this)">${q.i_selected ? 'Signed Up' : 'Sign Up'}</button>`;
         return `
         <div class="disc-question-card">
             <div class="disc-question-header" onclick="this.parentElement.classList.toggle('expanded')">
                 <span class="disc-question-num">#${i + 1}</span>
-                <span class="disc-question-title">${q.title}</span>
-                ${btn}
+                <span class="disc-question-title">${safeTitle}</span>
+                ${action}
             </div>
             <div class="disc-question-body">
-                <div class="markdown-content">${marked.parse(q.content)}</div>
+                <div class="markdown-content">${marked.parse(q.content || '')}</div>
             </div>
         </div>
     `}).join('');
@@ -1485,3 +1494,7 @@ function renderDiscussionQuestions(data) {
     if (window.MathJax) MathJax.typesetPromise([container]);
     if (window.hljs) container.querySelectorAll('pre code').forEach(hljs.highlightElement);
 }
+
+window.postActiveQuestionFromButton = function(btn) {
+    postActiveQuestion(btn.dataset.questionTitle || '');
+};
