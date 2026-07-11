@@ -32,7 +32,7 @@ CREATE TABLE teams (
     course_id INTEGER NOT NULL,
     name TEXT NOT NULL,
     color TEXT DEFAULT '#4f46e5',
-    FOREIGN KEY (course_id) REFERENCES courses (id),
+    FOREIGN KEY (course_id) REFERENCES courses (id) ON DELETE CASCADE,
     UNIQUE(course_id, name)
 );
 
@@ -47,8 +47,8 @@ CREATE TABLE students (
     last_active_at TIMESTAMP,
     last_team_joined_at TIMESTAMP,
     last_team_id INTEGER,
-    FOREIGN KEY (course_id) REFERENCES courses (id),
-    FOREIGN KEY (team_id) REFERENCES teams (id),
+    FOREIGN KEY (course_id) REFERENCES courses (id) ON DELETE CASCADE,
+    FOREIGN KEY (team_id) REFERENCES teams (id) ON DELETE SET NULL,
     UNIQUE(course_id, student_id)
 );
 
@@ -61,7 +61,7 @@ CREATE TABLE questions (
     content TEXT,
     week_num INTEGER DEFAULT 1,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (course_id) REFERENCES courses (id)
+    FOREIGN KEY (course_id) REFERENCES courses (id) ON DELETE CASCADE
 );
 
 CREATE TABLE course_state (
@@ -83,9 +83,9 @@ CREATE TABLE course_state (
     poll_question_key TEXT,
     poll_started_at TIMESTAMP,
     presentation_history TEXT DEFAULT '[]',
-    FOREIGN KEY (course_id) REFERENCES courses (id),
-    FOREIGN KEY (active_team_id) REFERENCES teams (id),
-    FOREIGN KEY (active_question_id) REFERENCES questions (id)
+    FOREIGN KEY (course_id) REFERENCES courses (id) ON DELETE CASCADE,
+    FOREIGN KEY (active_team_id) REFERENCES teams (id) ON DELETE SET NULL,
+    FOREIGN KEY (active_question_id) REFERENCES questions (id) ON DELETE SET NULL
 );
 
 CREATE TABLE peer_reviews (
@@ -96,9 +96,9 @@ CREATE TABLE peer_reviews (
     criterion TEXT NOT NULL,
     score REAL NOT NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (course_id) REFERENCES courses (id),
-    FOREIGN KEY (grader_id) REFERENCES students (id),
-    FOREIGN KEY (recipient_id) REFERENCES students (id),
+    FOREIGN KEY (course_id) REFERENCES courses (id) ON DELETE CASCADE,
+    FOREIGN KEY (grader_id) REFERENCES students (id) ON DELETE CASCADE,
+    FOREIGN KEY (recipient_id) REFERENCES students (id) ON DELETE CASCADE,
     UNIQUE(course_id, grader_id, recipient_id, criterion)
 );
 
@@ -110,9 +110,9 @@ CREATE TABLE team_reviews (
     criterion TEXT NOT NULL,
     score REAL NOT NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (course_id) REFERENCES courses (id),
-    FOREIGN KEY (grader_team_id) REFERENCES teams (id),
-    FOREIGN KEY (recipient_team_id) REFERENCES teams (id),
+    FOREIGN KEY (course_id) REFERENCES courses (id) ON DELETE CASCADE,
+    FOREIGN KEY (grader_team_id) REFERENCES teams (id) ON DELETE CASCADE,
+    FOREIGN KEY (recipient_team_id) REFERENCES teams (id) ON DELETE CASCADE,
     UNIQUE(course_id, grader_team_id, recipient_team_id, criterion)
 );
 
@@ -123,8 +123,8 @@ CREATE TABLE discussion_responses (
     question TEXT NOT NULL,
     response TEXT NOT NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (course_id) REFERENCES courses (id),
-    FOREIGN KEY (student_id) REFERENCES students (id)
+    FOREIGN KEY (course_id) REFERENCES courses (id) ON DELETE CASCADE,
+    FOREIGN KEY (student_id) REFERENCES students (id) ON DELETE CASCADE
 );
 
 CREATE TABLE presentation_ratings (
@@ -135,8 +135,8 @@ CREATE TABLE presentation_ratings (
     q1_developed INTEGER CHECK(q1_developed >= 1 AND q1_developed <= 5),
     q2_easy INTEGER CHECK(q2_easy >= 1 AND q2_easy <= 5),
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (course_id) REFERENCES courses (id),
-    FOREIGN KEY (student_id) REFERENCES students (id),
+    FOREIGN KEY (course_id) REFERENCES courses (id) ON DELETE CASCADE,
+    FOREIGN KEY (student_id) REFERENCES students (id) ON DELETE CASCADE,
     UNIQUE(course_id, student_id, question_key)
 );
 
@@ -146,7 +146,7 @@ CREATE TABLE discussion_selections (
     student_id INTEGER NOT NULL,
     question_key TEXT NOT NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (course_id) REFERENCES courses (id),
-    FOREIGN KEY (student_id) REFERENCES students (id),
+    FOREIGN KEY (course_id) REFERENCES courses (id) ON DELETE CASCADE,
+    FOREIGN KEY (student_id) REFERENCES students (id) ON DELETE CASCADE,
     UNIQUE(course_id, student_id, question_key)
 );

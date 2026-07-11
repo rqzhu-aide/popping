@@ -34,6 +34,12 @@ PHASE_LABELS = {
 # shown as a gliding bar (instructor) and a pulsing countdown (students).
 POLL_DURATION = 30
 
+# Throttle window for the last_active_at DB write. Students poll /api/state
+# every ~3s, but the "online" indicator only needs minute-level precision, so
+# we write at most this often per student (last write time tracked in the
+# session cookie). This is the dominant write load under a full classroom.
+ACTIVITY_WRITE_INTERVAL = 15
+
 
 def is_valid_slug(slug):
     return isinstance(slug, str) and re.fullmatch(r'[A-Za-z0-9_-]+', slug)
@@ -125,13 +131,25 @@ def load_question_html(slug, week_num, question_num):
 @app.before_request
 def track_student_activity():
     if 'student_id' in session and 'slug' in session:
-        try:
-            execute_db(session['slug'],
-                "UPDATE students SET last_active_at = CURRENT_TIMESTAMP WHERE student_id = ?",
-                [session['student_id']]
-            )
-        except Exception:
-            pass  # db might not exist yet on first request
+        now = datetime.utcnow()
+        last_synced = None
+        last_iso = session.get('last_active_synced_at')
+        if last_iso:
+            try:
+                last_synced = datetime.fromisoformat(last_iso)
+            except ValueError:
+                last_synced = None
+        # Throttle: write at most every ACTIVITY_WRITE_INTERVAL seconds per
+        # student, instead of on every (3s) poll.
+        if last_synced is None or (now - last_synced).total_seconds() >= ACTIVITY_WRITE_INTERVAL:
+            try:
+                execute_db(session['slug'],
+                    "UPDATE students SET last_active_at = CURRENT_TIMESTAMP WHERE student_id = ?",
+                    [session['student_id']]
+                )
+                session['last_active_synced_at'] = now.isoformat()
+            except Exception:
+                pass  # db might not exist yet on first request
 
 
 @app.template_filter('phase_label')
@@ -545,6 +563,23 @@ def _get_slug_from_session():
     if 'slug' in session:
         return session['slug']
     return None
+
+
+def _delete_student(slug, db_id):
+    """Delete a student together with their dependent rows.
+
+    Existing live databases predate the ON DELETE CASCADE schema, so dependents
+    are removed explicitly first — otherwise, with PRAGMA foreign_keys=ON,
+    deleting a student who has activity raises a constraint error. On databases
+    created from the current schema the explicit deletes are simply redundant.
+    """
+    db = get_db(slug)
+    db.execute('DELETE FROM peer_reviews WHERE grader_id = ? OR recipient_id = ?', [db_id, db_id])
+    db.execute('DELETE FROM discussion_responses WHERE student_id = ?', [db_id])
+    db.execute('DELETE FROM presentation_ratings WHERE student_id = ?', [db_id])
+    db.execute('DELETE FROM discussion_selections WHERE student_id = ?', [db_id])
+    db.execute('DELETE FROM students WHERE id = ?', [db_id])
+    db.commit()
 
 
 @app.route('/api/teams', methods=['GET'])
@@ -1410,6 +1445,9 @@ def unassign_all():
 @instructor_login_required
 def delete_question(qid):
     slug = session['slug']
+    # Clear any active-presentation pointer to this question first, so the FK
+    # delete doesn't fail once foreign_keys enforcement is on.
+    execute_db(slug, 'UPDATE course_state SET active_question_id = NULL WHERE active_question_id = ?', [qid])
     execute_db(slug, 'DELETE FROM questions WHERE id = ?', [qid])
     return jsonify({'success': True})
 
@@ -1478,10 +1516,10 @@ def upload_roster():
     csv_sids = {p['student_id'] for p in parsed}
 
     added, updated, removed = 0, 0, 0
-    # Remove students not in CSV
+    # Remove students not in CSV (and their dependent rows)
     for sid, db_id in existing_by_sid.items():
         if sid not in csv_sids:
-            execute_db(slug, 'DELETE FROM students WHERE id = ?', [db_id])
+            _delete_student(slug, db_id)
             removed += 1
 
     # Add/update
@@ -1894,7 +1932,7 @@ def assign_student():
 @instructor_login_required
 def remove_student(student_db_id):
     slug = session['slug']
-    execute_db(slug, 'DELETE FROM students WHERE id = ?', [student_db_id])
+    _delete_student(slug, student_db_id)
     return jsonify({'success': True})
 
 
@@ -1975,7 +2013,7 @@ def export_data(slug):
            FROM teams t WHERE t.course_id = ? ORDER BY t.name''', [cid])
 
     thumbs = query_db(slug,
-        '''SELECT g.name as grader, r.name as recipient, p.created_at, p.criterion
+        '''SELECT p.grader_id, p.recipient_id, g.name as grader, r.name as recipient, p.created_at, p.criterion
            FROM peer_reviews p
            JOIN students g ON p.grader_id = g.id
            JOIN students r ON p.recipient_id = r.id
@@ -1983,7 +2021,7 @@ def export_data(slug):
            ORDER BY p.created_at''', [cid])
 
     ratings = query_db(slug,
-        '''SELECT pr.question_key, s.name as rater, pr.q1_developed, pr.q2_easy, pr.created_at
+        '''SELECT pr.question_key, pr.student_id as rater_id, s.name as rater, pr.q1_developed, pr.q2_easy, pr.created_at
            FROM presentation_ratings pr
            JOIN students s ON pr.student_id = s.id
            WHERE pr.course_id = ?
@@ -1996,6 +2034,10 @@ def export_data(slug):
         for h in json.loads(state_row['presentation_history']):
             qkey = f"pres-{h.get('started_at', '')}"
             key_to_team[qkey] = h.get('team', 'Unknown')
+
+    # student DB id → display name. Per-student aggregates below are keyed by id,
+    # not name, so two students who share a name aren't silently merged.
+    id_to_name = {stu['id']: (stu['name'] or stu['student_id']) for stu in students}
 
     # ── TAB 1: Summary ──
     ws1 = wb.active
@@ -2052,9 +2094,9 @@ def export_data(slug):
         cell = ws1.cell(row=r, column=col, value=h)
         cell.font = header_font; cell.fill = header_fill; cell.alignment = header_align
     r += 1
-    thumbs_received = collections.Counter(t['recipient'] for t in thumbs)
-    for name, cnt in thumbs_received.most_common(10):
-        ws1.cell(row=r, column=1, value=name)
+    thumbs_received = collections.Counter(t['recipient_id'] for t in thumbs)
+    for sid, cnt in thumbs_received.most_common(10):
+        ws1.cell(row=r, column=1, value=id_to_name.get(sid, 'Unknown'))
         ws1.cell(row=r, column=2, value=cnt)
         r += 1
     r += 1
@@ -2090,30 +2132,24 @@ def export_data(slug):
                 'discussion_selections', 'presentation_ratings_given',
                 'last_login', 'last_active']
     style_header(ws2, headers2)
-    # Pre-compute counts
-    given = collections.Counter()
-    received = collections.Counter()
-    ratings_given = collections.Counter()
-    sel_given = collections.Counter()
-    for t in thumbs:
-        given[t['grader']] += 1
-        received[t['recipient']] += 1
-    for rt in ratings:
-        ratings_given[rt['rater']] += 1
+    # Pre-compute counts — keyed by student DB id, not name, so two students
+    # who share a name are counted individually instead of being merged.
+    given = collections.Counter(t['grader_id'] for t in thumbs)
+    received = collections.Counter(t['recipient_id'] for t in thumbs)
+    ratings_given = collections.Counter(rt['rater_id'] for rt in ratings)
     sels = query_db(slug,
-        '''SELECT s.name, COUNT(*) as c FROM discussion_selections ds
+        '''SELECT s.id, COUNT(*) as c FROM discussion_selections ds
            JOIN students s ON ds.student_id = s.id
            WHERE ds.course_id = ? GROUP BY s.id''', [cid])
-    for s in sels:
-        sel_given[s['name']] = s['c']
+    sel_given = {s['id']: s['c'] for s in sels}
     for i, stu in enumerate(students, 2):
         ws2.cell(row=i, column=1, value=stu['student_id'])
         ws2.cell(row=i, column=2, value=stu['name'])
         ws2.cell(row=i, column=3, value=stu['team_name'])
-        ws2.cell(row=i, column=4, value=given.get(stu['name'], 0))
-        ws2.cell(row=i, column=5, value=received.get(stu['name'], 0))
-        ws2.cell(row=i, column=6, value=sel_given.get(stu['name'], 0))
-        ws2.cell(row=i, column=7, value=ratings_given.get(stu['name'], 0))
+        ws2.cell(row=i, column=4, value=given.get(stu['id'], 0))
+        ws2.cell(row=i, column=5, value=received.get(stu['id'], 0))
+        ws2.cell(row=i, column=6, value=sel_given.get(stu['id'], 0))
+        ws2.cell(row=i, column=7, value=ratings_given.get(stu['id'], 0))
         ws2.cell(row=i, column=8, value=stu['last_login_at'])
         ws2.cell(row=i, column=9, value=stu['last_active_at'])
     auto_width(ws2, headers2)

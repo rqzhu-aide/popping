@@ -20,8 +20,15 @@ def get_db(slug):
         db_path = os.path.join(config.DATA_DIR, slug, 'popping.db')
         if not os.path.exists(db_path):
             raise RuntimeError(f"Database not found for course: {slug}")
-        conn = sqlite3.connect(db_path)
+        # timeout=30 sets a 30s busy_timeout so writers wait on lock contention
+        # instead of raising "database is locked" immediately.
+        conn = sqlite3.connect(db_path, timeout=30)
         conn.row_factory = sqlite3.Row
+        # WAL: readers don't block the writer or each other — essential for the
+        # ~3s student polling load. foreign_keys: actually enforce the schema's
+        # FK constraints (off by default in SQLite).
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA foreign_keys=ON")
         setattr(g, db_key, conn)
     return getattr(g, db_key)
 
