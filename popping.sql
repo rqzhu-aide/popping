@@ -1,7 +1,6 @@
 DROP TABLE IF EXISTS discussion_responses;
 DROP TABLE IF EXISTS presentation_ratings;
 DROP TABLE IF EXISTS discussion_selections;
-DROP TABLE IF EXISTS team_reviews;
 DROP TABLE IF EXISTS peer_reviews;
 DROP TABLE IF EXISTS course_state;
 DROP TABLE IF EXISTS students;
@@ -100,20 +99,6 @@ CREATE TABLE peer_reviews (
     FOREIGN KEY (grader_id) REFERENCES students (id) ON DELETE CASCADE,
     FOREIGN KEY (recipient_id) REFERENCES students (id) ON DELETE CASCADE,
     UNIQUE(course_id, grader_id, recipient_id, criterion)
-);
-
-CREATE TABLE team_reviews (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    course_id INTEGER NOT NULL,
-    grader_team_id INTEGER NOT NULL,
-    recipient_team_id INTEGER NOT NULL,
-    criterion TEXT NOT NULL,
-    score REAL NOT NULL,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (course_id) REFERENCES courses (id) ON DELETE CASCADE,
-    FOREIGN KEY (grader_team_id) REFERENCES teams (id) ON DELETE CASCADE,
-    FOREIGN KEY (recipient_team_id) REFERENCES teams (id) ON DELETE CASCADE,
-    UNIQUE(course_id, grader_team_id, recipient_team_id, criterion)
 );
 
 CREATE TABLE discussion_responses (

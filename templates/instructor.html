@@ -10,7 +10,8 @@
      data-presentation-time-cap="{{ state.presentation_time_cap or 300 }}"
      data-presentation-history="{{ state.presentation_history or '[]' }}"
      data-poll-active="{{ 1 if state.poll_active else 0 }}"
-     data-poll-started="{{ state.poll_started_at or '' }}">
+     data-poll-started="{{ state.poll_started_at or '' }}"
+     data-poll-duration="{{ POLL_DURATION if POLL_DURATION is defined else 30 }}">
     <header class="dash-header">
         <div>
             <h1>{{ course.name }}</h1>
@@ -24,7 +25,7 @@
             <h2>Phase Control</h2>
             <div class="phase-header-right">
                 <div class="session-timer" id="session-timer"
-                     style="{% if state.phase in ['competition', 'ended', 'grading'] %}display:none{% endif %}">
+                     style="{% if state.phase in ['competition', 'ended'] %}display:none{% endif %}">
                     <span class="timer-label">⏱ Session</span>
                     <span class="timer-value-large" id="session-timer-value">00:00</span>
                 </div>
@@ -108,7 +109,7 @@
         <div class="add-student-form">
             <input type="text" id="new-student-id" placeholder="Student ID" required>
             <input type="text" id="new-name" placeholder="Name (optional)">
-            <input type="text" id="new-pin" placeholder="PIN" required>
+            <input type="text" id="new-pin" placeholder="PIN (4 digits)" required maxlength="4" pattern="\d{4}">
             <button class="btn btn-primary" onclick="addStudent()">Add Student</button>
         </div>
 
@@ -165,13 +166,6 @@
             <input type="text" id="appendix-title" placeholder="Question title" style="width:100%">
             <textarea id="appendix-content" placeholder="Question content (supports Markdown)..." rows="4" style="width:100%"></textarea>
             <button class="btn btn-primary" onclick="addAppendixQuestion()">Add to Appendix</button>
-        </div>
-    </section>
-
-    <section class="card">
-        <h2>📝 Appendix Questions</h2>
-        <div id="appendix-table-wrapper">
-            <p class="hint">No appendix questions yet.</p>
         </div>
     </section>
 
@@ -261,17 +255,6 @@
                 <h4>Presentation History</h4>
                 <div id="history-list"></div>
             </div>
-        </div>
-    </section>
-
-    <!-- ===== GRADING PHASE (legacy — merged into competition) ===== -->
-    {% elif state.phase == 'grading' %}
-
-    <section class="card">
-        <h2>📊 Grading</h2>
-        <p class="hint">Students are submitting team grades. Use the export to download results.</p>
-        <div class="comp-actions">
-            <button class="btn btn-danger" onclick="resetData()">Reset Course Data</button>
         </div>
     </section>
 

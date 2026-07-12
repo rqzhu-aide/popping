@@ -82,6 +82,7 @@
     <!-- Team section -->
     {% if not team %}
     <section class="card team-select">
+        {% if state.phase == 'setup' %}
         <h2>Select Your Team</h2>
         <p class="hint">Choose a team to join. You can change this during setup.</p>
         <div class="team-grid">
@@ -94,6 +95,10 @@
             </button>
             {% endfor %}
         </div>
+        {% else %}
+        <h2>Waiting for Team Assignment</h2>
+        <p class="hint">Team selection is closed. Please ask your instructor to assign you to a team.</p>
+        {% endif %}
     </section>
     {% else %}
     <section class="card my-team">
@@ -115,7 +120,7 @@
                 </div>
                 {% endif %}
                 {% else %}
-                {% if teammates %}
+                {% if teammates and state.phase in ['discussion', 'competition'] %}
                 <div class="team-instructions">
                     <p>Drag members to arrange seating.</p>
                     <p>Give a <strong>👍</strong> to the significant contributor(s) in your group.</p>
@@ -125,7 +130,7 @@
                 {% endif %}
                 {% endif %}
             </div>
-            {% if teammates and state.phase != 'setup' %}
+            {% if teammates and state.phase in ['discussion', 'competition'] %}
             <div class="team-table-wrapper">
                 <button class="btn btn-sm btn-primary" onclick="resetCardPositions()">Reset Positions</button>
                 <div class="team-table" id="team-table" data-team-color="{{ team.color }}">
@@ -154,6 +159,13 @@
         </div>
     </section>
     {% endif %}
+
+    <!-- Session Results (shown when phase == 'ended') -->
+    <section class="card session-results" id="session-results" style="display:none;">
+        <h2>🏆 Final Results</h2>
+        <p class="hint" style="margin-bottom: 16px;">Thank you for participating!</p>
+        <div id="top-teams-display"></div>
+    </section>
 
     <!-- Roster (always bottom) -->
     <section class="card roster">

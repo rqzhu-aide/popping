@@ -6,6 +6,10 @@ import config
 
 SLUG_RE = re.compile(r'^[A-Za-z0-9_-]+$')
 
+# Process-local cache: slugs whose schema has already been verified/migrated.
+# Without this, ensure_schema() runs ~10 PRAGMA queries on every API call.
+_schema_checked = set()
+
 
 def validate_slug(slug):
     if not isinstance(slug, str) or not SLUG_RE.fullmatch(slug):
@@ -58,7 +62,10 @@ def init_app(app):
 
 
 def ensure_schema(slug):
-    """Add missing columns/tables to existing databases (migration)."""
+    """Add missing columns/tables to existing databases (migration).
+    Runs only once per slug per process — subsequent calls are a no-op."""
+    if slug in _schema_checked:
+        return
     db = get_db(slug)
 
     # course_state columns
@@ -131,6 +138,7 @@ def ensure_schema(slug):
     )''')
 
     db.commit()
+    _schema_checked.add(slug)
 
 
 def get_max_teams(slug, course_id):

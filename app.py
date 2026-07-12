@@ -10,7 +10,7 @@ from functools import wraps
 
 from flask import (
     Flask, render_template, request, redirect,
-    url_for, session, jsonify, flash, g
+    url_for, session, jsonify, flash
 )
 
 import config
@@ -114,16 +114,29 @@ def sync_presentation_questions(slug, course_id, week_num):
     return len(questions)
 
 
+# In-memory cache for pre-rendered question HTML files.
+# Without this, /api/state reads the same .html file from disk ~100 times/sec
+# (once per student per poll).  Key: (slug, week_num, question_num).
+_question_html_cache = {}
+
+
 def load_question_html(slug, week_num, question_num):
     """Read pre-rendered HTML for a question from the week folder.
-    
+
     Path: classes/<slug>/week<N>/q<NN>.html  (zero-padded, e.g. q01.html)
     Returns HTML string or None if file not found.
+    Results are cached in-process since question files don't change mid-session.
     """
+    cache_key = (slug, week_num, question_num)
+    if cache_key in _question_html_cache:
+        return _question_html_cache[cache_key]
+
     filepath = os.path.join(config.CLASSES_DIR, slug, f'week{week_num}', f'q{question_num:02d}.html')
     try:
         with open(filepath, 'r', encoding='utf-8') as f:
-            return f.read()
+            html = f.read()
+        _question_html_cache[cache_key] = html
+        return html
     except (FileNotFoundError, IOError):
         return None
 
@@ -230,8 +243,9 @@ def _scan_courses():
                 'has_db': os.path.exists(db_path),
                 'instructor_name': instructor_name
             })
-        except Exception:
-            pass
+        except Exception as e:
+            import logging
+            logging.warning(f'_scan_courses: skipped "{slug}": {e}')
     return courses
 
 
@@ -466,8 +480,7 @@ def instructor_course(slug):
     questions = query_db(slug,
         'SELECT * FROM questions WHERE course_id = ? ORDER BY question_num', [course['id']]
     )
-    from datetime import datetime as dt, timedelta
-    cutoff = (dt.utcnow() - timedelta(minutes=3)).isoformat()
+    cutoff = (datetime.utcnow() - timedelta(minutes=3)).strftime('%Y-%m-%d %H:%M:%S')
     students_enhanced = []
     for s in students:
         d = dict(s)
@@ -502,34 +515,12 @@ def instructor_course(slug):
                     break
                 seen_counts.add(t['thumbs'])
             top_students.append({'name': t['name'], 'student_id': t['student_id'], 'thumbs': t['thumbs']})
-        # Top teams by avg presentation rating
-        # Map question_key -> presenting team via presentation_history
-        # (presentation_ratings.student_id is the RATER, not the presenter)
-        import collections
-        history_json = json.loads(state['presentation_history'] or '[]') if state else []
-        key_to_team = {}
-        for h in history_json:
-            qkey = f"pres-{h.get('started_at', '')}"
-            key_to_team[qkey] = h.get('team', 'Unknown')
-        all_ratings = query_db(slug,
-            '''SELECT question_key, q1_developed, q2_easy
-               FROM presentation_ratings WHERE course_id = ?''',
-            [course['id']])
-        team_scores = collections.defaultdict(list)
-        for r in all_ratings:
-            tname = key_to_team.get(r['question_key'])
-            if tname:
-                team_scores[tname].append(r['q1_developed'] + r['q2_easy'])
-        team_ratings = []
-        for tname, scores in team_scores.items():
-            avg = sum(scores) / len(scores) if scores else 0
-            team_ratings.append({'name': tname, 'avg_score': round(avg, 2)})
-        team_ratings.sort(key=lambda x: x['avg_score'], reverse=True)
+        # Top teams by avg presentation rating (extracted to shared helper)
+        team_ratings = _compute_top_teams(slug, course['id'], state)
         end_stats = {
             'participants': participants['c'] if participants else 0,
             'top_students': top_students,
-            'top_teams': [{'name': r['name'], 'avg_score': r['avg_score']}
-                          for r in team_ratings]
+            'top_teams': team_ratings
         }
 
     # Track which questions have already been presented
@@ -551,7 +542,8 @@ def instructor_course(slug):
         teams_locked=teams_locked,
         session_started_at=state['session_started_at'] if state and 'session_started_at' in state.keys() else None,
         end_stats=end_stats,
-        presented_question_ids=list(presented_question_ids)
+        presented_question_ids=list(presented_question_ids),
+        POLL_DURATION=POLL_DURATION
     )
 
 
@@ -582,28 +574,182 @@ def _delete_student(slug, db_id):
     db.commit()
 
 
+# ---------------------------------------------------------------------------
+# Shared helpers for state/teams computation (used by /api/state, /api/teams,
+# and the consolidated /api/poll endpoint).
+# ---------------------------------------------------------------------------
+
+def _compute_top_teams(slug, course_id, state):
+    """Compute team rankings by average presentation rating.
+
+    Returns a list of ``{'name': str, 'avg_score': float}`` sorted descending.
+    Shared by the instructor end-session summary and the student-facing
+    /api/poll results (which only exposes the top 3 names — no scores).
+    """
+    import collections
+
+    history_json = json.loads(
+        state['presentation_history'] or '[]') if state else []
+    key_to_team = {}
+    for h in history_json:
+        qkey = f"pres-{h.get('started_at', '')}"
+        key_to_team[qkey] = h.get('team', 'Unknown')
+
+    all_ratings = query_db(slug,
+        '''SELECT question_key, q1_developed, q2_easy
+           FROM presentation_ratings WHERE course_id = ?''',
+        [course_id])
+
+    team_scores = collections.defaultdict(list)
+    for r in all_ratings:
+        tname = key_to_team.get(r['question_key'])
+        if tname:
+            team_scores[tname].append(r['q1_developed'] + r['q2_easy'])
+
+    team_ratings = []
+    for tname, scores in team_scores.items():
+        avg = sum(scores) / len(scores) if scores else 0
+        team_ratings.append({'name': tname, 'avg_score': round(avg, 2)})
+    team_ratings.sort(key=lambda x: x['avg_score'], reverse=True)
+    return team_ratings
+
+
+def _compute_state(slug):
+    """Compute the course-state dict — shared by /api/state and /api/poll.
+
+    This is the single source of truth for presentation timer, poll status,
+    active team/question, and the student's own team.  Extracted so the
+    consolidated poll endpoint reuses the exact same logic.
+    """
+    state = query_db(slug, 'SELECT * FROM course_state LIMIT 1', one=True)
+
+    active_team = None
+    if state and state['active_team_id']:
+        active_team = query_db(slug,
+            'SELECT * FROM teams WHERE id = ?', [state['active_team_id']], one=True)
+
+    my_team = None
+    if 'student_id' in session:
+        me = query_db(slug,
+            'SELECT * FROM students WHERE student_id = ?',
+            [session['student_id']], one=True)
+        if me and me['team_id']:
+            my_team = query_db(slug,
+                'SELECT * FROM teams WHERE id = ?', [me['team_id']], one=True)
+
+    active_question = None
+    if state and state['active_question_id']:
+        aq = query_db(slug,
+            'SELECT * FROM questions WHERE id = ?', [state['active_question_id']], one=True)
+        if aq:
+            active_question = dict(aq)
+            week = active_question.get('week_num',
+                                     state['discussion_week'] if state and state['discussion_week'] else 1)
+            html = load_question_html(slug, week, active_question['question_num'])
+            if html:
+                active_question['html_content'] = html
+
+    # Compute presentation remaining seconds
+    presentation_remaining = state['presentation_remaining'] if state else None
+    if state and state['presentation_started_at'] and state['presentation_time_cap']:
+        try:
+            started = datetime.fromisoformat(
+                state['presentation_started_at'].replace(' ', 'T'))
+            elapsed = (datetime.utcnow() - started).total_seconds()
+            cap = state['presentation_time_cap'] or 300
+            presentation_remaining = max(0, int(cap - elapsed))
+        except Exception:
+            pass
+
+    # Auto-close the poll highlight once POLL_DURATION has elapsed
+    poll_active_bool = bool(state['poll_active']) if state else False
+    if state and state['poll_active'] and state['poll_started_at']:
+        try:
+            poll_started = datetime.fromisoformat(
+                state['poll_started_at'].replace(' ', 'T'))
+            if (datetime.utcnow() - poll_started).total_seconds() >= POLL_DURATION:
+                execute_db(slug,
+                    'UPDATE course_state SET poll_active = 0, poll_started_at = NULL '
+                    'WHERE course_id = ?', [state['course_id']])
+                state = query_db(slug, 'SELECT * FROM course_state LIMIT 1', one=True)
+                poll_active_bool = False
+        except Exception:
+            pass
+
+    # Poll count — use course_id from the already-fetched state row
+    # (no separate SELECT needed)
+    poll_count = 0
+    pres_key = active_presentation_key(state)
+    if state and pres_key:
+        cid = state['course_id']
+        cnt = query_db(slug,
+            'SELECT COUNT(DISTINCT student_id) as c FROM presentation_ratings '
+            'WHERE course_id = ? AND question_key = ?',
+            [cid, pres_key], one=True)
+        poll_count = cnt['c'] if cnt else 0
+
+    return {
+        'phase': state['phase'] if state else 'setup',
+        'active_team': dict(active_team) if active_team else None,
+        'active_question': active_question,
+        'my_team': dict(my_team) if my_team else None,
+        'current_question': state['current_question'] if state else None,
+        'presentation_started_at': state['presentation_started_at'] if state else None,
+        'presentation_time_cap': state['presentation_time_cap'] if state else 300,
+        'presentation_remaining': presentation_remaining,
+        'teams_locked': bool(state['teams_locked']) if state else False,
+        'poll_active': poll_active_bool,
+        'poll_started_at': state['poll_started_at'] if state else None,
+        'poll_duration': POLL_DURATION,
+        'poll_question_key': state['poll_question_key'] if state else None,
+        'poll_count': poll_count,
+        'presentation_history': json.loads(state['presentation_history'])
+                                if state and state['presentation_history'] else [],
+        # Internal metadata (used by api_poll to avoid redundant lookups;
+        # harmless values — course id is an auto-increment, max_teams is
+        # visible to students as the team count).
+        '_course_id': state['course_id'] if state else None,
+        '_max_teams': state['max_teams'] if state else 8,
+    }
+
+
+def _compute_teams(slug, course_id, max_teams=None):
+    """Compute the teams + members list — shared by /api/teams and /api/poll.
+
+    Uses 2 queries total (teams + all members) instead of N+1.
+    Pass ``max_teams`` to skip the redundant ``get_max_teams`` lookup
+    (the poll hot path already has this value from ``_compute_state``).
+    """
+    if max_teams is None:
+        max_teams = get_max_teams(slug, course_id)
+    teams = query_db(slug,
+        'SELECT * FROM teams WHERE course_id = ? ORDER BY id LIMIT ?',
+        [course_id, max_teams])
+    if not teams:
+        return []
+    team_ids = [t['id'] for t in teams]
+    # Single query for ALL members across ALL teams, grouped in Python
+    placeholders = ','.join('?' * len(team_ids))
+    all_members = query_db(slug,
+        f'SELECT student_id, name, team_id FROM students WHERE team_id IN ({placeholders})',
+        team_ids)
+    members_by_team = {}
+    for m in all_members:
+        members_by_team.setdefault(m['team_id'], []).append({'student_id': m['student_id'], 'name': m['name']})
+    return [
+        {'id': t['id'], 'name': t['name'], 'color': t['color'],
+         'members': members_by_team.get(t['id'], [])}
+        for t in teams
+    ]
+
+
 @app.route('/api/teams', methods=['GET'])
 def api_teams():
     slug = _get_slug_from_session()
     if not slug or ('student_id' not in session and 'instructor_id' not in session):
         return jsonify({'error': 'Not logged in'}), 401
     course = query_db(slug, 'SELECT * FROM courses LIMIT 1', one=True)
-    max_teams = get_max_teams(slug, course['id'])
-    teams = query_db(slug,
-        'SELECT * FROM teams WHERE course_id = ? ORDER BY id LIMIT ?', [course['id'], max_teams]
-    )
-    result = []
-    for t in teams:
-        members = query_db(slug,
-            'SELECT student_id, name FROM students WHERE team_id = ?', [t['id']]
-        )
-        result.append({
-            'id': t['id'],
-            'name': t['name'],
-            'color': t['color'],
-            'members': [dict(m) for m in members]
-        })
-    return jsonify(result)
+    return jsonify(_compute_teams(slug, course['id']))
 
 
 @app.route('/api/join_team', methods=['POST'])
@@ -621,7 +767,7 @@ def join_team():
     if not student:
         return jsonify({'error': 'Student not found'}), 404
     state = query_db(slug, 'SELECT phase, teams_locked FROM course_state LIMIT 1', one=True)
-    if state['phase'] != 'setup':
+    if not state or state['phase'] != 'setup':
         return jsonify({'error': 'Team selection is closed'}), 403
     if state['teams_locked']:
         return jsonify({'error': 'Teams are currently locked by the instructor'}), 403
@@ -689,88 +835,79 @@ def api_state():
     slug = session.get('slug')
     if not slug:
         return jsonify({'error': 'Not logged in'}), 401
-    state = query_db(slug, 'SELECT * FROM course_state LIMIT 1', one=True)
-    active_team = None
-    if state and state['active_team_id']:
-        active_team = query_db(slug,
-            'SELECT * FROM teams WHERE id = ?', [state['active_team_id']], one=True
-        )
-    my_team = None
+    state_data = _compute_state(slug)
+    # Strip grading metadata from student responses
     if 'student_id' in session:
-        me = query_db(slug,
-            'SELECT * FROM students WHERE student_id = ?',
-            [session['student_id']], one=True
-        )
-        if me and me['team_id']:
-            my_team = query_db(slug,
-                'SELECT * FROM teams WHERE id = ?', [me['team_id']], one=True
-            )
-    active_question = None
-    if state and state['active_question_id']:
-        aq = query_db(slug,
-            'SELECT * FROM questions WHERE id = ?', [state['active_question_id']], one=True
-        )
-        if aq:
-            active_question = dict(aq)
-            # Load pre-rendered HTML from the week folder
-            week = active_question.get('week_num', state['discussion_week'] if state and state['discussion_week'] else 1)
-            html = load_question_html(slug, week, active_question['question_num'])
-            if html:
-                active_question['html_content'] = html
-    # Compute presentation remaining seconds
-    presentation_remaining = state['presentation_remaining'] if state else None
-    if state and state['presentation_started_at'] and state['presentation_time_cap']:
-        try:
-            started = datetime.fromisoformat(
-                state['presentation_started_at'].replace(' ', 'T')
-            )
-            elapsed = (datetime.utcnow() - started).total_seconds()
-            cap = state['presentation_time_cap'] or 300
-            presentation_remaining = max(0, int(cap - elapsed))
-        except Exception:
-            pass
-    # Auto-close the poll highlight once POLL_DURATION has elapsed (server-authoritative)
-    poll_active_bool = bool(state['poll_active']) if state else False
-    if state and state['poll_active'] and state['poll_started_at']:
-        try:
-            poll_started = datetime.fromisoformat(
-                state['poll_started_at'].replace(' ', 'T')
-            )
-            if (datetime.utcnow() - poll_started).total_seconds() >= POLL_DURATION:
-                execute_db(slug,
-                    'UPDATE course_state SET poll_active = 0, poll_started_at = NULL '
-                    'WHERE course_id = ?', [state['course_id']]
-                )
-                state = query_db(slug, 'SELECT * FROM course_state LIMIT 1', one=True)
-                poll_active_bool = False
-        except Exception:
-            pass
-    # Poll count — count ratings for the active presentation (grading is always open)
-    poll_count = 0
-    pres_key = active_presentation_key(state)
-    if state and pres_key:
-        course = query_db(slug, 'SELECT id FROM courses LIMIT 1', one=True)
-        cnt = query_db(slug,
-            'SELECT COUNT(DISTINCT student_id) as c FROM presentation_ratings '
-            'WHERE course_id = ? AND question_key = ?',
-            [course['id'], pres_key], one=True)
-        poll_count = cnt['c'] if cnt else 0
+        state_data.pop('poll_count', None)
+        state_data.pop('presentation_history', None)
+    return jsonify(state_data)
+
+
+@app.route('/api/poll', methods=['GET'])
+def api_poll():
+    """Unified polling endpoint — returns state + teams + discussions in one
+    response, replacing 3 separate calls (/api/state + /api/teams +
+    /api/discussion_responses) for a 3x reduction in HTTP requests.
+
+    Works for both students and instructors.  The response includes a
+    ``poll_interval`` (ms) hint so the client can adapt its polling rate to
+    the current phase without hardcoding.
+    """
+    slug = session.get('slug')
+    if not slug:
+        return jsonify({'error': 'Not logged in'}), 401
+    if 'student_id' not in session and 'instructor_id' not in session:
+        return jsonify({'error': 'Not logged in'}), 401
+
+    ensure_schema(slug)
+
+    # --- State (also resolves course_id + max_teams internally) ---
+    state_data = _compute_state(slug)
+    course_id = state_data.pop('_course_id')
+    max_teams = state_data.pop('_max_teams')
+
+    # Strip grading metadata from student responses — students never see
+    # poll counts or presentation history (rating counts per team).
+    if 'student_id' in session:
+        state_data.pop('poll_count', None)
+        state_data.pop('presentation_history', None)
+
+    # --- Teams + members (2 queries, not N+1) ---
+    teams_data = _compute_teams(slug, course_id, max_teams=max_teams)
+
+    # --- Discussions (only during discussion phase) ---
+    discussions_data = None
+    if state_data['phase'] == 'discussion':
+        rows = query_db(slug,
+            '''SELECT d.*, s.name, s.student_id, t.name as team_name
+               FROM discussion_responses d
+               JOIN students s ON d.student_id = s.id
+               LEFT JOIN teams t ON s.team_id = t.id
+               ORDER BY d.created_at DESC''')
+        discussions_data = [dict(r) for r in rows]
+
+    # --- Top 3 teams (only when session has ended, students only) ---
+    top_teams = None
+    if state_data['phase'] == 'ended' and 'student_id' in session:
+        raw_state = query_db(slug, 'SELECT * FROM course_state LIMIT 1', one=True)
+        all_ranked = _compute_top_teams(slug, course_id, raw_state)
+        # Students see only names — no scores
+        top_teams = [{'name': t['name']} for t in all_ranked[:3]]
+
+    # --- Adaptive interval hint ---
+    if state_data['phase'] == 'competition':
+        poll_interval = 4000
+    elif state_data['phase'] == 'discussion':
+        poll_interval = 5000
+    else:
+        poll_interval = 8000
+
     return jsonify({
-        'phase': state['phase'] if state else 'setup',
-        'active_team': dict(active_team) if active_team else None,
-        'active_question': active_question,
-        'my_team': dict(my_team) if my_team else None,
-        'current_question': state['current_question'] if state else None,
-        'presentation_started_at': state['presentation_started_at'] if state else None,
-        'presentation_time_cap': state['presentation_time_cap'] if state else 300,
-        'presentation_remaining': presentation_remaining,
-        'teams_locked': bool(state['teams_locked']) if state else False,
-        'poll_active': poll_active_bool,
-        'poll_started_at': state['poll_started_at'] if state else None,
-        'poll_duration': POLL_DURATION,
-        'poll_question_key': state['poll_question_key'] if state else None,
-        'poll_count': poll_count,
-        'presentation_history': json.loads(state['presentation_history']) if state and state['presentation_history'] else []
+        'state': state_data,
+        'teams': teams_data,
+        'discussions': discussions_data,
+        'top_teams': top_teams,
+        'poll_interval': poll_interval
     })
 
 
@@ -843,43 +980,6 @@ def submit_discussion():
     return jsonify({'success': True})
 
 
-@app.route('/api/discussion_responses')
-@student_login_required
-def api_discussion_responses():
-    slug = session['slug']
-    rows = query_db(slug,
-        '''SELECT d.*, s.name, s.student_id, t.name as team_name
-           FROM discussion_responses d
-           JOIN students s ON d.student_id = s.id
-           LEFT JOIN teams t ON s.team_id = t.id
-           ORDER BY d.created_at DESC'''
-    )
-    return jsonify([dict(r) for r in rows])
-
-
-@app.route('/api/my_grades')
-@student_login_required
-def my_grades():
-    slug = session['slug']
-    student = query_db(slug,
-        'SELECT id, team_id FROM students WHERE student_id = ?',
-        [session['student_id']], one=True
-    )
-    peer = query_db(slug,
-        '''SELECT criterion, AVG(score) as avg_score, COUNT(*) as count
-           FROM peer_reviews WHERE recipient_id = ? GROUP BY criterion''',
-        [student['id']]
-    )
-    team = query_db(slug,
-        '''SELECT criterion, AVG(score) as avg_score, COUNT(*) as count
-           FROM team_reviews WHERE recipient_team_id = ? GROUP BY criterion''',
-        [student['team_id']]
-    ) if student['team_id'] else []
-    return jsonify({
-        'peer': [dict(r) for r in peer],
-        'team': [dict(r) for r in team]
-    })
-
 
 # ---------------------------------------------------------------------------
 # Instructor API
@@ -915,24 +1015,6 @@ def set_phase():
             [phase, course['id']]
         )
     return jsonify({'success': True, 'phase': phase})
-
-
-@app.route('/api/set_active_team', methods=['POST'])
-@instructor_login_required
-def set_active_team():
-    slug = session['slug']
-    data = request.get_json(silent=True) or {}
-    team_id = data.get('team_id')
-    if team_id is not None:
-        team = query_db(slug, 'SELECT id FROM teams WHERE id = ?', [team_id], one=True)
-        if not team:
-            return jsonify({'error': 'Team not found'}), 404
-    course = query_db(slug, 'SELECT id FROM courses LIMIT 1', one=True)
-    execute_db(slug,
-        'UPDATE course_state SET active_team_id = ? WHERE course_id = ?',
-        [team_id, course['id']]
-    )
-    return jsonify({'success': True})
 
 
 @app.route('/api/set_question', methods=['POST'])
@@ -1006,11 +1088,14 @@ def random_assign():
     student_ids = [s['id'] for s in unassigned]
     rnd.shuffle(student_ids)
 
-    # Count current members per team
-    counts = {}
+    # Count current members per team (single query, not N+1)
+    placeholders = ','.join('?' * len(team_ids))
+    count_rows = query_db(slug,
+        f'SELECT team_id, COUNT(*) as c FROM students WHERE team_id IN ({placeholders}) GROUP BY team_id',
+        team_ids)
+    counts = {r['team_id']: r['c'] for r in count_rows}
     for tid in team_ids:
-        c = query_db(slug, 'SELECT COUNT(*) as c FROM students WHERE team_id = ?', [tid], one=True)
-        counts[tid] = c['c']
+        counts.setdefault(tid, 0)
 
     # Assign each student to the smallest team (fill evenly)
     assigned = 0
@@ -1224,80 +1309,50 @@ def discussion_questions():
         if my_student:
             my_team_id = my_student['team_id']
 
-    for q in questions_list:
-        # Count distinct teams with sign-ups
-        teams_presenting = query_db(slug,
-            '''SELECT COUNT(DISTINCT s.team_id) as c
+    # Batch sign-up metadata: 3 queries total regardless of question count
+    # (replaces 3 queries per question = 3N → 3)
+    team_counts_rows = query_db(slug,
+        '''SELECT ds.question_key, COUNT(DISTINCT s.team_id) as c
+           FROM discussion_selections ds
+           JOIN students s ON ds.student_id = s.id
+           WHERE ds.course_id = ? GROUP BY ds.question_key''',
+        [course['id']])
+    teams_presenting_map = {r['question_key']: r['c'] for r in team_counts_rows}
+
+    if is_instructor:
+        presenter_rows = query_db(slug,
+            'SELECT question_key, COUNT(*) as c FROM discussion_selections '
+            'WHERE course_id = ? GROUP BY question_key',
+            [course['id']])
+    elif my_team_id:
+        presenter_rows = query_db(slug,
+            '''SELECT ds.question_key, COUNT(*) as c
                FROM discussion_selections ds
                JOIN students s ON ds.student_id = s.id
-               WHERE ds.course_id = ? AND ds.question_key = ?''',
-            [course['id'], q['key']], one=True)
-        q['teams_presenting'] = teams_presenting['c'] if teams_presenting else 0
+               WHERE ds.course_id = ? AND s.team_id = ?
+               GROUP BY ds.question_key''',
+            [course['id'], my_team_id])
+    else:
+        presenter_rows = []
+    presenters_map = {r['question_key']: r['c'] for r in presenter_rows}
 
-        # Count presenters (global for instructor, team-scoped for student)
-        if is_instructor:
-            presenters = query_db(slug,
-                'SELECT COUNT(*) as c FROM discussion_selections '
-                'WHERE course_id = ? AND question_key = ?',
-                [course['id'], q['key']], one=True)
-            q['presenters'] = presenters['c'] if presenters else 0
-        elif my_team_id:
-            presenters = query_db(slug,
-                '''SELECT COUNT(*) as c FROM discussion_selections ds
-                   JOIN students s ON ds.student_id = s.id
-                   WHERE ds.course_id = ? AND ds.question_key = ? AND s.team_id = ?''',
-                [course['id'], q['key'], my_team_id], one=True)
-            q['presenters'] = presenters['c'] if presenters else 0
-        else:
-            q['presenters'] = 0
+    my_selections = set()
+    if my_student:
+        sel_rows = query_db(slug,
+            'SELECT question_key FROM discussion_selections WHERE course_id = ? AND student_id = ?',
+            [course['id'], my_student['id']])
+        my_selections = {r['question_key'] for r in sel_rows}
 
-        # Whether current student has selected this question
-        q['i_selected'] = False
-        if my_student:
-            sel = query_db(slug,
-                'SELECT 1 FROM discussion_selections '
-                'WHERE course_id = ? AND student_id = ? AND question_key = ?',
-                [course['id'], my_student['id'], q['key']], one=True)
-            q['i_selected'] = bool(sel)
+    for q in questions_list:
+        q['teams_presenting'] = teams_presenting_map.get(q['key'], 0)
+        q['presenters'] = presenters_map.get(q['key'], 0)
+        q['i_selected'] = q['key'] in my_selections
 
     return jsonify({
         'weeks': weeks,
         'current_week': target['num'] if target else None,
         'questions': questions_list
     })
-
-
-@app.route('/api/questions', methods=['GET'])
-@instructor_login_required
-def get_questions():
-    slug = session['slug']
-    rows = query_db(slug,
-        'SELECT * FROM questions WHERE course_id = (SELECT id FROM courses LIMIT 1) ORDER BY question_num'
-    )
-    return jsonify([dict(r) for r in rows])
-
-
-@app.route('/api/sync_questions', methods=['POST'])
-@instructor_login_required
-def sync_questions():
-    """Sync questions from a week folder into the database.
-    
-    Reads classes/<slug>/week<N>/index.md for titles and q*.html files.
-    Clears existing questions for the course and inserts new ones.
-    """
-    slug = session['slug']
-    data = request.get_json(silent=True) or {}
-    week_num = data.get('week_num', 1)
-
-    course = query_db(slug, 'SELECT id FROM courses LIMIT 1', one=True)
-    if not course:
-        return jsonify({'error': 'Course not found'}), 404
-
-    count = sync_presentation_questions(slug, course['id'], week_num)
-    if count is None:
-        return jsonify({'error': f'No questions found for week {week_num}'}), 404
-
-    return jsonify({'success': True, 'count': count, 'week_num': week_num})
 
 
 @app.route('/api/questions', methods=['POST'])
@@ -1441,20 +1496,29 @@ def unassign_all():
     return jsonify({'success': True, 'count': count['c'] if count else 0})
 
 
-@app.route('/api/questions/<int:qid>', methods=['DELETE'])
-@instructor_login_required
-def delete_question(qid):
-    slug = session['slug']
-    # Clear any active-presentation pointer to this question first, so the FK
-    # delete doesn't fail once foreign_keys enforcement is on.
-    execute_db(slug, 'UPDATE course_state SET active_question_id = NULL WHERE active_question_id = ?', [qid])
-    execute_db(slug, 'DELETE FROM questions WHERE id = ?', [qid])
-    return jsonify({'success': True})
-
-
 # ---------------------------------------------------------------------------
 # Competition / Presentation Control API
 # ---------------------------------------------------------------------------
+
+@app.route('/roster_template.csv')
+@instructor_login_required
+def roster_template():
+    """Download a CSV template with example rows for roster upload."""
+    csv_content = (
+        'student_id,name,pin\n'
+        '1001,Alice Chen,4271\n'
+        '1002,Bob Garcia,8839\n'
+        '1003,Cara Singh,1056\n'
+    )
+    return (
+        csv_content,
+        200,
+        {
+            'Content-Type': 'text/csv',
+            'Content-Disposition': 'attachment; filename=roster_template.csv'
+        }
+    )
+
 
 @app.route('/api/upload_roster', methods=['POST'])
 @instructor_login_required
@@ -1827,8 +1891,7 @@ def api_students():
     sort_sql = allowed_sorts[sort_col]
     order_sql = 'DESC' if order == 'desc' else 'ASC'
 
-    from datetime import datetime as dt, timedelta
-    cutoff = (dt.utcnow() - timedelta(minutes=3)).isoformat()
+    cutoff = (datetime.utcnow() - timedelta(minutes=3)).strftime('%Y-%m-%d %H:%M:%S')
 
     where_clause = ''
     params = [course['id']]
@@ -1893,15 +1956,23 @@ def add_student():
     pin = data.get('pin', '').strip()
     if not student_id or not pin:
         return jsonify({'error': 'Student ID and PIN are required'}), 400
+    if not re.match(r'^\d{4}$', pin):
+        return jsonify({'error': 'PIN must be exactly 4 digits'}), 400
     course = query_db(slug, 'SELECT id FROM courses LIMIT 1', one=True)
-    try:
+    existing = query_db(slug,
+        'SELECT id FROM students WHERE course_id = ? AND student_id = ?',
+        [course['id'], student_id], one=True)
+    if existing:
         execute_db(slug,
-            'INSERT INTO students (course_id, student_id, name, pin) VALUES (?, ?, ?, ?)',
-            [course['id'], student_id, name or None, pin]
+            'UPDATE students SET name = ?, pin = ? WHERE id = ?',
+            [name or None, pin, existing['id']]
         )
-    except Exception:
-        return jsonify({'error': 'Student ID already exists in this course'}), 400
-    return jsonify({'success': True})
+        return jsonify({'success': True, 'updated': True})
+    execute_db(slug,
+        'INSERT INTO students (course_id, student_id, name, pin) VALUES (?, ?, ?, ?)',
+        [course['id'], student_id, name or None, pin]
+    )
+    return jsonify({'success': True, 'added': True})
 
 
 @app.route('/api/assign_student', methods=['POST'])
@@ -1942,7 +2013,6 @@ def reset_data():
     slug = session['slug']
     course = query_db(slug, 'SELECT id FROM courses LIMIT 1', one=True)
     execute_db(slug, 'DELETE FROM peer_reviews WHERE course_id = ?', [course['id']])
-    execute_db(slug, 'DELETE FROM team_reviews WHERE course_id = ?', [course['id']])
     execute_db(slug, 'DELETE FROM discussion_responses WHERE course_id = ?', [course['id']])
     execute_db(slug, 'DELETE FROM presentation_ratings WHERE course_id = ?', [course['id']])
     execute_db(slug, 'DELETE FROM discussion_selections WHERE course_id = ?', [course['id']])
@@ -1974,220 +2044,335 @@ def export_data(slug):
         flash('Unauthorized', 'error')
         return redirect(url_for('index'))
 
-    course = query_db(slug, 'SELECT * FROM courses LIMIT 1', one=True)
-    from openpyxl import Workbook
-    from openpyxl.styles import Font, PatternFill, Alignment
-    from io import BytesIO
+    try:
+        from openpyxl import Workbook
+        from openpyxl.styles import Font, PatternFill, Alignment
+        from openpyxl.utils import get_column_letter
+        from io import BytesIO
+        import collections
+    except ImportError:
+        flash('Export library not available. Contact administrator.', 'error')
+        return redirect(url_for('instructor_course', slug=slug))
 
-    wb = Workbook()
+    try:
+        course = query_db(slug, 'SELECT * FROM courses LIMIT 1', one=True)
+        if not course:
+            flash('Course not found.', 'error')
+            return redirect(url_for('index'))
 
-    header_font = Font(bold=True, color='FFFFFF')
-    header_fill = PatternFill(start_color='13294B', end_color='13294B', fill_type='solid')
-    header_align = Alignment(horizontal='center')
-    bold_font = Font(bold=True)
+        cid = course['id']
 
-    def style_header(ws, headers):
-        for col, h in enumerate(headers, 1):
-            cell = ws.cell(row=1, column=col, value=h)
-            cell.font = header_font
-            cell.fill = header_fill
-            cell.alignment = header_align
+        # ── gather all data ──
 
-    def auto_width(ws, headers):
-        for col in range(1, len(headers) + 1):
-            ws.column_dimensions[chr(64 + col) if col <= 26 else 'A'].auto_size = True
+        students = query_db(slug,
+            '''SELECT s.*, t.name as team_name
+               FROM students s LEFT JOIN teams t ON s.team_id = t.id
+               WHERE s.course_id = ? ORDER BY s.name''', [cid])
 
-    cid = course['id']
+        teams = query_db(slug,
+            '''SELECT t.*,
+                    (SELECT COUNT(*) FROM students s WHERE s.team_id = t.id) as member_count
+               FROM teams t WHERE t.course_id = ? ORDER BY t.id''', [cid])
 
-    # ── gather data ──
-    import collections
+        peer_reviews = query_db(slug,
+            '''SELECT p.grader_id, p.recipient_id,
+                      g.student_id as grader_sid, g.name as grader_name,
+                      r.student_id as recipient_sid, r.name as recipient_name,
+                      g.team_id as grader_team_id,
+                      p.criterion, p.score, p.created_at
+               FROM peer_reviews p
+               JOIN students g ON p.grader_id = g.id
+               JOIN students r ON p.recipient_id = r.id
+               WHERE p.course_id = ? AND p.score > 0
+               ORDER BY p.created_at''', [cid])
 
-    students = query_db(slug,
-        '''SELECT s.*, t.name as team_name
-           FROM students s LEFT JOIN teams t ON s.team_id = t.id
-           WHERE s.course_id = ? ORDER BY s.name''', [cid])
+        ratings = query_db(slug,
+            '''SELECT pr.question_key, pr.student_id as rater_db_id,
+                      s.student_id as rater_sid, s.name as rater_name,
+                      s.team_id as rater_team_id,
+                      pr.q1_developed, pr.q2_easy, pr.created_at
+               FROM presentation_ratings pr
+               JOIN students s ON pr.student_id = s.id
+               WHERE pr.course_id = ?
+               ORDER BY pr.question_key, pr.created_at''', [cid])
 
-    teams = query_db(slug,
-        '''SELECT t.*,
-                (SELECT COUNT(*) FROM students s WHERE s.team_id = t.id) as member_count
-           FROM teams t WHERE t.course_id = ? ORDER BY t.name''', [cid])
+        discussions = query_db(slug,
+            '''SELECT d.student_id as db_id, s.student_id, s.name,
+                      t.name as team_name, d.question, d.response, d.created_at
+               FROM discussion_responses d
+               JOIN students s ON d.student_id = s.id
+               LEFT JOIN teams t ON s.team_id = t.id
+               WHERE d.course_id = ?
+               ORDER BY d.created_at''', [cid])
 
-    thumbs = query_db(slug,
-        '''SELECT p.grader_id, p.recipient_id, g.name as grader, r.name as recipient, p.created_at, p.criterion
-           FROM peer_reviews p
-           JOIN students g ON p.grader_id = g.id
-           JOIN students r ON p.recipient_id = r.id
-           WHERE p.course_id = ? AND p.score > 0
-           ORDER BY p.created_at''', [cid])
+        # Map question_key → presenting team from presentation_history
+        state_row = query_db(slug, 'SELECT * FROM course_state WHERE course_id = ?', [cid], one=True)
+        key_to_team = {}
+        if state_row and state_row['presentation_history']:
+            for h in json.loads(state_row['presentation_history']):
+                qkey = f"pres-{h.get('started_at', '')}"
+                key_to_team[qkey] = h.get('team', 'Unknown')
 
-    ratings = query_db(slug,
-        '''SELECT pr.question_key, pr.student_id as rater_id, s.name as rater, pr.q1_developed, pr.q2_easy, pr.created_at
-           FROM presentation_ratings pr
-           JOIN students s ON pr.student_id = s.id
-           WHERE pr.course_id = ?
-           ORDER BY pr.question_key, pr.created_at''', [cid])
+        # Team id → name lookup
+        team_id_to_name = {t['id']: t['name'] for t in teams}
 
-    # Map question_key → presenting team from presentation_history
-    state_row = query_db(slug, 'SELECT * FROM course_state WHERE course_id = ?', [cid], one=True)
-    key_to_team = {}
-    if state_row and state_row['presentation_history']:
-        for h in json.loads(state_row['presentation_history']):
-            qkey = f"pres-{h.get('started_at', '')}"
-            key_to_team[qkey] = h.get('team', 'Unknown')
+        # ── styles ──
 
-    # student DB id → display name. Per-student aggregates below are keyed by id,
-    # not name, so two students who share a name aren't silently merged.
-    id_to_name = {stu['id']: (stu['name'] or stu['student_id']) for stu in students}
+        wb = Workbook()
+        header_font = Font(bold=True, color='FFFFFF')
+        header_fill = PatternFill(start_color='13294B', end_color='13294B', fill_type='solid')
+        header_align = Alignment(horizontal='center', vertical='center')
+        bold_font = Font(bold=True)
+        freeze_align = Alignment(vertical='top', wrap_text=True)
 
-    # ── TAB 1: Summary ──
-    ws1 = wb.active
-    ws1.title = 'Summary'
-    r = 1
-    ws1.cell(row=r, column=1, value='Course').font = bold_font
-    ws1.cell(row=r, column=2, value=course['name']); r += 1
-    ws1.cell(row=r, column=1, value='Code').font = bold_font
-    ws1.cell(row=r, column=2, value=course['code'] or ''); r += 1
-    ws1.cell(row=r, column=1, value='Semester').font = bold_font
-    ws1.cell(row=r, column=2, value=course['semester'] or ''); r += 1
-    ws1.cell(row=r, column=1, value='Export Date').font = bold_font
-    ws1.cell(row=r, column=2, value=datetime.now().strftime('%Y-%m-%d %H:%M')); r += 1
-    ws1.cell(row=r, column=1, value='Total Students').font = bold_font
-    ws1.cell(row=r, column=2, value=len(students)); r += 1
-    ws1.cell(row=r, column=1, value='Total Teams').font = bold_font
-    ws1.cell(row=r, column=2, value=len(teams)); r += 1
-    ws1.cell(row=r, column=1, value='Total Thumbs-up').font = bold_font
-    ws1.cell(row=r, column=2, value=len(thumbs)); r += 1
-    ws1.cell(row=r, column=1, value='Total Presentation Ratings').font = bold_font
-    ws1.cell(row=r, column=2, value=len(ratings)); r += 2
+        def style_header(ws, headers):
+            for col, h in enumerate(headers, 1):
+                cell = ws.cell(row=1, column=col, value=h)
+                cell.font = header_font
+                cell.fill = header_fill
+                cell.alignment = header_align
+            ws.freeze_panes = 'A2'
 
-    # Team leaderboard
-    ws1.cell(row=r, column=1, value='Team Leaderboard').font = bold_font; r += 1
-    style_header_row = r
-    for col, h in enumerate(['Team', 'Members', 'Avg Developed', 'Avg Easy', 'Total Avg'], 1):
-        cell = ws1.cell(row=r, column=col, value=h)
-        cell.font = header_font; cell.fill = header_fill; cell.alignment = header_align
-    r += 1
-    team_scores = collections.defaultdict(lambda: {'dev': [], 'easy': []})
-    for rt in ratings:
-        tname = key_to_team.get(rt['question_key'], 'Unknown')
-        if rt['q1_developed'] is not None:
-            team_scores[tname]['dev'].append(rt['q1_developed'])
-        if rt['q2_easy'] is not None:
-            team_scores[tname]['easy'].append(rt['q2_easy'])
-    team_sorted = sorted(team_scores.items(), key=lambda x: sum(x[1]['dev']+x[1]['easy'])/max(1, len(x[1]['dev'])), reverse=True)
-    for tname, sc in team_sorted:
-        avg_d = round(sum(sc['dev'])/len(sc['dev']), 2) if sc['dev'] else ''
-        avg_e = round(sum(sc['easy'])/len(sc['easy']), 2) if sc['easy'] else ''
-        total = round((sum(sc['dev'])+sum(sc['easy']))/(len(sc['dev'])+len(sc['easy'])), 2) if (sc['dev'] or sc['easy']) else ''
-        ws1.cell(row=r, column=1, value=tname)
-        member_cnt = next((t['member_count'] for t in teams if t['name'] == tname), '')
-        ws1.cell(row=r, column=2, value=member_cnt)
-        ws1.cell(row=r, column=3, value=avg_d)
-        ws1.cell(row=r, column=4, value=avg_e)
-        ws1.cell(row=r, column=5, value=total)
+        def set_col_widths(ws, headers, rows):
+            """Compute column widths from actual content."""
+            for col_idx, h in enumerate(headers, 1):
+                max_len = len(str(h))
+                for row in rows:
+                    val = row[col_idx - 1] if col_idx <= len(row) else ''
+                    if val is not None:
+                        max_len = max(max_len, min(len(str(val)), 50))
+                ws.column_dimensions[get_column_letter(col_idx)].width = max(max_len + 3, 12)
+
+        # ════════════════════════════════════════════════════════════════════
+        # TAB 1: Summary — quick overview
+        # ════════════════════════════════════════════════════════════════════
+        ws1 = wb.active
+        ws1.title = 'Summary'
+
+        info_rows = [
+            ('Course', course['name']),
+            ('Code', course['code'] or ''),
+            ('Semester', course['semester'] or ''),
+            ('Export Date', datetime.now().strftime('%Y-%m-%d %H:%M')),
+            ('Total Students', len(students)),
+            ('Total Teams', len(teams)),
+            ('Total Peer Reviews (thumbs)', len(peer_reviews)),
+            ('Total Presentation Ratings', len(ratings)),
+            ('Total Discussion Responses', len(discussions)),
+        ]
+        for r, (label, val) in enumerate(info_rows, 1):
+            ws1.cell(row=r, column=1, value=label).font = bold_font
+            ws1.cell(row=r, column=2, value=val)
+
+        # Team leaderboard
+        r = len(info_rows) + 2
+        ws1.cell(row=r, column=1, value='Team Leaderboard').font = bold_font
         r += 1
-    r += 1
-
-    # Top students by thumbs-up received
-    ws1.cell(row=r, column=1, value='Top Students (by thumbs-up received)').font = bold_font; r += 1
-    for col, h in enumerate(['Student', 'Thumbs Received'], 1):
-        cell = ws1.cell(row=r, column=col, value=h)
-        cell.font = header_font; cell.fill = header_fill; cell.alignment = header_align
-    r += 1
-    thumbs_received = collections.Counter(t['recipient_id'] for t in thumbs)
-    for sid, cnt in thumbs_received.most_common(10):
-        ws1.cell(row=r, column=1, value=id_to_name.get(sid, 'Unknown'))
-        ws1.cell(row=r, column=2, value=cnt)
+        lb_headers = ['Rank', 'Team', 'Members', 'Presentations', 'Avg Developed (1-5)', 'Avg Easy (1-5)', 'Combined Avg']
+        for col, h in enumerate(lb_headers, 1):
+            cell = ws1.cell(row=r, column=col, value=h)
+            cell.font = header_font; cell.fill = header_fill; cell.alignment = header_align
         r += 1
-    r += 1
 
-    # Per-question summary
-    ws1.cell(row=r, column=1, value='Per-Question Summary').font = bold_font; r += 1
-    for col, h in enumerate(['Question', 'Presenting Team', '# Ratings', 'Avg Developed', 'Avg Easy'], 1):
-        cell = ws1.cell(row=r, column=col, value=h)
-        cell.font = header_font; cell.fill = header_fill; cell.alignment = header_align
-    r += 1
-    q_groups = collections.defaultdict(list)
-    for rt in ratings:
-        q_groups[rt['question_key']].append(rt)
-    for qkey in sorted(q_groups.keys()):
-        items = q_groups[qkey]
-        devs = [x['q1_developed'] for x in items if x['q1_developed'] is not None]
-        easys = [x['q2_easy'] for x in items if x['q2_easy'] is not None]
-        ws1.cell(row=r, column=1, value=qkey)
-        ws1.cell(row=r, column=2, value=key_to_team.get(qkey, 'Unknown'))
-        ws1.cell(row=r, column=3, value=len(items))
-        ws1.cell(row=r, column=4, value=round(sum(devs)/len(devs), 2) if devs else '')
-        ws1.cell(row=r, column=5, value=round(sum(easys)/len(easys), 2) if easys else '')
-        r += 1
-    ws1.column_dimensions['A'].width = 30
-    ws1.column_dimensions['B'].width = 18
-    ws1.column_dimensions['C'].width = 15
-    ws1.column_dimensions['D'].width = 15
-    ws1.column_dimensions['E'].width = 12
+        # Build team scores — fix: use combined count for sort denominator
+        team_scores = collections.defaultdict(lambda: {'dev': [], 'easy': []})
+        for rt in ratings:
+            tname = key_to_team.get(rt['question_key'], 'Unknown')
+            if rt['q1_developed'] is not None:
+                team_scores[tname]['dev'].append(rt['q1_developed'])
+            if rt['q2_easy'] is not None:
+                team_scores[tname]['easy'].append(rt['q2_easy'])
 
-    # ── TAB 2: Student Activities ──
-    ws2 = wb.create_sheet('Student Activities')
-    headers2 = ['student_id', 'name', 'team', 'thumbs_given', 'thumbs_received',
-                'discussion_selections', 'presentation_ratings_given',
-                'last_login', 'last_active']
-    style_header(ws2, headers2)
-    # Pre-compute counts — keyed by student DB id, not name, so two students
-    # who share a name are counted individually instead of being merged.
-    given = collections.Counter(t['grader_id'] for t in thumbs)
-    received = collections.Counter(t['recipient_id'] for t in thumbs)
-    ratings_given = collections.Counter(rt['rater_id'] for rt in ratings)
-    sels = query_db(slug,
-        '''SELECT s.id, COUNT(*) as c FROM discussion_selections ds
-           JOIN students s ON ds.student_id = s.id
-           WHERE ds.course_id = ? GROUP BY s.id''', [cid])
-    sel_given = {s['id']: s['c'] for s in sels}
-    for i, stu in enumerate(students, 2):
-        ws2.cell(row=i, column=1, value=stu['student_id'])
-        ws2.cell(row=i, column=2, value=stu['name'])
-        ws2.cell(row=i, column=3, value=stu['team_name'])
-        ws2.cell(row=i, column=4, value=given.get(stu['id'], 0))
-        ws2.cell(row=i, column=5, value=received.get(stu['id'], 0))
-        ws2.cell(row=i, column=6, value=sel_given.get(stu['id'], 0))
-        ws2.cell(row=i, column=7, value=ratings_given.get(stu['id'], 0))
-        ws2.cell(row=i, column=8, value=stu['last_login_at'])
-        ws2.cell(row=i, column=9, value=stu['last_active_at'])
-    auto_width(ws2, headers2)
+        def combined_avg(sc):
+            all_vals = sc['dev'] + sc['easy']
+            return round(sum(all_vals) / len(all_vals), 2) if all_vals else 0
 
-    # ── TAB 3: Group Discussion ──
-    ws3 = wb.create_sheet('Group Discussion')
-    headers3 = ['grader', 'recipient', 'criterion', 'time']
-    style_header(ws3, headers3)
-    for i, t in enumerate(thumbs, 2):
-        ws3.cell(row=i, column=1, value=t['grader'])
-        ws3.cell(row=i, column=2, value=t['recipient'])
-        ws3.cell(row=i, column=3, value=t['criterion'])
-        ws3.cell(row=i, column=4, value=t['created_at'])
-    auto_width(ws3, headers3)
+        team_sorted = sorted(team_scores.items(), key=lambda x: combined_avg(x[1]), reverse=True)
+        for rank, (tname, sc) in enumerate(team_sorted, 1):
+            avg_d = round(sum(sc['dev']) / len(sc['dev']), 2) if sc['dev'] else ''
+            avg_e = round(sum(sc['easy']) / len(sc['easy']), 2) if sc['easy'] else ''
+            total = combined_avg(sc)
+            member_cnt = next((t['member_count'] for t in teams if t['name'] == tname), '')
+            pres_cnt = sum(1 for k, v in key_to_team.items() if v == tname)
+            ws1.cell(row=r, column=1, value=rank)
+            ws1.cell(row=r, column=2, value=tname)
+            ws1.cell(row=r, column=3, value=member_cnt)
+            ws1.cell(row=r, column=4, value=pres_cnt)
+            ws1.cell(row=r, column=5, value=avg_d)
+            ws1.cell(row=r, column=6, value=avg_e)
+            ws1.cell(row=r, column=7, value=total if total else '')
+            r += 1
 
-    # ── TAB 4: Presentation ──
-    ws4 = wb.create_sheet('Presentation')
-    headers4 = ['question_key', 'presenting_team', 'rater', 'developed', 'easy', 'time']
-    style_header(ws4, headers4)
-    for i, rt in enumerate(ratings, 2):
-        ws4.cell(row=i, column=1, value=rt['question_key'])
-        ws4.cell(row=i, column=2, value=key_to_team.get(rt['question_key'], 'Unknown'))
-        ws4.cell(row=i, column=3, value=rt['rater'])
-        ws4.cell(row=i, column=4, value=rt['q1_developed'])
-        ws4.cell(row=i, column=5, value=rt['q2_easy'])
-        ws4.cell(row=i, column=6, value=rt['created_at'])
-    auto_width(ws4, headers4)
+        ws1.column_dimensions['A'].width = 28
+        ws1.column_dimensions['B'].width = 22
+        ws1.column_dimensions['C'].width = 12
+        ws1.column_dimensions['D'].width = 16
+        ws1.column_dimensions['E'].width = 20
+        ws1.column_dimensions['F'].width = 18
+        ws1.column_dimensions['G'].width = 14
 
-    # Save
-    buf = BytesIO()
-    wb.save(buf)
-    buf.seek(0)
-    filename = f"popping_{course['code'] or slug}_export.xlsx"
-    return (
-        buf.getvalue(),
-        200,
-        {
-            'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-            'Content-Disposition': f'attachment; filename={filename}'
-        }
-    )
+        # ════════════════════════════════════════════════════════════════════
+        # TAB 2: Students — one row per student, gradebook-ready
+        # ════════════════════════════════════════════════════════════════════
+        ws2 = wb.create_sheet('Students')
+        s_headers = [
+            'student_id', 'name', 'team',
+            'thumbs_given', 'thumbs_received',
+            'discussion_responses', 'discussion_selections',
+            'presentation_ratings_given',
+            'presented_question',
+            'last_login', 'last_active',
+        ]
+        style_header(ws2, s_headers)
+
+        # Pre-compute per-student counts (keyed by DB id)
+        thumbs_given = collections.Counter(pr['grader_id'] for pr in peer_reviews)
+        thumbs_recv = collections.Counter(pr['recipient_id'] for pr in peer_reviews)
+        ratings_given = collections.Counter(rt['rater_db_id'] for rt in ratings)
+        disc_count = collections.Counter(d['db_id'] for d in discussions)
+
+        sels = query_db(slug,
+            '''SELECT s.id, COUNT(*) as c FROM discussion_selections ds
+               JOIN students s ON ds.student_id = s.id
+               WHERE ds.course_id = ? GROUP BY s.id''', [cid])
+        sel_count = {s['id']: s['c'] for s in sels}
+
+        # Which question each student presented (from selections)
+        sel_details = query_db(slug,
+            '''SELECT s.id, ds.question_key FROM discussion_selections ds
+               JOIN students s ON ds.student_id = s.id
+               WHERE ds.course_id = ?''', [cid])
+        presented_q = collections.defaultdict(list)
+        for sd in sel_details:
+            presented_q[sd['id']].append(sd['question_key'])
+
+        s_rows = []
+        for stu in students:
+            row = [
+                stu['student_id'],
+                stu['name'] or '',
+                stu['team_name'] or '',
+                thumbs_given.get(stu['id'], 0),
+                thumbs_recv.get(stu['id'], 0),
+                disc_count.get(stu['id'], 0),
+                sel_count.get(stu['id'], 0),
+                ratings_given.get(stu['id'], 0),
+                ', '.join(presented_q.get(stu['id'], [])),
+                stu['last_login_at'] or '',
+                stu['last_active_at'] or '',
+            ]
+            s_rows.append(row)
+
+        for i, row in enumerate(s_rows, 2):
+            for col, val in enumerate(row, 1):
+                ws2.cell(row=i, column=col, value=val)
+        set_col_widths(ws2, s_headers, s_rows)
+
+        # ════════════════════════════════════════════════════════════════════
+        # TAB 3: Teams — one row per team with aggregates
+        # ════════════════════════════════════════════════════════════════════
+        ws3 = wb.create_sheet('Teams')
+        t_headers = ['team_id', 'team_name', 'member_count', 'presentations',
+                     'avg_developed', 'avg_easy', 'combined_avg']
+        style_header(ws3, t_headers)
+
+        t_rows = []
+        for t in teams:
+            tname = t['name']
+            sc = team_scores.get(tname, {'dev': [], 'easy': []})
+            avg_d = round(sum(sc['dev']) / len(sc['dev']), 2) if sc['dev'] else ''
+            avg_e = round(sum(sc['easy']) / len(sc['easy']), 2) if sc['easy'] else ''
+            total = combined_avg(sc)
+            pres_cnt = sum(1 for k, v in key_to_team.items() if v == tname)
+            t_rows.append([
+                t['id'], tname, t['member_count'], pres_cnt,
+                avg_d, avg_e, total if total else '',
+            ])
+        for i, row in enumerate(t_rows, 2):
+            for col, val in enumerate(row, 1):
+                ws3.cell(row=i, column=col, value=val)
+        set_col_widths(ws3, t_headers, t_rows)
+
+        # ════════════════════════════════════════════════════════════════════
+        # TAB 4: Peer Reviews — raw thumbs-up data
+        # ════════════════════════════════════════════════════════════════════
+        ws4 = wb.create_sheet('Peer Reviews')
+        pr_headers = ['grader_id', 'grader_name', 'recipient_id', 'recipient_name',
+                      'criterion', 'score', 'time']
+        style_header(ws4, pr_headers)
+
+        pr_rows = []
+        for pr in peer_reviews:
+            pr_rows.append([
+                pr['grader_sid'], pr['grader_name'],
+                pr['recipient_sid'], pr['recipient_name'],
+                pr['criterion'], pr['score'], pr['created_at'],
+            ])
+        for i, row in enumerate(pr_rows, 2):
+            for col, val in enumerate(row, 1):
+                ws4.cell(row=i, column=col, value=val)
+        set_col_widths(ws4, pr_headers, pr_rows)
+
+        # ════════════════════════════════════════════════════════════════════
+        # TAB 5: Presentation Ratings — raw star ratings
+        # ════════════════════════════════════════════════════════════════════
+        ws5 = wb.create_sheet('Presentation Ratings')
+        rt_headers = ['question_key', 'presenting_team', 'rater_id', 'rater_name',
+                      'rater_team', 'developed_1to5', 'easy_1to5', 'time']
+        style_header(ws5, rt_headers)
+
+        rt_rows = []
+        for rt in ratings:
+            rt_rows.append([
+                rt['question_key'],
+                key_to_team.get(rt['question_key'], 'Unknown'),
+                rt['rater_sid'], rt['rater_name'],
+                team_id_to_name.get(rt['rater_team_id'], '') if rt['rater_team_id'] else '',
+                rt['q1_developed'], rt['q2_easy'], rt['created_at'],
+            ])
+        for i, row in enumerate(rt_rows, 2):
+            for col, val in enumerate(row, 1):
+                ws5.cell(row=i, column=col, value=val)
+        set_col_widths(ws5, rt_headers, rt_rows)
+
+        # ════════════════════════════════════════════════════════════════════
+        # TAB 6: Discussion Responses — raw student text answers
+        # ════════════════════════════════════════════════════════════════════
+        ws6 = wb.create_sheet('Discussion Responses')
+        d_headers = ['student_id', 'name', 'team', 'question', 'response', 'time']
+        style_header(ws6, d_headers)
+
+        d_rows = []
+        for d in discussions:
+            d_rows.append([
+                d['student_id'], d['name'], d['team_name'] or '',
+                d['question'], d['response'], d['created_at'],
+            ])
+        for i, row in enumerate(d_rows, 2):
+            for col, val in enumerate(row, 1):
+                ws6.cell(row=i, column=col, value=val)
+                if col in (4, 5):  # wrap question and response text
+                    ws6.cell(row=i, column=col).alignment = freeze_align
+        set_col_widths(ws6, d_headers, d_rows)
+        # Give response column extra width
+        ws6.column_dimensions['E'].width = 50
+
+        # ── save ──
+        buf = BytesIO()
+        wb.save(buf)
+        buf.seek(0)
+        filename = f"popping_{course['code'] or slug}_export.xlsx"
+        return (
+            buf.getvalue(),
+            200,
+            {
+                'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                'Content-Disposition': f'attachment; filename={filename}'
+            }
+        )
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        flash(f'Export failed: {e}', 'error')
+        return redirect(url_for('instructor_course', slug=slug))

@@ -8,6 +8,7 @@
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.0.9/purify.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
     <script>
         MathJax = {
@@ -40,6 +41,7 @@
                     <div class="nav-dropdown-menu" id="tools-menu">
                         <a href="{{ url_for('export_data', slug=session.slug) }}" class="nav-dropdown-item">⬇ Download Course Results</a>
                         <a href="#" class="nav-dropdown-item" onclick="uploadRoster(event)">📋 Upload Student Roster</a>
+                        <a href="/roster_template.csv" class="nav-dropdown-item">📄 Download Roster Template</a>
                         <input type="file" id="roster-file-input" accept=".csv" style="display:none" onchange="handleRosterFile(event)">
                     </div>
                 </div>

@@ -12,11 +12,6 @@ async function deleteJSON(url) {
     return res.json();
 }
 
-function getCourseId() {
-    const el = document.querySelector('.instructor[data-course-id]');
-    return el ? parseInt(el.dataset.courseId, 10) : null;
-}
-
 function escapeHtmlValue(value) {
     const div = document.createElement('div');
     div.textContent = value == null ? '' : String(value);
@@ -25,6 +20,27 @@ function escapeHtmlValue(value) {
 
 function escapeAttrValue(value) {
     return escapeHtmlValue(value).replace(/'/g, '&#39;');
+}
+
+/** Parse Markdown → sanitized HTML (XSS-safe via DOMPurify). */
+function renderMarkdown(md) {
+    const raw = marked.parse(md || '');
+    return window.DOMPurify ? DOMPurify.sanitize(raw) : raw;
+}
+
+/* ===== TOAST NOTIFICATIONS ===== */
+function showToast(msg, type) {
+    let container = document.querySelector('.toast-container');
+    if (!container) {
+        container = document.createElement('div');
+        container.className = 'toast-container';
+        document.body.appendChild(container);
+    }
+    const toast = document.createElement('div');
+    toast.className = 'toast' + (type ? ' toast-' + type : '');
+    toast.textContent = msg;
+    container.appendChild(toast);
+    setTimeout(() => toast.remove(), 2700);
 }
 
 /* ===== NAV DROPDOWN ===== */
@@ -56,10 +72,10 @@ window.handleRosterFile = async function(e) {
     const res = await fetch('/api/upload_roster', { method: 'POST', body: formData });
     const data = await res.json();
     if (data.success) {
-        alert(`Roster uploaded: ${data.added} added, ${data.updated} updated, ${data.removed || 0} removed.`);
+        showToast(`Roster uploaded: ${data.added} added, ${data.updated} updated, ${data.removed || 0} removed.`, 'success');
         window.location.reload();
     } else {
-        alert(data.error || 'Upload failed');
+        showToast(data.error || 'Upload failed', 'error');
     }
     e.target.value = '';
 };
@@ -89,24 +105,49 @@ let lastRenderedQuestionKey = null; // track active question to avoid re-renderi
 
 const dashboard = document.querySelector('.dashboard');
 if (dashboard) {
+    let _pollInProgress = false;
+    let _pollTimer = null;
+
     function initDashboard() {
-        loadRoster();
-        loadState();
-        setInterval(() => {
-            loadRoster();
-            loadState();
-            if (document.getElementById('discussion-section')?.style.display !== 'none') {
-                loadDiscussions();
+        pollOnce();
+    }
+
+    async function pollOnce() {
+        if (_pollInProgress) return;
+        _pollInProgress = true;
+        let interval = 5000;
+        try {
+            const res = await fetch('/api/poll');
+            if (!res.ok) throw new Error('poll failed');
+            const data = await res.json();
+            // Feed data directly to existing UI functions — no extra fetches
+            loadRoster(data.teams);
+            loadState(data.state);
+            if (data.discussions) {
+                loadDiscussions(data.discussions);
             }
-        }, 3000);
+            if (data.top_teams) {
+                renderTopTeams(data.top_teams);
+            }
+            // Use server-suggested interval (adaptive by phase)
+            if (data.poll_interval) interval = data.poll_interval;
+        } catch (e) {
+            // Network blip — will retry next cycle
+        } finally {
+            _pollInProgress = false;
+            _pollTimer = setTimeout(pollOnce, interval);
+        }
     }
 
     window.joinTeam = async function(teamId) {
         const data = await postJSON('/api/join_team', { team_id: teamId });
         if (data.success) {
-            window.location.reload();
+            showToast(teamId ? 'Team joined!' : 'Left team');
+            // Navigate smoothly — the dashboard template changes structure
+            // when a student joins/leaves a team, so we need a fresh render.
+            setTimeout(() => { window.location.href = '/dashboard'; }, 350);
         } else {
-            alert(data.error || 'Failed to join team');
+            showToast(data.error || 'Failed to join team', 'error');
         }
     };
 
@@ -135,11 +176,19 @@ if (dashboard) {
         document.getElementById('team-picker-panel').style.display = 'none';
     };
 
-    async function loadRoster() {
-        const res = await fetch('/api/teams');
-        const teams = await res.json();
+    async function loadRoster(teams) {
+        if (!teams) {
+            const res = await fetch('/api/teams');
+            teams = await res.json();
+        }
         const container = document.getElementById('roster-table');
         if (!container) return;
+
+        // Skip rebuild if nothing changed (avoids DOM reflow every poll cycle)
+        const sig = JSON.stringify(teams);
+        if (sig === container.dataset.lastRoster) return;
+        container.dataset.lastRoster = sig;
+
         container.innerHTML = '';
         teams.forEach(team => {
             const div = document.createElement('div');
@@ -160,9 +209,11 @@ if (dashboard) {
         });
     }
 
-    async function loadState() {
-        const res = await fetch('/api/state');
-        const state = await res.json();
+    async function loadState(state) {
+        if (!state) {
+            const res = await fetch('/api/state');
+            state = await res.json();
+        }
 
         const badge = document.querySelector('.phase-badge');
         if (badge) {
@@ -179,6 +230,13 @@ if (dashboard) {
         if (discSec) {
             discSec.style.display = PHASES_WITH_DISCUSSION.includes(state.phase) ? 'block' : 'none';
         }
+
+        // Show session results only when the session has ended
+        const resultsSec = document.getElementById('session-results');
+        if (resultsSec) {
+            resultsSec.style.display = state.phase === 'ended' ? 'block' : 'none';
+        }
+
         const teamSec = document.getElementById('team-section');
         const teamGradeSec = document.getElementById('team-grading-section');
         if (teamSec) {
@@ -252,7 +310,7 @@ if (dashboard) {
                             qText.innerHTML = state.active_question.html_content;
                         } else {
                             const md = state.active_question.content || state.active_question.question_text || '';
-                            qText.innerHTML = marked.parse(`#${state.active_question.question_num}: ${state.active_question.title || ''}\n\n${md}`);
+                            qText.innerHTML = renderMarkdown(`#${state.active_question.question_num}: ${state.active_question.title || ''}\n\n${md}`);
                         }
                         if (window.MathJax) MathJax.typesetPromise([qText]);
                         if (window.hljs) hljs.highlightAll();
@@ -302,24 +360,56 @@ if (dashboard) {
         }
     }
 
+    // --- Top 3 Teams results (shown when session ends) ---
+    const MEDALS = ['🥇', '🥈', '🥉'];
+    function renderTopTeams(teams) {
+        const container = document.getElementById('top-teams-display');
+        if (!container) return;
+        if (!teams || teams.length === 0) {
+            container.innerHTML = '<p class="hint">No presentation ratings were submitted.</p>';
+            return;
+        }
+        container.innerHTML = teams.map((t, i) =>
+            `<div class="result-row">` +
+            `<span class="result-medal">${MEDALS[i] || '🎯'}</span>` +
+            `<span class="result-team">${escapeHtmlValue(t.name)}</span>` +
+            `</div>`
+        ).join('');
+    }
+
     window.submitPeerGrade = async function(recipientId, score) {
-        await postJSON('/api/grade_peer', { recipient_id: recipientId, criterion: 'overall', score });
+        try {
+            const data = await postJSON('/api/grade_peer', { recipient_id: recipientId, criterion: 'overall', score });
+            return data && data.success;
+        } catch (e) {
+            return false;
+        }
     };
 
     window.submitDiscussion = async function() {
         const input = document.getElementById('discussion-input');
         const question = document.getElementById('current-question')?.textContent || 'General';
         if (!input.value.trim()) return;
-        await postJSON('/api/submit_discussion', { question, response: input.value.trim() });
-        input.value = '';
-        loadDiscussions();
+        const data = await postJSON('/api/submit_discussion', { question, response: input.value.trim() });
+        if (data && data.success) {
+            input.value = '';
+            // Instant refresh via the poll endpoint (discussions already included)
+            try {
+                const pollRes = await fetch('/api/poll');
+                if (pollRes.ok) {
+                    const pollData = await pollRes.json();
+                    if (pollData.discussions) loadDiscussions(pollData.discussions);
+                }
+            } catch(e) {}
+            showToast('Response submitted');
+        } else {
+            showToast(data?.error || 'Failed to submit response', 'error');
+        }
     };
 
-    async function loadDiscussions() {
-        const res = await fetch('/api/discussion_responses');
-        const rows = await res.json();
+    async function loadDiscussions(rows) {
         const container = document.getElementById('discussion-list');
-        if (!container) return;
+        if (!container || !rows) return;
         container.innerHTML = rows.slice(0, 20).map(r => {
             const display = r.name && r.name !== r.student_id
                 ? `${r.name} (${r.student_id})`
@@ -327,15 +417,9 @@ if (dashboard) {
             return `
             <div class="discussion-item">
                 <div class="meta">${escapeHtmlValue(display)} · ${escapeHtmlValue(r.team_name || 'No team')} · ${escapeHtmlValue(r.created_at)}</div>
-                <div>${escapeHtml(r.response)}</div>
+                <div>${escapeHtmlValue(r.response)}</div>
             </div>
         `}).join('');
-    }
-
-    function escapeHtml(text) {
-        const div = document.createElement('div');
-        div.textContent = text;
-        return div.innerHTML;
     }
 
     // --- teammate cards: circle layout + free drag ---
@@ -503,17 +587,17 @@ window.resetCardPositions = function() {
     }
 
     // --- thumb grading on cards ---
-    window.gradeTeammate = function(btn, recipientId, score) {
+    window.gradeTeammate = async function(btn, recipientId, score) {
         const card = btn.closest('.teammate-card');
         card.querySelectorAll('.thumb-btn').forEach(b => {
-            b.classList.remove('active-green', 'active-red');
+            b.classList.remove('active-green');
         });
-        if (score === 1) {
-            btn.classList.add('active-green');
-        } else {
-            btn.classList.add('active-red');
+        btn.classList.add('active-green');
+        const ok = await submitPeerGrade(recipientId, score);
+        if (!ok) {
+            btn.classList.remove('active-green');
+            showToast('Failed to save — please try again', 'error');
         }
-        submitPeerGrade(recipientId, score);
     };
 
     initTeammateCards();
@@ -528,13 +612,14 @@ window.randomAssign = async function() {
     const data = await postJSON('/api/random_assign', {});
     if (data.success) {
         if (data.assigned === 0) {
-            alert('All students are already in teams.');
+            showToast('All students are already in teams.');
         } else {
-            alert(`Assigned ${data.assigned} student(s) to teams.`);
+            showToast(`Assigned ${data.assigned} student(s) to teams.`, 'success');
+            // Refresh roster immediately
+            if (typeof window.instructorPollOnce === 'function') window.instructorPollOnce();
         }
-        window.location.reload();
     } else {
-        alert(data.error || 'Assignment failed');
+        showToast(data.error || 'Assignment failed', 'error');
     }
 };
 
@@ -554,7 +639,7 @@ if (instructor) {
                     qText.innerHTML = state.active_question.html_content;
                 } else {
                     const md = state.active_question.content || state.active_question.question_text || '';
-                    qText.innerHTML = marked.parse(`#${state.active_question.question_num}: ${state.active_question.title || ''}\n\n${md}`);
+                    qText.innerHTML = renderMarkdown(`#${state.active_question.question_num}: ${state.active_question.title || ''}\n\n${md}`);
                 }
                 if (window.MathJax) MathJax.typesetPromise([qText]);
                 if (window.hljs) hljs.highlightAll();
@@ -562,73 +647,86 @@ if (instructor) {
         } catch (e) {}
     })();
 
-    setInterval(async () => {
-        // Auto-refresh the team roster in SETUP phase
-        const rosterGrid = document.querySelector('.roster-grid');
-        if (!rosterGrid) return;
-        const res = await fetch('/api/teams');
-        if (!res.ok) return;
-        const teams = await res.json();
-        // Only update if this is the SETUP roster (not the filter dropdown)
-        const card = rosterGrid.closest('.card');
-        if (!card || !card.querySelector('h2')?.textContent?.includes('Team and Members')) return;
-        rosterGrid.innerHTML = '';
-        let unassignedCount = 0;
-        teams.forEach(team => {
-            const div = document.createElement('div');
-            div.className = 'roster-team';
-            const membersHtml = team.members.map(m => {
-                const display = m.name && m.name !== m.student_id ? `${m.name} (${m.student_id})` : m.student_id;
-                return `<div class="roster-member"><span class="team-dot" style="background:${escapeAttrValue(team.color)}"></span>${escapeHtmlValue(display)}</div>`;
-            }).join('');
-            div.innerHTML = `<h3><span class="team-dot" style="background:${escapeAttrValue(team.color)}"></span>${escapeHtmlValue(team.name)}</h3>${membersHtml || '<em>No members</em>'}`;
-            rosterGrid.appendChild(div);
-            unassignedCount += team.members.length;
-        });
-        // Update unassigned count
-        const totalStudents = document.querySelectorAll('#student-table tr').length || document.querySelectorAll('.data-table tbody tr').length;
-        const hint = card.querySelector('.hint');
-        // Try to refresh the whole page if it seems stale
-    }, 5000);
+    let _instrPollInProgress = false;
+    let _instrPollTimer = null;
 
-    // Competition-phase live state: update poll response count + poll status panel
-    setInterval(async () => {
-        const timerBox = document.getElementById('timer-box');
-        if (!timerBox) return; // not on competition page
+    async function instructorPollOnce() {
+        if (_instrPollInProgress) return;
+        _instrPollInProgress = true;
+        let interval = 5000;
         try {
-            const res = await fetch('/api/state');
+            const res = await fetch('/api/poll');
             if (!res.ok) return;
-            const state = await res.json();
-            // Update poll response count
-            const pollCount = document.getElementById('poll-count');
-            if (pollCount) {
-                pollCount.textContent = `${state.poll_count || 0} response${state.poll_count === 1 ? '' : 's'}`;
-            }
-            // Update active question markdown — only re-render when question changes
-            const qText = document.getElementById('active-question-text');
-            if (qText && state.active_question) {
-                const qKey = `${state.active_question.id}-${state.active_question.question_num}`;
-                if (qKey !== lastRenderedQuestionKey) {
-                    lastRenderedQuestionKey = qKey;
-                    const newHtml = state.active_question.html_content || marked.parse(`#${state.active_question.question_num}: ${state.active_question.title || ''}\n\n${state.active_question.content || state.active_question.question_text || ''}`);
-                    qText.innerHTML = newHtml;
-                    if (window.MathJax) MathJax.typesetPromise([qText]);
-                    if (window.hljs) hljs.highlightAll();
+            const data = await res.json();
+            const state = data.state;
+            const teams = data.teams;
+
+            // --- Roster refresh (setup phase) ---
+            const rosterGrid = document.querySelector('.roster-grid');
+            if (rosterGrid) {
+                const card = rosterGrid.closest('.card');
+                if (card && card.querySelector('h2')?.textContent?.includes('Team and Members')) {
+                    // Skip rebuild if nothing changed (avoids DOM reflow every poll cycle)
+                    const sig = JSON.stringify(teams);
+                    if (sig !== rosterGrid.dataset.lastRoster) {
+                        rosterGrid.dataset.lastRoster = sig;
+                        rosterGrid.innerHTML = '';
+                        teams.forEach(team => {
+                            const div = document.createElement('div');
+                            div.className = 'roster-team';
+                            const membersHtml = team.members.map(m => {
+                                const display = m.name && m.name !== m.student_id ? `${m.name} (${m.student_id})` : m.student_id;
+                                return `<div class="roster-member"><span class="team-dot" style="background:${escapeAttrValue(team.color)}"></span>${escapeHtmlValue(display)}</div>`;
+                            }).join('');
+                            div.innerHTML = `<h3><span class="team-dot" style="background:${escapeAttrValue(team.color)}"></span>${escapeHtmlValue(team.name)}</h3>${membersHtml || '<em>No members</em>'}`;
+                            rosterGrid.appendChild(div);
+                        });
+                    }
                 }
-            } else if (qText) {
-                qText.innerHTML = '';
-                lastRenderedQuestionKey = null;
             }
-            // Toggle poll status panel based on server state
-            const ps = document.getElementById('poll-status');
-            if (ps) {
-                const btn = document.getElementById('btn-start-poll');
-                const isGliding = btn && btn.classList.contains('gliding');
-                // Show panel when poll is active (server-authoritative) or glide is running
-                ps.style.display = (state.poll_active || isGliding) ? 'flex' : 'none';
+
+            // --- Competition state: poll count + active question + poll status ---
+            const timerBox = document.getElementById('timer-box');
+            if (timerBox && state) {
+                const pollCount = document.getElementById('poll-count');
+                if (pollCount) {
+                    pollCount.textContent = `${state.poll_count || 0} response${state.poll_count === 1 ? '' : 's'}`;
+                }
+                // Active question markdown — only re-render when question changes
+                const qText = document.getElementById('active-question-text');
+                if (qText && state.active_question) {
+                    const qKey = `${state.active_question.id}-${state.active_question.question_num}`;
+                    if (qKey !== lastRenderedQuestionKey) {
+                        lastRenderedQuestionKey = qKey;
+                        const newHtml = state.active_question.html_content || renderMarkdown(`#${state.active_question.question_num}: ${state.active_question.title || ''}\n\n${state.active_question.content || state.active_question.question_text || ''}`);
+                        qText.innerHTML = newHtml;
+                        if (window.MathJax) MathJax.typesetPromise([qText]);
+                        if (window.hljs) hljs.highlightAll();
+                    }
+                } else if (qText) {
+                    qText.innerHTML = '';
+                    lastRenderedQuestionKey = null;
+                }
+                // Toggle poll status panel
+                const ps = document.getElementById('poll-status');
+                if (ps) {
+                    const btn = document.getElementById('btn-start-poll');
+                    const isGliding = btn && btn.classList.contains('gliding');
+                    ps.style.display = (state.poll_active || isGliding) ? 'flex' : 'none';
+                }
             }
-        } catch (e) { /* network blip — ignore */ }
-    }, 3000);
+
+            if (data.poll_interval) interval = data.poll_interval;
+        } catch (e) { /* network blip */ }
+        finally {
+            _instrPollInProgress = false;
+            _instrPollTimer = setTimeout(instructorPollOnce, interval);
+        }
+    }
+
+    instructorPollOnce();
+    // Expose for global functions (randomAssign, unassignAll, etc.)
+    window.instructorPollOnce = instructorPollOnce;
 }
 
 let _originalMaxTeams = null;
@@ -672,26 +770,43 @@ window.cancelModifyTeams = function() {
 
 window.toggleLock = async function() {
     const btn = document.activeElement || event.target;
-    const isLocked = btn.textContent.includes('Unlock');
-    if (isLocked) {
-        await postJSON('/api/toggle_lock_teams', { locked: false });
-    } else {
-        await postJSON('/api/toggle_lock_teams', { locked: true });
+    const wasLocked = btn.textContent.includes('Unlock');
+    const data = await postJSON('/api/toggle_lock_teams', { locked: !wasLocked });
+    if (data.success) {
+        if (wasLocked) {
+            btn.textContent = 'Lock Teams';
+            btn.classList.remove('btn-danger');
+            btn.classList.add('btn-primary');
+            showToast('Teams unlocked');
+        } else {
+            btn.textContent = 'Unlock Teams';
+            btn.classList.remove('btn-primary');
+            btn.classList.add('btn-danger');
+            showToast('Teams locked', 'warning');
+        }
     }
-    window.location.reload();
 };
 
 window.toggleSessionTimer = async function() {
     const btn = document.getElementById('btn-session-timer');
-    const isRunning = btn.textContent.includes('Stop');
-    if (isRunning) {
+    const wasRunning = btn.textContent.includes('Stop');
+    if (wasRunning) {
         localStorage.removeItem('popping-session-start');
         await postJSON('/api/stop_session_timer', {});
+        btn.textContent = 'Start Timer';
+        btn.classList.remove('btn-danger');
+        btn.classList.add('btn-primary');
+        const t = document.getElementById('session-timer');
+        if (t) t.style.display = 'none';
+        showToast('Session timer stopped');
     } else {
         localStorage.setItem('popping-session-start', Date.now().toString());
         await postJSON('/api/start_session_timer', {});
+        btn.textContent = 'Stop Timer';
+        btn.classList.remove('btn-primary');
+        btn.classList.add('btn-danger');
+        showToast('Session timer started');
     }
-    window.location.reload();
 };
 
 // ---- max members per team ----
@@ -748,9 +863,18 @@ window.confirmModifyMembers = async function() {
     }
     const data = await postJSON('/api/set_max_members', { max_members: newMax });
     if (data.success) {
-        window.location.reload();
+        // Restore display with new value
+        const display = document.getElementById('max-members-display');
+        display.textContent = newMax;
+        display.classList.remove('editing');
+        document.getElementById('btn-modify-members').style.display = '';
+        const actions = document.getElementById('member-count-actions');
+        if (actions) actions.remove();
+        _originalMaxMembers = null;
+        showToast(`Max members set to ${newMax}`);
+        if (typeof window.instructorPollOnce === 'function') window.instructorPollOnce();
     } else {
-        alert(data.error || 'Failed to update max members');
+        showToast(data.error || 'Failed to update max members', 'error');
     }
 };
 
@@ -768,40 +892,24 @@ window.confirmModifyTeams = async function() {
     }
     const data = await postJSON('/api/set_max_teams', { max_teams: newMax });
     if (data.success) {
-        window.location.reload();
+        // Restore display with new value
+        const display = document.getElementById('team-count-display');
+        display.textContent = newMax;
+        display.classList.remove('editing');
+        document.getElementById('btn-modify-teams').style.display = '';
+        const actions = document.getElementById('team-count-actions');
+        if (actions) actions.remove();
+        _originalMaxTeams = null;
+        showToast(`Team count set to ${newMax}`);
+        if (typeof window.instructorPollOnce === 'function') window.instructorPollOnce();
     } else {
-        alert(data.error || 'Failed to update team count');
-    }
-};
-
-window.setMaxTeams = async function() {
-    const val = parseInt(document.getElementById('max-teams-input').value, 10);
-    if (isNaN(val) || val < 1 || val > 20) {
-        alert('Team count must be between 1 and 20');
-        return;
-    }
-    const data = await postJSON('/api/set_max_teams', { max_teams: val });
-    if (data.success) {
-        window.location.reload();
-    } else {
-        alert(data.error || 'Failed to update team count');
+        showToast(data.error || 'Failed to update team count', 'error');
     }
 };
 
 window.setPhase = async function(phase) {
     await postJSON('/api/set_phase', { phase });
     window.location.reload();
-};
-
-window.setActiveTeam = async function(teamId) {
-    await postJSON('/api/set_active_team', { team_id: teamId });
-    window.location.reload();
-};
-
-window.setQuestion = async function() {
-    const q = document.getElementById('question-input')?.value || '';
-    await postJSON('/api/set_question', { question: q });
-    alert('Question updated');
 };
 
 /* ===== STUDENT TABLE (paginated) ===== */
@@ -947,20 +1055,28 @@ window.toggleTeamPicker = function(e, studentId) {
 
 window.pickTeam = async function(studentId, teamId) {
     document.querySelectorAll('.team-picker').forEach(el => el.remove());
-    await postJSON('/api/assign_student', { student_id: studentId, team_id: teamId });
-    loadStudentTable();
+    const data = await postJSON('/api/assign_student', { student_id: studentId, team_id: teamId });
+    if (data && data.success) {
+        loadStudentTable();
+    } else {
+        showToast(data?.error || 'Failed to assign student', 'error');
+    }
 };
 
 window.addStudent = async function() {
     const id = document.getElementById('new-student-id').value.trim();
     const name = document.getElementById('new-name').value.trim();
     const pin = document.getElementById('new-pin').value.trim();
-    if (!id || !pin) { alert('Student ID and PIN are required'); return; }
+    if (!id || !pin) { showToast('Student ID and PIN are required', 'warning'); return; }
     const data = await postJSON('/api/add_student', { student_id: id, name, pin });
     if (data.success) {
-        window.location.reload();
+        document.getElementById('new-student-id').value = '';
+        document.getElementById('new-name').value = '';
+        document.getElementById('new-pin').value = '';
+        showToast(data.updated ? 'Student info updated' : 'Student added', 'success');
+        loadStudentTable();
     } else {
-        alert(data.error || 'Failed to add student');
+        showToast(data.error || 'Failed to add student', 'error');
     }
 };
 
@@ -989,12 +1105,20 @@ async function initWeekSelector() {
 window.setDiscussionWeek = async function() {
     const week = document.getElementById('setup-week-select')?.value;
     if (!week) return;
-    await postJSON('/api/set_discussion_week', { week: parseInt(week) });
+    const data = await postJSON('/api/set_discussion_week', { week: parseInt(week) });
+    if (data && data.success) {
+        const count = data.question_count;
+        showToast(`Week ${week} selected${count != null ? ` (${count} questions synced)` : ''}`, 'success');
+    }
 };
 
 window.postActiveQuestion = async function(title) {
-    await postJSON('/api/set_question', { question: title });
-    alert('Question posted: ' + title);
+    const data = await postJSON('/api/set_question', { question: title });
+    if (data && data.success) {
+        showToast('Question posted: ' + title, 'success');
+    } else {
+        showToast(data?.error || 'Failed to post question', 'error');
+    }
 };
 
 // Load on page load
@@ -1002,28 +1126,11 @@ if (document.getElementById('setup-week-select') || document.getElementById('dis
     initWeekSelector();
 }
 
-window.addQuestion = async function() {
-    const text = document.getElementById('new-question').value.trim();
-    if (!text) { alert('Question text required'); return; }
-    const data = await postJSON('/api/questions', { title: text, content: text });
-    if (data.success) {
-        window.location.reload();
-    } else {
-        alert(data.error || 'Failed to add question');
-    }
-};
-
-window.deleteQuestion = async function(qid) {
-    if (!confirm('Delete this question?')) return;
-    await deleteJSON('/api/questions/' + qid);
-    window.location.reload();
-};
-
 window.startPresentation = async function() {
     const teamId = document.getElementById('comp-team').value;
     const questionId = document.getElementById('comp-question').value;
     const timeCap = parseInt(document.getElementById('time-cap')?.value || '300', 10);
-    if (!teamId || !questionId) { alert('Select both a team and a question'); return; }
+    if (!teamId || !questionId) { showToast('Select both a team and a question', 'warning'); return; }
     const data = await postJSON('/api/start_presentation', {
         team_id: parseInt(teamId, 10),
         question_id: parseInt(questionId, 10),
@@ -1033,7 +1140,7 @@ window.startPresentation = async function() {
     if (data.success) {
         window.location.reload();
     } else {
-        alert(data.error || 'Failed to start presentation');
+        showToast(data.error || 'Failed to start presentation', 'error');
     }
 };
 
@@ -1183,7 +1290,7 @@ window.startPoll = async function() {
         const ps = document.getElementById('poll-status');
         if (ps) ps.style.display = 'flex';
     } else {
-        alert(data.error || 'Failed to start poll');
+        showToast(data.error || 'Failed to start poll', 'error');
     }
 };
 
@@ -1192,30 +1299,36 @@ window.stopPoll = async function() {
     if (data.success) {
         stopPollGlide();
     } else {
-        alert(data.error || 'Failed to stop poll');
+        showToast(data.error || 'Failed to stop poll', 'error');
     }
 };
 
 window.submitRating = async function() {
     if (!pollSelections.q1 || !pollSelections.q2) {
-        alert('Please rate both questions');
+        showToast('Please rate both questions', 'warning');
         return;
     }
     const btn = document.getElementById('btn-submit-rating');
     if (btn) btn.disabled = true;
-    const data = await postJSON('/api/submit_rating', {
-        q1_developed: pollSelections.q1,
-        q2_easy: pollSelections.q2
-    });
-    if (data.success) {
-        if (btn) {
-            btn.textContent = '✓ Submitted';
-            btn.classList.add('btn-submitted');
+    try {
+        const data = await postJSON('/api/submit_rating', {
+            q1_developed: pollSelections.q1,
+            q2_easy: pollSelections.q2
+        });
+        if (data && data.success) {
+            if (btn) {
+                btn.textContent = '✓ Submitted';
+                btn.classList.add('btn-submitted');
+            }
+            ratingSubmitted = true;
+            showToast('Rating submitted', 'success');
+        } else {
+            if (btn) btn.disabled = false;
+            showToast(data?.error || 'Failed to submit rating', 'error');
         }
-        ratingSubmitted = true;
-    } else {
+    } catch (e) {
         if (btn) btn.disabled = false;
-        alert(data.error || 'Failed to submit rating');
+        showToast('Network error — please try again', 'error');
     }
 };
 
@@ -1256,7 +1369,10 @@ window.togglePresent = async function(questionKey, btn) {
 window.unassignAll = async function() {
     if (!confirm('Clear all team assignments?')) return;
     const data = await postJSON('/api/unassign_all', {});
-    if (data.success) window.location.reload();
+    if (data.success) {
+        showToast('All team assignments cleared', 'warning');
+        if (typeof window.instructorPollOnce === 'function') window.instructorPollOnce();
+    }
 };
 
 // ===== APPENDIX QUESTIONS =====
@@ -1264,27 +1380,37 @@ window.unassignAll = async function() {
 window.addAppendixQuestion = async function() {
     const title = document.getElementById('appendix-title')?.value.trim();
     const content = document.getElementById('appendix-content')?.value.trim();
-    if (!title || !content) { alert('Title and content required'); return; }
+    if (!title || !content) { showToast('Title and content required', 'warning'); return; }
     const data = await postJSON('/api/questions', { title, content });
     if (data.success) {
         document.getElementById('appendix-title').value = '';
         document.getElementById('appendix-content').value = '';
-        window.location.reload();
+        showToast('Appendix question added');
+        // Refresh question list
+        initWeekSelector();
     } else {
-        alert(data.error || 'Failed to add question');
+        showToast(data.error || 'Failed to add question', 'error');
     }
 };
 
 window.deleteAppendixQuestion = async function(index) {
     if (!confirm('Delete this appendix question?')) return;
     const data = await postJSON('/api/delete_appendix_question', { index });
-    if (data.success) window.location.reload();
+    if (data && data.success) {
+        showToast('Question deleted');
+        initWeekSelector();
+    } else {
+        showToast(data?.error || 'Failed to delete question', 'error');
+    }
 };
 
 window.removeStudent = async function(studentDbId) {
     if (!confirm('Remove this student?')) return;
-    await deleteJSON('/api/remove_student/' + studentDbId);
-    window.location.reload();
+    const data = await deleteJSON('/api/remove_student/' + studentDbId);
+    if (data.success) {
+        showToast('Student removed');
+        loadStudentTable();
+    }
 };
 
 window.resetData = async function() {
@@ -1387,8 +1513,9 @@ if (instructorEl) {
     const pollStatus = document.getElementById('poll-status');
     const pollStarted = instructorEl.dataset.pollStarted;
     const pollActive = instructorEl.dataset.pollActive === '1';
+    const POLL_DURATION = parseInt(instructorEl.dataset.pollDuration || '30', 10);
     if (pollActive && pollStarted) {
-        startPollGlide(pollStarted, 30);
+        startPollGlide(pollStarted, POLL_DURATION);
     }
     if (pollStatus && pollActive) {
         pollStatus.style.display = 'flex';
@@ -1472,9 +1599,15 @@ function renderDiscussionQuestions(data) {
         const selected = q.i_selected ? 'selected' : '';
         const safeTitle = escapeHtmlValue(q.title || 'Untitled');
         const safeKey = escapeAttrValue(key);
+        const isAppendix = key.includes('-a');
+        const appendixIndex = isAppendix ? parseInt(key.split('-a').pop(), 10) : -1;
+        const deleteBtn = (isInstructor && isAppendix)
+            ? `<button class="btn btn-sm btn-danger" onclick="event.stopPropagation(); deleteAppendixQuestion(${appendixIndex})">🗑 Delete</button>`
+            : '';
         const action = isInstructor
             ? `<div class="disc-question-actions">
                    <button class="btn btn-sm btn-primary" data-question-title="${escapeAttrValue(q.title || '')}" onclick="event.stopPropagation(); postActiveQuestionFromButton(this)">Post to Class</button>
+                   ${deleteBtn}
                    <span class="presenting-badge">${presenting} team${presenting !== 1 ? 's' : ''}${presenters ? `, ${presenters} presenter${presenters !== 1 ? 's' : ''}` : ''}</span>
                </div>`
             : `<button class="toggle-present-btn ${selected}" data-question-key="${safeKey}" onclick="event.stopPropagation(); togglePresent(this.dataset.questionKey, this)">${q.i_selected ? 'Signed Up' : 'Sign Up'}</button>`;
@@ -1486,7 +1619,7 @@ function renderDiscussionQuestions(data) {
                 ${action}
             </div>
             <div class="disc-question-body">
-                <div class="markdown-content">${marked.parse(q.content || '')}</div>
+                <div class="markdown-content">${renderMarkdown(q.content || '')}</div>
             </div>
         </div>
     `}).join('');

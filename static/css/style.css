@@ -259,6 +259,9 @@ a:visited:hover { color: var(--primary-hover); }
 .btn-danger { background: var(--danger); }
 .btn-danger:hover { background: var(--danger-hover); }
 
+.btn-warning { background: var(--warning); color: #78350f; }
+.btn-warning:hover { background: #d97706; }
+
 .btn-outline {
     background: var(--surface);
     color: var(--text);
@@ -397,8 +400,7 @@ input:focus, textarea:focus {
 .phase-setup { background: #e0e7ff; color: #3730a3; box-shadow: 0 0 16px rgba(79, 70, 229, 0.25); }
 .phase-discussion { background: var(--success-soft); color: var(--success-text); box-shadow: 0 0 16px rgba(16, 185, 129, 0.25); }
 .phase-competition { background: #fef3c7; color: #92400e; box-shadow: 0 0 16px rgba(245, 158, 11, 0.25); }
-.phase-grading { background: #fce7f3; color: #9d174d; box-shadow: 0 0 16px rgba(236, 72, 153, 0.25); }
-.phase-ended { background: var(--timer-bg); color: #475569; }
+.phase-ended { background: var(--timer-bg); color: var(--text-muted); }
 @keyframes badge-glow {
     0%, 100% { filter: brightness(1); }
     50% { filter: brightness(1.08); }
@@ -479,19 +481,8 @@ input:focus, textarea:focus {
 }
 
 .lock-toggle {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    font-size: 0.85rem;
-    font-weight: 500;
-    cursor: pointer;
-    user-select: none;
-}
-.lock-toggle input[type="checkbox"] {
-    width: 16px;
-    height: 16px;
-    cursor: pointer;
-    accent-color: var(--danger);
+    /* dead code — kept for reference, no template uses this */
+    display: none;
 }
 .team-count-control {
     display: flex;
@@ -577,39 +568,6 @@ input:focus, textarea:focus {
 }
 .presenting-label { display: block; font-size: 0.8rem; color: var(--text-muted); margin-bottom: 4px; }
 .presenting-name { font-size: 1.3rem; font-weight: 700; }
-
-.grade-row {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 10px 0;
-    border-bottom: 1px solid var(--border);
-}
-.grade-row:last-child { border-bottom: none; }
-.grade-name { font-weight: 500; }
-.grade-input {
-    width: 80px;
-    text-align: center;
-}
-
-.peer-toggle {
-    display: flex;
-    gap: 4px;
-}
-.peer-btn {
-    font-size: 0.78rem !important;
-    padding: 5px 10px !important;
-}
-.pass-btn.active {
-    background: var(--success-soft) !important;
-    color: var(--success-text) !important;
-    border-color: #86efac !important;
-}
-.fail-btn.active {
-    background: var(--error-soft) !important;
-    color: var(--error-text) !important;
-    border-color: var(--error-border) !important;
-}
 
 .discussion-list {
     margin-top: 16px;
@@ -942,12 +900,7 @@ input:focus, textarea:focus {
     color: var(--text-muted);
 }
 
-.instructor-entry {
-    text-align: center;
-}
-.instructor-entry .btn {
-    margin-top: 10px;
-}
+.instructor-entry { display: none; }
 
 .course-actions {
     display: flex;
@@ -1260,7 +1213,7 @@ input:focus, textarea:focus {
 .team-table {
     position: relative;
     min-height: 280px;
-    background: #f8fafc;
+    background: var(--timer-bg);
     border: 2px dashed var(--border);
     border-radius: var(--radius);
     padding-bottom: 24px;
@@ -1304,7 +1257,7 @@ input:focus, textarea:focus {
     width: 64px;
     height: 64px;
     border-radius: 50%;
-    border: 3px solid #ccc;
+    border: 3px solid var(--border);
     display: flex;
     flex-direction: column;
     align-items: center;
@@ -1365,99 +1318,6 @@ input:focus, textarea:focus {
     border-color: #86efac;
 }
 
-/* ===== GRADING WINDOW STYLES ===== */
-
-.grading-control-zone {
-    margin-top: 16px;
-}
-
-.grading-banner-open {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    padding: 14px 20px;
-    background: var(--error-soft);
-    border: 2px solid #fca5a5;
-    border-radius: 10px;
-    margin-bottom: 12px;
-    justify-content: center;
-}
-
-.grading-pulse {
-    display: inline-block;
-    animation: pulse-dot 1.5s infinite;
-    font-size: 1.2rem;
-}
-
-@keyframes pulse-dot {
-    0%, 100% { opacity: 1; transform: scale(1); }
-    50% { opacity: 0.5; transform: scale(1.2); }
-}
-
-.grading-status-text {
-    font-weight: 700;
-    font-size: 1.1rem;
-    color: var(--error-text);
-    letter-spacing: 0.5px;
-}
-
-.grading-timer {
-    font-size: 2rem;
-    font-weight: 800;
-    font-family: monospace;
-    color: #dc2626;
-    min-width: 50px;
-    text-align: center;
-}
-
-.grading-timer-label {
-    font-size: 1rem;
-    color: var(--error-text);
-    font-weight: 600;
-}
-
-/* Student grading banner */
-.grading-window-banner {
-    margin: 12px 0;
-}
-
-.grading-open-indicator {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    padding: 10px 16px;
-    background: var(--error-soft);
-    border: 2px solid #fca5a5;
-    border-radius: 8px;
-    font-weight: 600;
-    color: var(--error-text);
-    font-size: 0.95rem;
-}
-
-.grading-countdown-mini {
-    margin-left: auto;
-    font-family: monospace;
-    font-weight: 800;
-    font-size: 1.1rem;
-    color: #dc2626;
-    background: #fee2e2;
-    padding: 2px 10px;
-    border-radius: 4px;
-}
-
-/* Disabled grading state */
-.grading-disabled .grade-input {
-    opacity: 0.5;
-    background: var(--timer-bg);
-    cursor: not-allowed;
-}
-
-.grading-disabled .grade-input:focus {
-    outline: none;
-    border-color: #e2e8f0;
-    box-shadow: none;
-}
-
 /* ===== DEMO MODE STYLES ===== */
 
 /* Demo landing page */
@@ -1471,7 +1331,7 @@ input:focus, textarea:focus {
 }
 
 .demo-subtitle {
-    color: #6b7280;
+    color: var(--text-muted);
     margin-bottom: 28px;
     font-size: 1.05rem;
 }
@@ -1498,16 +1358,16 @@ input:focus, textarea:focus {
 }
 
 .demo-role-instructor {
-    background: #eff6ff;
-    border-color: #bfdbfe;
-    color: #1e40af;
+    background: var(--accent-bg);
+    border-color: var(--primary);
+    color: var(--primary);
 }
 
 .demo-role-instructor:hover {
-    background: #dbeafe;
-    border-color: #60a5fa;
+    background: var(--accent-bg-soft);
+    border-color: var(--primary);
     transform: translateY(-3px);
-    box-shadow: 0 8px 24px rgba(59, 130, 246, 0.15);
+    box-shadow: 0 8px 24px rgba(99, 102, 241, 0.15);
 }
 
 .demo-role-student {
@@ -1544,8 +1404,9 @@ input:focus, textarea:focus {
 
 .demo-unavailable {
     padding: 24px;
-    color: #6b7280;
-    background: #f9fafb;
+    color: var(--text-muted);
+    background: var(--bg);
+    border: 1px solid var(--border);
     border-radius: 8px;
 }
 
@@ -1608,7 +1469,7 @@ input:focus, textarea:focus {
     font-size: 1.6rem;
     cursor: pointer;
 }
-.star { color: #cbd5e1; transition: color 0.15s; }
+.star { color: var(--border); transition: color 0.15s; }
 .star:hover, .star.active { color: #f59e0b; }
 
 /* ===== You Are Up ===== */
@@ -1776,11 +1637,53 @@ html.light .student-timer {
     border-color: var(--primary);
 }
 
-/* ===== Appendix Table ===== */
-.appendix-item {
+/* ===== TOAST NOTIFICATIONS ===== */
+.toast-container {
+    position: fixed;
+    top: 76px;
+    right: 24px;
+    z-index: 9999;
     display: flex;
-    justify-content: space-between;
+    flex-direction: column;
+    gap: 8px;
+    pointer-events: none;
+}
+.toast {
+    background: var(--surface);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-left: 4px solid var(--primary);
+    border-radius: 8px;
+    padding: 12px 20px;
+    font-size: 0.9rem;
+    font-weight: 500;
+    box-shadow: var(--shadow-lg);
+    animation: toast-in 0.2s ease-out, toast-out 0.3s ease-in 2.2s forwards;
+    max-width: 360px;
+    pointer-events: auto;
+}
+.toast.toast-success { border-left-color: var(--success); }
+.toast.toast-error   { border-left-color: var(--danger); }
+.toast.toast-warning { border-left-color: var(--warning); }
+@keyframes toast-in {
+    from { opacity: 0; transform: translateX(40px); }
+    to   { opacity: 1; transform: translateX(0); }
+}
+@keyframes toast-out {
+    from { opacity: 1; transform: translateX(0); }
+    to   { opacity: 0; transform: translateX(40px); }
+}
+
+/* ===== Session Results (Top 3 Teams) ===== */
+.session-results { text-align: center; }
+.result-row {
+    display: flex;
     align-items: center;
-    padding: 8px 0;
+    justify-content: center;
+    gap: 16px;
+    padding: 16px 0;
     border-bottom: 1px solid var(--border);
 }
+.result-row:last-child { border-bottom: none; }
+.result-medal { font-size: 2.2rem; }
+.result-team { font-size: 1.3rem; font-weight: 600; }
