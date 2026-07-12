@@ -45,6 +45,13 @@ def is_valid_slug(slug):
     return isinstance(slug, str) and re.fullmatch(r'[A-Za-z0-9_-]+', slug)
 
 
+def _parse_db_datetime(dt_str):
+    """Parse a SQLite datetime string (space or T separator) to a UTC datetime."""
+    if not dt_str:
+        return None
+    return datetime.fromisoformat(str(dt_str).replace(' ', 'T'))
+
+
 def course_db_path(slug):
     if not is_valid_slug(slug):
         return None
@@ -516,7 +523,8 @@ def instructor_course(slug):
                 seen_counts.add(t['thumbs'])
             top_students.append({'name': t['name'], 'student_id': t['student_id'], 'thumbs': t['thumbs']})
         # Top teams by avg presentation rating (extracted to shared helper)
-        team_ratings = _compute_top_teams(slug, course['id'], state)
+        hist = json.loads(state['presentation_history']) if state and state['presentation_history'] else []
+        team_ratings = _compute_top_teams(slug, course['id'], hist)
         end_stats = {
             'participants': participants['c'] if participants else 0,
             'top_students': top_students,
@@ -565,12 +573,21 @@ def _delete_student(slug, db_id):
     deleting a student who has activity raises a constraint error. On databases
     created from the current schema the explicit deletes are simply redundant.
     """
+    _delete_students(slug, [db_id])
+
+
+def _delete_students(slug, db_ids):
+    """Batch delete multiple students and their dependent rows in one commit."""
+    if not db_ids:
+        return
     db = get_db(slug)
-    db.execute('DELETE FROM peer_reviews WHERE grader_id = ? OR recipient_id = ?', [db_id, db_id])
-    db.execute('DELETE FROM discussion_responses WHERE student_id = ?', [db_id])
-    db.execute('DELETE FROM presentation_ratings WHERE student_id = ?', [db_id])
-    db.execute('DELETE FROM discussion_selections WHERE student_id = ?', [db_id])
-    db.execute('DELETE FROM students WHERE id = ?', [db_id])
+    ph = ','.join('?' * len(db_ids))
+    db.execute(f'DELETE FROM peer_reviews WHERE grader_id IN ({ph}) OR recipient_id IN ({ph})',
+               db_ids + db_ids)
+    db.execute(f'DELETE FROM discussion_responses WHERE student_id IN ({ph})', db_ids)
+    db.execute(f'DELETE FROM presentation_ratings WHERE student_id IN ({ph})', db_ids)
+    db.execute(f'DELETE FROM discussion_selections WHERE student_id IN ({ph})', db_ids)
+    db.execute(f'DELETE FROM students WHERE id IN ({ph})', db_ids)
     db.commit()
 
 
@@ -579,17 +596,17 @@ def _delete_student(slug, db_id):
 # and the consolidated /api/poll endpoint).
 # ---------------------------------------------------------------------------
 
-def _compute_top_teams(slug, course_id, state):
+def _compute_top_teams(slug, course_id, history):
     """Compute team rankings by average presentation rating.
 
+    ``history`` is the already-parsed presentation_history list (each item
+    is a dict with 'started_at' and 'team' keys).  Pass the parsed list
+    directly to avoid a redundant course_state re-query on the poll path.
     Returns a list of ``{'name': str, 'avg_score': float}`` sorted descending.
-    Shared by the instructor end-session summary and the student-facing
-    /api/poll results (which only exposes the top 3 names — no scores).
     """
     import collections
 
-    history_json = json.loads(
-        state['presentation_history'] or '[]') if state else []
+    history_json = history or []
     key_to_team = {}
     for h in history_json:
         qkey = f"pres-{h.get('started_at', '')}"
@@ -622,6 +639,8 @@ def _compute_state(slug):
     consolidated poll endpoint reuses the exact same logic.
     """
     state = query_db(slug, 'SELECT * FROM course_state LIMIT 1', one=True)
+    if state:
+        state = dict(state)  # mutable copy — avoids re-query on poll auto-close
 
     active_team = None
     if state and state['active_team_id']:
@@ -653,8 +672,7 @@ def _compute_state(slug):
     presentation_remaining = state['presentation_remaining'] if state else None
     if state and state['presentation_started_at'] and state['presentation_time_cap']:
         try:
-            started = datetime.fromisoformat(
-                state['presentation_started_at'].replace(' ', 'T'))
+            started = _parse_db_datetime(state['presentation_started_at'])
             elapsed = (datetime.utcnow() - started).total_seconds()
             cap = state['presentation_time_cap'] or 300
             presentation_remaining = max(0, int(cap - elapsed))
@@ -665,13 +683,13 @@ def _compute_state(slug):
     poll_active_bool = bool(state['poll_active']) if state else False
     if state and state['poll_active'] and state['poll_started_at']:
         try:
-            poll_started = datetime.fromisoformat(
-                state['poll_started_at'].replace(' ', 'T'))
+            poll_started = _parse_db_datetime(state['poll_started_at'])
             if (datetime.utcnow() - poll_started).total_seconds() >= POLL_DURATION:
                 execute_db(slug,
                     'UPDATE course_state SET poll_active = 0, poll_started_at = NULL '
                     'WHERE course_id = ?', [state['course_id']])
-                state = query_db(slug, 'SELECT * FROM course_state LIMIT 1', one=True)
+                state['poll_active'] = 0
+                state['poll_started_at'] = None
                 poll_active_bool = False
         except Exception:
             pass
@@ -868,6 +886,8 @@ def api_poll():
 
     # Strip grading metadata from student responses — students never see
     # poll counts or presentation history (rating counts per team).
+    # Save history first — needed for top-teams computation below.
+    pres_history = state_data.get('presentation_history', [])
     if 'student_id' in session:
         state_data.pop('poll_count', None)
         state_data.pop('presentation_history', None)
@@ -889,8 +909,7 @@ def api_poll():
     # --- Top 3 teams (only when session has ended, students only) ---
     top_teams = None
     if state_data['phase'] == 'ended' and 'student_id' in session:
-        raw_state = query_db(slug, 'SELECT * FROM course_state LIMIT 1', one=True)
-        all_ranked = _compute_top_teams(slug, course_id, raw_state)
+        all_ranked = _compute_top_teams(slug, course_id, pres_history)
         # Students see only names — no scores
         top_teams = [{'name': t['name']} for t in all_ranked[:3]]
 
@@ -1097,26 +1116,34 @@ def random_assign():
     for tid in team_ids:
         counts.setdefault(tid, 0)
 
-    # Assign each student to the smallest team (fill evenly)
-    assigned = 0
+    # Assign each student to the smallest team (fill evenly).
+    # Compute all assignments in Python first, then batch the UPDATEs
+    # grouped by team_id (at most N_teams queries instead of N_students).
+    assignments = {}  # student_db_id -> team_id
     for sid in student_ids:
-        # Find teams with the fewest members
         min_count = min(counts.values())
         candidates = [tid for tid in team_ids if counts[tid] == min_count and counts[tid] < max_members]
         if not candidates:
-            # All teams at max, find any team below max
             candidates = [tid for tid in team_ids if counts[tid] < max_members]
         if not candidates:
             break
         tid = rnd.choice(candidates)
-        execute_db(slug,
-            'UPDATE students SET team_id = ?, last_team_id = ?, last_team_joined_at = CURRENT_TIMESTAMP WHERE id = ?',
-            [tid, tid, sid]
-        )
+        assignments[sid] = tid
         counts[tid] += 1
-        assigned += 1
 
-    return jsonify({'success': True, 'assigned': assigned})
+    # Batch: one UPDATE per team_id
+    by_team = {}
+    for sid, tid in assignments.items():
+        by_team.setdefault(tid, []).append(sid)
+    for tid, sids in by_team.items():
+        placeholders = ','.join('?' * len(sids))
+        execute_db(slug,
+            f'UPDATE students SET team_id = ?, last_team_id = ?, '
+            f'last_team_joined_at = CURRENT_TIMESTAMP WHERE id IN ({placeholders})',
+            [tid, tid] + sids
+        )
+
+    return jsonify({'success': True, 'assigned': len(assignments)})
 
 
 @app.route('/api/start_session_timer', methods=['POST'])
@@ -1172,16 +1199,10 @@ def toggle_lock_teams():
     data = request.get_json(silent=True) or {}
     locked = 1 if data.get('locked') else 0
     course = query_db(slug, 'SELECT id FROM courses LIMIT 1', one=True)
-    if locked:
-        execute_db(slug,
-            'UPDATE course_state SET teams_locked = 1 WHERE course_id = ?',
-            [course['id']]
-        )
-    else:
-        execute_db(slug,
-            'UPDATE course_state SET teams_locked = 0 WHERE course_id = ?',
-            [course['id']]
-        )
+    execute_db(slug,
+        'UPDATE course_state SET teams_locked = ? WHERE course_id = ?',
+        [locked, course['id']]
+    )
     return jsonify({'success': True, 'locked': bool(locked)})
 
 
@@ -1198,12 +1219,13 @@ def set_max_members():
     # If reducing, unassign excess members from affected teams
     current_max = get_max_members_per_team(slug, course['id'])
     if new_max < current_max:
-        # Find teams with more than new_max members
+        # Find teams with more than new_max members, collect all excess IDs
         full_teams = query_db(slug,
             '''SELECT team_id, COUNT(*) as cnt FROM students
                WHERE team_id IS NOT NULL GROUP BY team_id HAVING cnt > ?''',
             [new_max]
         )
+        excess_ids = []
         for ft in full_teams:
             # LIFO: remove the most recent joiners first
             excess = query_db(slug,
@@ -1211,8 +1233,12 @@ def set_max_members():
                    ORDER BY last_team_joined_at DESC NULLS LAST LIMIT ?''',
                 [ft['team_id'], ft['cnt'] - new_max]
             )
-            for s in excess:
-                execute_db(slug, 'UPDATE students SET team_id = NULL WHERE id = ?', [s['id']])
+            excess_ids.extend(s['id'] for s in excess)
+        if excess_ids:
+            placeholders = ','.join('?' * len(excess_ids))
+            execute_db(slug,
+                f'UPDATE students SET team_id = NULL WHERE id IN ({placeholders})',
+                excess_ids)
 
     execute_db(slug,
         'UPDATE course_state SET max_members_per_team = ? WHERE course_id = ?',
@@ -1232,7 +1258,6 @@ def discussion_questions():
     if not slug:
         return jsonify({'error': 'Not logged in'}), 401
     import glob as glob_mod
-    import re
 
     class_dir = os.path.join(config.CLASSES_DIR, slug)
     question_files = sorted(
@@ -1580,24 +1605,33 @@ def upload_roster():
     csv_sids = {p['student_id'] for p in parsed}
 
     added, updated, removed = 0, 0, 0
-    # Remove students not in CSV (and their dependent rows)
-    for sid, db_id in existing_by_sid.items():
-        if sid not in csv_sids:
-            _delete_student(slug, db_id)
-            removed += 1
+    # Batch delete students not in CSV
+    to_remove = [db_id for sid, db_id in existing_by_sid.items() if sid not in csv_sids]
+    if to_remove:
+        _delete_students(slug, to_remove)
+        removed = len(to_remove)
 
-    # Add/update
+    # Batch updates and inserts
+    to_update = []
+    to_insert = []
     for p in parsed:
         if p['student_id'] in existing_by_sid:
-            execute_db(slug,
-                'UPDATE students SET name = ?, pin = ? WHERE id = ?',
-                [p['name'], p['pin'], existing_by_sid[p['student_id']]])
-            updated += 1
+            to_update.append((p['name'] or None, p['pin'], existing_by_sid[p['student_id']]))
         else:
-            execute_db(slug,
-                'INSERT INTO students (course_id, student_id, name, pin) VALUES (?, ?, ?, ?)',
-                [course['id'], p['student_id'], p['name'], p['pin']])
-            added += 1
+            to_insert.append((course['id'], p['student_id'], p['name'] or None, p['pin']))
+
+    if to_update:
+        db = get_db(slug)
+        db.executemany('UPDATE students SET name = ?, pin = ? WHERE id = ?', to_update)
+        db.commit()
+        updated = len(to_update)
+    if to_insert:
+        db = get_db(slug)
+        db.executemany(
+            'INSERT INTO students (course_id, student_id, name, pin) VALUES (?, ?, ?, ?)',
+            to_insert)
+        db.commit()
+        added = len(to_insert)
 
     return jsonify({'success': True, 'added': added, 'updated': updated, 'removed': removed})
 
@@ -1661,9 +1695,8 @@ def stop_presentation():
         return jsonify({'error': 'No active presentation'}), 400
     course = query_db(slug, 'SELECT id FROM courses LIMIT 1', one=True)
     # Compute elapsed and remaining
-    from datetime import datetime as dt
-    started = dt.fromisoformat(state['presentation_started_at'].replace(' ', 'T'))
-    elapsed = (dt.utcnow() - started).total_seconds()
+    started = _parse_db_datetime(state['presentation_started_at'])
+    elapsed = (datetime.utcnow() - started).total_seconds()
     cap = state['presentation_time_cap'] or 300
     remaining = max(0, int(cap - elapsed))
     execute_db(slug,
@@ -1691,7 +1724,6 @@ def resume_presentation():
     # Shift started_at back so that cap - elapsed == remaining
     # elapsed = cap - remaining, so started_at = now - (cap - remaining)
     consumed = cap - remaining
-    from datetime import timedelta
     shifted_start = datetime.utcnow() - timedelta(seconds=consumed)
     execute_db(slug,
         '''UPDATE course_state
@@ -1736,7 +1768,6 @@ def next_presentation():
     history = []
     if state and state['presentation_history']:
         try:
-            import json
             history = json.loads(state['presentation_history'])
         except Exception:
             history = []

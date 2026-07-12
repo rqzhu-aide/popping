@@ -22,6 +22,40 @@ function escapeAttrValue(value) {
     return escapeHtmlValue(value).replace(/'/g, '&#39;');
 }
 
+/** Format a student as 'Name (id)' or just 'id' if no name / name equals id. */
+function formatStudentDisplay(name, studentId) {
+    return (name && name !== studentId)
+        ? `${name} (${studentId})`
+        : studentId;
+}
+
+/**
+ * Rebuild a roster grid from a teams array.  Skips rebuild if data hasn't
+ * changed (signature comparison).  Shared by student + instructor panels.
+ * @param myId  student_id of current user (for 'You' highlight), or null
+ */
+function renderRosterGrid(container, teams, myId) {
+    if (!container) return;
+    const sig = JSON.stringify(teams);
+    if (sig === container.dataset.lastRoster) return;
+    container.dataset.lastRoster = sig;
+    container.innerHTML = '';
+    teams.forEach(team => {
+        const div = document.createElement('div');
+        div.className = 'roster-team';
+        const membersHtml = team.members.map(m => {
+            const display = formatStudentDisplay(m.name, m.student_id);
+            const isYou = myId && m.student_id === myId;
+            return `<div class="roster-member">
+                <span class="team-dot" style="background:${escapeAttrValue(team.color)}"></span>
+                <span class="${isYou ? 'you' : ''}">${escapeHtmlValue(display)}${isYou ? ' (You)' : ''}</span>
+            </div>`;
+        }).join('');
+        div.innerHTML = `<h3><span class="team-dot" style="background:${escapeAttrValue(team.color)}"></span>${escapeHtmlValue(team.name)}</h3>${membersHtml || '<em>No members</em>'}`;
+        container.appendChild(div);
+    });
+}
+
 /** Parse Markdown → sanitized HTML (XSS-safe via DOMPurify). */
 function renderMarkdown(md) {
     const raw = marked.parse(md || '');
@@ -181,32 +215,7 @@ if (dashboard) {
             const res = await fetch('/api/teams');
             teams = await res.json();
         }
-        const container = document.getElementById('roster-table');
-        if (!container) return;
-
-        // Skip rebuild if nothing changed (avoids DOM reflow every poll cycle)
-        const sig = JSON.stringify(teams);
-        if (sig === container.dataset.lastRoster) return;
-        container.dataset.lastRoster = sig;
-
-        container.innerHTML = '';
-        teams.forEach(team => {
-            const div = document.createElement('div');
-            div.className = 'roster-team';
-            const myId = dashboard.dataset.you;
-            const members = team.members.map(m => {
-                const isYou = m.student_id === myId;
-                const display = m.name && m.name !== m.student_id
-                    ? `${m.name} (${m.student_id})`
-                    : m.student_id;
-                return `<div class="roster-member">
-                    <span class="team-dot" style="background:${escapeAttrValue(team.color)}"></span>
-                    <span class="${isYou ? 'you' : ''}">${escapeHtmlValue(display)} ${isYou ? '(You)' : ''}</span>
-                </div>`;
-            }).join('');
-            div.innerHTML = `<h3><span class="team-dot" style="background:${escapeAttrValue(team.color)}"></span>${escapeHtmlValue(team.name)}</h3>${members || '<em>No members</em>'}`;
-            container.appendChild(div);
-        });
+        renderRosterGrid(document.getElementById('roster-table'), teams, dashboard.dataset.you);
     }
 
     async function loadState(state) {
@@ -411,9 +420,7 @@ if (dashboard) {
         const container = document.getElementById('discussion-list');
         if (!container || !rows) return;
         container.innerHTML = rows.slice(0, 20).map(r => {
-            const display = r.name && r.name !== r.student_id
-                ? `${r.name} (${r.student_id})`
-                : r.student_id;
+            const display = formatStudentDisplay(r.name, r.student_id);
             return `
             <div class="discussion-item">
                 <div class="meta">${escapeHtmlValue(display)} · ${escapeHtmlValue(r.team_name || 'No team')} · ${escapeHtmlValue(r.created_at)}</div>
@@ -626,26 +633,9 @@ window.randomAssign = async function() {
 /* ===== INSTRUCTOR PANEL ===== */
 const instructor = document.querySelector('.instructor[data-slug]');
 if (instructor) {
-    // Render active question markdown on page load (competition phase)
-    (async function renderInstructorActiveQuestion() {
-        const qText = document.getElementById('active-question-text');
-        if (!qText) return;
-        try {
-            const res = await fetch('/api/state');
-            const state = await res.json();
-            if (state.active_question) {
-                lastRenderedQuestionKey = `${state.active_question.id}-${state.active_question.question_num}`;
-                if (state.active_question.html_content) {
-                    qText.innerHTML = state.active_question.html_content;
-                } else {
-                    const md = state.active_question.content || state.active_question.question_text || '';
-                    qText.innerHTML = renderMarkdown(`#${state.active_question.question_num}: ${state.active_question.title || ''}\n\n${md}`);
-                }
-                if (window.MathJax) MathJax.typesetPromise([qText]);
-                if (window.hljs) hljs.highlightAll();
-            }
-        } catch (e) {}
-    })();
+    // Active question rendering is handled by instructorPollOnce() below,
+    // which fires immediately and includes the same state data. No need
+    // for a separate /api/state fetch on page load.
 
     let _instrPollInProgress = false;
     let _instrPollTimer = null;
@@ -666,22 +656,7 @@ if (instructor) {
             if (rosterGrid) {
                 const card = rosterGrid.closest('.card');
                 if (card && card.querySelector('h2')?.textContent?.includes('Team and Members')) {
-                    // Skip rebuild if nothing changed (avoids DOM reflow every poll cycle)
-                    const sig = JSON.stringify(teams);
-                    if (sig !== rosterGrid.dataset.lastRoster) {
-                        rosterGrid.dataset.lastRoster = sig;
-                        rosterGrid.innerHTML = '';
-                        teams.forEach(team => {
-                            const div = document.createElement('div');
-                            div.className = 'roster-team';
-                            const membersHtml = team.members.map(m => {
-                                const display = m.name && m.name !== m.student_id ? `${m.name} (${m.student_id})` : m.student_id;
-                                return `<div class="roster-member"><span class="team-dot" style="background:${escapeAttrValue(team.color)}"></span>${escapeHtmlValue(display)}</div>`;
-                            }).join('');
-                            div.innerHTML = `<h3><span class="team-dot" style="background:${escapeAttrValue(team.color)}"></span>${escapeHtmlValue(team.name)}</h3>${membersHtml || '<em>No members</em>'}`;
-                            rosterGrid.appendChild(div);
-                        });
-                    }
+                    renderRosterGrid(rosterGrid, teams, null);
                 }
             }
 
