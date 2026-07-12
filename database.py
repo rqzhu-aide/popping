@@ -137,6 +137,16 @@ def ensure_schema(slug):
         UNIQUE(course_id, student_id, question_key)
     )''')
 
+    db.execute('''CREATE TABLE IF NOT EXISTS appendix_questions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        course_id INTEGER NOT NULL,
+        week_num INTEGER NOT NULL DEFAULT 1,
+        title TEXT NOT NULL,
+        content TEXT NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (course_id) REFERENCES courses (id)
+    )''')
+
     db.commit()
     _schema_checked.add(slug)
 
