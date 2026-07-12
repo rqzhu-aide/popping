@@ -1322,18 +1322,11 @@ def discussion_questions():
         q_path = os.path.join(class_dir, target['file'])
         questions_list = _load_md(q_path, prefix=f"week-{target['num']}-q")
 
-    # Load appendix questions from the database (persists across deploys)
-    appendix_rows = query_db(slug,
-        'SELECT id, title, content FROM appendix_questions '
-        'WHERE course_id = ? AND week_num = ? ORDER BY id',
-        [course['id'], target['num'] if target else saved_week])
-    for i, ar in enumerate(appendix_rows):
-        questions_list.append({
-            'key': f"week-{target['num'] if target else saved_week}-a{i}",
-            'title': ar['title'],
-            'content': ar['content'],
-            'appendix_id': ar['id']  # DB id for delete operations
-        })
+    # Load appendix from the persistent data disk (survives deploys)
+    appendix_week = target['num'] if target else saved_week
+    appendix_path = _appendix_path(slug, appendix_week)
+    appendix = _load_md(appendix_path, prefix=f"week-{appendix_week}-a")
+    questions_list.extend(appendix)
 
     # Add sign-up metadata
     is_instructor = 'instructor_id' in session
@@ -1392,10 +1385,30 @@ def discussion_questions():
     })
 
 
+def _appendix_dir(slug):
+    """Directory for appendix question files on the persistent data disk."""
+    d = os.path.join(config.DATA_DIR, slug, 'appendix')
+    os.makedirs(d, exist_ok=True)
+    # One-time migration: move old appendix files from classes/ to data disk
+    for week in range(1, 20):
+        old = os.path.join(config.CLASSES_DIR, slug, f'week-{week}-appendix.md')
+        if os.path.exists(old):
+            new = os.path.join(d, f'week-{week}-appendix.md')
+            if not os.path.exists(new):
+                import shutil
+                shutil.move(old, new)
+    return d
+
+
+def _appendix_path(slug, week):
+    """File path for a given week's appendix questions."""
+    return os.path.join(_appendix_dir(slug), f'week-{week}-appendix.md')
+
+
 @app.route('/api/questions', methods=['POST'])
 @instructor_login_required
 def add_question():
-    """Add an appendix question — stored in the database (persists across deploys)."""
+    """Add an appendix question — stored as a file on the persistent data disk."""
     slug = session['slug']
     data = request.get_json(silent=True) or {}
     title = data.get('title', '').strip()
@@ -1409,32 +1422,69 @@ def add_question():
                      [course['id']], one=True)
     week = state['discussion_week'] if state and state['discussion_week'] else 1
 
-    execute_db(slug,
-        'INSERT INTO appendix_questions (course_id, week_num, title, content) VALUES (?, ?, ?, ?)',
-        [course['id'], week, title, content]
-    )
+    appendix_path = _appendix_path(slug, week)
+
+    # Count existing appendix entries to auto-label
+    existing = 0
+    if os.path.exists(appendix_path):
+        with open(appendix_path, 'r', encoding='utf-8') as f:
+            existing = len(parse_question_blocks(f.read()))
+    label = f'A{existing + 1}'
+    frontmatter_title = json.dumps(f"{label}: {title}")
+
+    block = f"""---
+title: {frontmatter_title}
+---
+
+{content}
+"""
+    with open(appendix_path, 'a', encoding='utf-8') as f:
+        f.write(block)
     return jsonify({'success': True})
 
 
 @app.route('/api/delete_appendix_question', methods=['POST'])
 @instructor_login_required
 def delete_appendix_question():
-    """Delete an appendix question by DB id."""
+    """Delete an appendix question by index (0-based) from the persistent data disk."""
     slug = session['slug']
     data = request.get_json(silent=True) or {}
-    qid = data.get('id')
-    if qid is None:
-        return jsonify({'error': 'Question ID required'}), 400
+    index = data.get('index')
+    if index is None:
+        return jsonify({'error': 'Index required'}), 400
     try:
-        qid = int(qid)
+        index = int(index)
     except (ValueError, TypeError):
-        return jsonify({'error': 'Invalid ID'}), 400
+        return jsonify({'error': 'Invalid index'}), 400
 
     course = query_db(slug, 'SELECT id FROM courses LIMIT 1', one=True)
-    execute_db(slug,
-        'DELETE FROM appendix_questions WHERE id = ? AND course_id = ?',
-        [qid, course['id']]
-    )
+    state = query_db(slug, 'SELECT discussion_week FROM course_state WHERE course_id = ?',
+                     [course['id']], one=True)
+    week = state['discussion_week'] if state and state['discussion_week'] else 1
+    appendix_path = _appendix_path(slug, week)
+    if not os.path.exists(appendix_path):
+        return jsonify({'error': 'Appendix file not found'}), 404
+
+    with open(appendix_path, 'r', encoding='utf-8') as f:
+        content = f.read()
+
+    entries = parse_question_blocks(content)
+
+    if index < 0 or index >= len(entries):
+        return jsonify({'error': 'Index out of range'}), 400
+
+    del entries[index]
+
+    if not entries:
+        os.remove(appendix_path)
+        return jsonify({'success': True})
+
+    # Rebuild file
+    new_content = ''
+    for fm, body in entries:
+        new_content += f"---\n{fm}\n---\n\n{body}\n\n"
+    with open(appendix_path, 'w', encoding='utf-8') as f:
+        f.write(new_content.strip() + '\n')
     return jsonify({'success': True})
 
 

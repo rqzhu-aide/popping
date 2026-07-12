@@ -1399,9 +1399,9 @@ window.addAppendixQuestion = async function() {
     }
 };
 
-window.deleteAppendixQuestion = async function(qid) {
+window.deleteAppendixQuestion = async function(index) {
     if (!confirm('Delete this appendix question?')) return;
-    const data = await postJSON('/api/delete_appendix_question', { id: qid });
+    const data = await postJSON('/api/delete_appendix_question', { index });
     if (data && data.success) {
         showToast('Question deleted');
         initWeekSelector();
@@ -1601,9 +1601,9 @@ function renderDiscussionQuestions(data) {
         const safeTitle = escapeHtmlValue(q.title || 'Untitled');
         const safeKey = escapeAttrValue(key);
         const isAppendix = key.includes('-a');
-        const appendixId = isAppendix ? (q.appendix_id || '') : '';
-        const deleteBtn = (isInstructor && isAppendix && appendixId)
-            ? `<button class="btn btn-sm btn-danger" onclick="event.stopPropagation(); deleteAppendixQuestion(${appendixId})">🗑 Delete</button>`
+        const appendixIndex = isAppendix ? parseInt(key.split('-a').pop(), 10) : -1;
+        const deleteBtn = (isInstructor && isAppendix)
+            ? `<button class="btn btn-sm btn-danger" onclick="event.stopPropagation(); deleteAppendixQuestion(${appendixIndex})">🗑 Delete</button>`
             : '';
         const action = isInstructor
             ? `<div class="disc-question-actions">

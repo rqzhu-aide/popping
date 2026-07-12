@@ -135,13 +135,3 @@ CREATE TABLE discussion_selections (
     FOREIGN KEY (student_id) REFERENCES students (id) ON DELETE CASCADE,
     UNIQUE(course_id, student_id, question_key)
 );
-
-CREATE TABLE appendix_questions (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    course_id INTEGER NOT NULL,
-    week_num INTEGER NOT NULL DEFAULT 1,
-    title TEXT NOT NULL,
-    content TEXT NOT NULL,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (course_id) REFERENCES courses (id) ON DELETE CASCADE
-);
