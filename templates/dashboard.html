@@ -21,7 +21,7 @@
         <div class="question-box">
             <p class="current-question" id="current-question">Waiting for question...</p>
         </div>
-        <textarea id="discussion-input" rows="3" placeholder="Type your response..."></textarea>
+        <textarea id="discussion-input" rows="3" placeholder="Type your response..." aria-label="Your discussion response"></textarea>
         <button class="btn btn-secondary" onclick="submitDiscussion()">Submit Response</button>
         <div id="discussion-list" class="discussion-list"></div>
     </section>
@@ -143,7 +143,7 @@
                             {% if m.name and m.name != m.student_id %}
                             <span class="card-id">{{ m.student_id }}</span>
                             {% endif %}
-                            <button class="thumb-btn thumb-up" onclick="gradeTeammate(this, '{{ m.student_id }}', 1)">👍</button>
+                            <button class="thumb-btn thumb-up" aria-label="Thumbs up to {{ m.name or m.student_id }}" onclick="gradeTeammate(this, {{ m.student_id | tojson }}, 1)">👍</button>
                         </div>
                     </div>
                     {% endfor %}

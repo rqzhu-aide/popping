@@ -235,11 +235,13 @@ def _scan_courses():
             instructor_name = ''
             if os.path.exists(db_path):
                 conn = sqlite3.connect(db_path)
-                conn.row_factory = sqlite3.Row
-                instructor = conn.execute('SELECT name FROM instructors LIMIT 1').fetchone()
-                if instructor:
-                    instructor_name = instructor['name']
-                conn.close()
+                try:
+                    conn.row_factory = sqlite3.Row
+                    instructor = conn.execute('SELECT name FROM instructors LIMIT 1').fetchone()
+                    if instructor:
+                        instructor_name = instructor['name']
+                finally:
+                    conn.close()
             courses.append({
                 'id': cfg['slug'],
                 'slug': cfg['slug'],
@@ -853,8 +855,12 @@ def api_state():
     slug = session.get('slug')
     if not slug:
         return jsonify({'error': 'Not logged in'}), 401
+    if 'student_id' not in session and 'instructor_id' not in session:
+        return jsonify({'error': 'Not logged in'}), 401
     state_data = _compute_state(slug)
-    # Strip grading metadata from student responses
+    # Strip internal + grading metadata from student responses
+    state_data.pop('_course_id', None)
+    state_data.pop('_max_teams', None)
     if 'student_id' in session:
         state_data.pop('poll_count', None)
         state_data.pop('presentation_history', None)
@@ -991,6 +997,8 @@ def submit_discussion():
         'SELECT id FROM students WHERE student_id = ?',
         [session['student_id']], one=True
     )
+    if not student:
+        return jsonify({'error': 'Student not found'}), 404
     course = query_db(slug, 'SELECT id FROM courses LIMIT 1', one=True)
     execute_db(slug,
         'INSERT INTO discussion_responses (course_id, student_id, question, response) VALUES (?, ?, ?, ?)',
@@ -1814,15 +1822,13 @@ def next_presentation():
 def start_poll():
     """Start a 30-second rating-poll highlight for the active presentation."""
     slug = session['slug']
-    data = request.get_json(silent=True) or {}
-    question_key = data.get('question_key', '')
     state = query_db(slug, 'SELECT * FROM course_state LIMIT 1', one=True)
     if not state:
         return jsonify({'error': 'No course state'}), 400
     if not state['active_team_id'] or not state['active_question_id']:
         return jsonify({'error': 'No active presentation'}), 400
-    if not question_key:
-        question_key = active_presentation_key(state)
+    # Derive the rating key from server state — never trust client input.
+    question_key = active_presentation_key(state)
     if not question_key:
         return jsonify({'error': 'No active presentation'}), 400
     course = query_db(slug, 'SELECT id FROM courses LIMIT 1', one=True)
@@ -1909,8 +1915,8 @@ def submit_rating():
 def api_students():
     slug = session['slug']
     course = query_db(slug, 'SELECT id FROM courses LIMIT 1', one=True)
-    page = request.args.get('page', 1, type=int)
-    per_page = request.args.get('per_page', 10, type=int)
+    page = max(1, request.args.get('page', 1, type=int))
+    per_page = min(max(1, request.args.get('per_page', 10, type=int)), 100)
     sort_col = request.args.get('sort', 'student_id')
     order = request.args.get('order', 'asc')
     search = request.args.get('search', '').strip()
@@ -1931,9 +1937,12 @@ def api_students():
         params.append(f'%{search}%')
     if team_filter == 'none':
         where_clause += ' AND s.team_id IS NULL'
-    elif team_filter:
-        where_clause += ' AND s.team_id = ?'
-        params.append(int(team_filter))
+    elif team_filter and team_filter != 'none':
+        try:
+            where_clause += ' AND s.team_id = ?'
+            params.append(int(team_filter))
+        except ValueError:
+            pass  # invalid team filter — show all
 
     count = query_db(slug,
         f'SELECT COUNT(*) as c FROM students s WHERE s.course_id = ? {where_clause}',

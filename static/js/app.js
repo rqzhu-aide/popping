@@ -59,7 +59,25 @@ function renderRosterGrid(container, teams, myId) {
 /** Parse Markdown → sanitized HTML (XSS-safe via DOMPurify). */
 function renderMarkdown(md) {
     const raw = marked.parse(md || '');
-    return window.DOMPurify ? DOMPurify.sanitize(raw) : raw;
+    if (window.DOMPurify) return DOMPurify.sanitize(raw);
+    // Fail-closed: escape HTML if DOMPurify failed to load (CDN issue)
+    const div = document.createElement('div');
+    div.textContent = raw;
+    return div.innerHTML;
+}
+
+/** Safely run MathJax typeset if the library has loaded. */
+function safeTypeset(el) {
+    if (window.MathJax && typeof window.MathJax.typesetPromise === 'function') {
+        window.MathJax.typesetPromise([el]);
+    }
+}
+
+/** Highlight code blocks within an element (scoped, not whole page). */
+function safeHighlight(container) {
+    if (window.hljs) {
+        container.querySelectorAll('pre code').forEach(el => hljs.highlightElement(el));
+    }
 }
 
 /* ===== TOAST NOTIFICATIONS ===== */
@@ -68,6 +86,8 @@ function showToast(msg, type) {
     if (!container) {
         container = document.createElement('div');
         container.className = 'toast-container';
+        container.setAttribute('role', 'status');
+        container.setAttribute('aria-live', 'polite');
         document.body.appendChild(container);
     }
     const toast = document.createElement('div');
@@ -113,11 +133,6 @@ window.handleRosterFile = async function(e) {
     }
     e.target.value = '';
 };
-
-/* ===== LOGIN PAGE ===== */
-if (document.querySelector('.login-form')) {
-    // nothing special needed
-}
 
 /* ===== STUDENT DASHBOARD ===== */
 const PHASE_LABELS = {
@@ -316,13 +331,13 @@ if (dashboard) {
                     if (qKey !== lastRenderedQuestionKey) {
                         lastRenderedQuestionKey = qKey;
                         if (state.active_question.html_content) {
-                            qText.innerHTML = state.active_question.html_content;
+                            qText.innerHTML = DOMPurify.sanitize(state.active_question.html_content);
                         } else {
                             const md = state.active_question.content || state.active_question.question_text || '';
                             qText.innerHTML = renderMarkdown(`#${state.active_question.question_num}: ${state.active_question.title || ''}\n\n${md}`);
                         }
-                        if (window.MathJax) MathJax.typesetPromise([qText]);
-                        if (window.hljs) hljs.highlightAll();
+                        safeTypeset(qText);
+                        safeHighlight(qText);
                     }
                 } else if (qDisplay) {
                     qDisplay.style.display = 'none';
@@ -673,10 +688,15 @@ if (instructor) {
                     const qKey = `${state.active_question.id}-${state.active_question.question_num}`;
                     if (qKey !== lastRenderedQuestionKey) {
                         lastRenderedQuestionKey = qKey;
-                        const newHtml = state.active_question.html_content || renderMarkdown(`#${state.active_question.question_num}: ${state.active_question.title || ''}\n\n${state.active_question.content || state.active_question.question_text || ''}`);
+                        let newHtml;
+                        if (state.active_question.html_content) {
+                            newHtml = DOMPurify.sanitize(state.active_question.html_content);
+                        } else {
+                            newHtml = renderMarkdown(`#${state.active_question.question_num}: ${state.active_question.title || ''}\n\n${state.active_question.content || state.active_question.question_text || ''}`);
+                        }
                         qText.innerHTML = newHtml;
-                        if (window.MathJax) MathJax.typesetPromise([qText]);
-                        if (window.hljs) hljs.highlightAll();
+                        safeTypeset(qText);
+                        safeHighlight(qText);
                     }
                 } else if (qText) {
                     qText.innerHTML = '';
@@ -707,6 +727,7 @@ if (instructor) {
 let _originalMaxTeams = null;
 
 window.startModifyTeams = function() {
+    if (_originalMaxTeams !== null) return; // already editing
     const display = document.getElementById('team-count-display');
     _originalMaxTeams = parseInt(display.textContent, 10);
     document.getElementById('btn-modify-teams').style.display = 'none';
@@ -743,8 +764,7 @@ window.cancelModifyTeams = function() {
     _originalMaxTeams = null;
 };
 
-window.toggleLock = async function() {
-    const btn = document.activeElement || event.target;
+window.toggleLock = async function(btn) {
     const wasLocked = btn.textContent.includes('Unlock');
     const data = await postJSON('/api/toggle_lock_teams', { locked: !wasLocked });
     if (data.success) {
@@ -788,6 +808,7 @@ window.toggleSessionTimer = async function() {
 let _originalMaxMembers = null;
 
 window.startModifyMembers = function() {
+    if (_originalMaxMembers !== null) return; // already editing
     const display = document.getElementById('max-members-display');
     _originalMaxMembers = parseInt(display.textContent, 10);
     document.getElementById('btn-modify-members').style.display = 'none';
@@ -915,6 +936,15 @@ window.setTeamFilter = function(val, label) {
     document.getElementById('team-filter-menu').style.display = 'none';
     studentPage = 1;
     loadStudentTable();
+};
+
+let _searchDebounce = null;
+window.debouncedStudentSearch = function() {
+    if (_searchDebounce) clearTimeout(_searchDebounce);
+    _searchDebounce = setTimeout(() => {
+        studentPage = 1;
+        loadStudentTable();
+    }, 250);
 };
 
 window.loadStudentTable = async function() {
@@ -1064,7 +1094,8 @@ async function initWeekSelector() {
 
     // Setup page week selector
     const setupSel = document.getElementById('setup-week-select');
-    if (setupSel && data.weeks.length > 0) {
+    const weeks = data.weeks || [];
+    if (setupSel && weeks.length > 0) {
         setupSel.innerHTML = data.weeks.map(w =>
             `<option value="${w.num}" ${w.num === data.current_week ? 'selected' : ''}>Week ${w.num}</option>`
         ).join('');
@@ -1512,13 +1543,8 @@ function startSessionTimer(startMs) {
 
 
 // ===== THEME TOGGLE =====
-(function() {
-    const saved = localStorage.getItem('popping-theme');
-    if (saved === 'light') {
-        document.documentElement.classList.add('light');
-    }
-    updateThemeIcon();
-})();
+// (Theme is restored early in <head> base.html to prevent FOUC)
+updateThemeIcon();
 
 window.toggleTheme = function() {
     const html = document.documentElement;
@@ -1599,8 +1625,8 @@ function renderDiscussionQuestions(data) {
         </div>
     `}).join('');
 
-    if (window.MathJax) MathJax.typesetPromise([container]);
-    if (window.hljs) container.querySelectorAll('pre code').forEach(hljs.highlightElement);
+    safeTypeset(container);
+    safeHighlight(container);
 }
 
 window.postActiveQuestionFromButton = function(btn) {

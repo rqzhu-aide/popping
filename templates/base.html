@@ -11,6 +11,14 @@
     <script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.0.9/purify.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
     <script>
+        // Theme restore — must run before paint to avoid FOUC flash
+        (function() {
+            if (localStorage.getItem('popping-theme') === 'light') {
+                document.documentElement.classList.add('light');
+            }
+        })();
+    </script>
+    <script>
         MathJax = {
             tex: { inlineMath: [['$', '$'], ['\\(', '\\)']], displayMath: [['$$', '$$'], ['\\[', '\\]']] },
             options: { ignoreHtmlClass: 'no-math' },
@@ -29,7 +37,7 @@
             </a>
         </div>
         <div class="nav-links">
-            <button class="theme-toggle" id="theme-toggle" onclick="toggleTheme()" title="Toggle theme">
+            <button class="theme-toggle" id="theme-toggle" onclick="toggleTheme()" title="Toggle theme" aria-label="Toggle light/dark theme">
                 <span id="theme-icon">☀</span>
             </button>
             {% if session.student_id %}

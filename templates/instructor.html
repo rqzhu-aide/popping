@@ -60,7 +60,7 @@
             </div>
         </div>
             <div class="phase-settings phase-settings-secondary">
-                <button class="btn btn-sm {% if teams_locked %}btn-danger{% else %}btn-primary{% endif %}" onclick="toggleLock()">
+                <button class="btn btn-sm {% if teams_locked %}btn-danger{% else %}btn-primary{% endif %}" onclick="toggleLock(this)">
                     {% if teams_locked %}Unlock Teams{% else %}Lock Teams{% endif %}
                 </button>
                 <button class="btn btn-sm {% if session_started_at %}btn-danger{% else %}btn-primary{% endif %}" id="btn-session-timer" onclick="toggleSessionTimer()">
@@ -114,7 +114,7 @@
         </div>
 
         <div class="table-toolbar">
-            <input type="text" id="student-search" placeholder="Search by ID..." oninput="loadStudentTable()">
+            <input type="text" id="student-search" placeholder="Search by ID..." oninput="debouncedStudentSearch()">
             <div class="filter-group">
                 <span class="filter-label">Filter by team</span>
                 <div class="filter-dropdown" id="team-filter-dropdown">
@@ -124,7 +124,7 @@
                     <div class="team-picker filter-picker" id="team-filter-menu" style="display:none;">
                         <div class="team-picker-item" onclick="setTeamFilter('', 'All')">All</div>
                         {% for t in teams[:max_teams] %}
-                        <div class="team-picker-item" style="border-left:3px solid {{ t.color }}" onclick="setTeamFilter('{{ t.id }}', '{{ t.name }}')">{{ t.name }}</div>
+                        <div class="team-picker-item" style="border-left:3px solid {{ t.color }}" onclick="setTeamFilter({{ t.id }}, {{ t.name | tojson }})">{{ t.name }}</div>
                         {% endfor %}
                         <div class="team-picker-item" onclick="setTeamFilter('none', 'Unassigned')">Unassigned</div>
                     </div>
