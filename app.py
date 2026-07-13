@@ -2411,15 +2411,52 @@ def export_data(slug):
         ws6.column_dimensions['E'].width = 50
 
         # ── save ──
-        buf = BytesIO()
-        wb.save(buf)
-        buf.seek(0)
-        filename = f"popping_{course['code'] or slug}_export.xlsx"
+        # Save the workbook to an in-memory buffer
+        xlsx_buf = BytesIO()
+        wb.save(xlsx_buf)
+        xlsx_buf.seek(0)
+
+        # Build a ZIP containing the Excel file + all question content files
+        import zipfile
+        zip_buf = BytesIO()
+        with zipfile.ZipFile(zip_buf, 'w', zipfile.ZIP_DEFLATED) as zf:
+            # Excel interaction data
+            zf.writestr('course_data.xlsx', xlsx_buf.getvalue())
+
+            # Original question files from classes/<slug>/
+            class_dir = os.path.join(config.CLASSES_DIR, slug)
+            if os.path.isdir(class_dir):
+                for root, dirs, files in os.walk(class_dir):
+                    for fname in files:
+                        fpath = os.path.join(root, fname)
+                        relpath = os.path.relpath(fpath, class_dir)
+                        # Skip course config — only bundle question content
+                        if fname in ('course.yaml', 'course.json'):
+                            continue
+                        try:
+                            with open(fpath, 'rb') as f:
+                                zf.writestr(f'questions/{relpath}', f.read())
+                        except (IOError, OSError):
+                            pass
+
+            # Appendix questions from the persistent data disk
+            appendix_dir = os.path.join(config.DATA_DIR, slug, 'appendix')
+            if os.path.isdir(appendix_dir):
+                for fname in os.listdir(appendix_dir):
+                    fpath = os.path.join(appendix_dir, fname)
+                    try:
+                        with open(fpath, 'rb') as f:
+                            zf.writestr(f'appendix/{fname}', f.read())
+                    except (IOError, OSError):
+                        pass
+
+        zip_buf.seek(0)
+        filename = f"popping_{course['code'] or slug}_export.zip"
         return (
-            buf.getvalue(),
+            zip_buf.getvalue(),
             200,
             {
-                'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                'Content-Type': 'application/zip',
                 'Content-Disposition': f'attachment; filename={filename}'
             }
         )
