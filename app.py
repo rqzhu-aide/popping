@@ -1,6 +1,7 @@
 import os
 import sys
 import csv
+import gzip
 import io
 import json
 import re
@@ -34,11 +35,16 @@ PHASE_LABELS = {
 # shown as a gliding bar (instructor) and a pulsing countdown (students).
 POLL_DURATION = 30
 
-# Throttle window for the last_active_at DB write. Students poll /api/state
-# every ~3s, but the "online" indicator only needs minute-level precision, so
-# we write at most this often per student (last write time tracked in the
-# session cookie). This is the dominant write load under a full classroom.
-ACTIVITY_WRITE_INTERVAL = 15
+# Throttle window for the last_active_at DB write. Students poll /api/poll
+# frequently, but the "online" indicator uses a three-minute window, so one
+# write per minute is sufficient (last write time is tracked in the session
+# cookie). This keeps presence writes low under a full classroom.
+ACTIVITY_WRITE_INTERVAL = 60
+
+# Compress JSON responses large enough to benefit. Poll responses are the
+# dominant classroom traffic; gzip reduces repeated keys and question HTML
+# substantially without adding a third-party dependency.
+JSON_COMPRESSION_MIN_BYTES = 500
 
 
 def is_valid_slug(slug):
@@ -107,18 +113,183 @@ def read_presentation_question_index(slug, week_num):
 
 
 def sync_presentation_questions(slug, course_id, week_num):
-    """Sync classes/<slug>/weekN/index.md into the presentation question table."""
+    """Sync a week's pre-rendered questions without changing stable row IDs."""
     questions = read_presentation_question_index(slug, week_num)
     if questions is None:
         return None
 
-    execute_db(slug, 'DELETE FROM questions WHERE course_id = ?', [course_id])
+    ensure_schema(slug)
+    db = get_db(slug)
+    existing = db.execute(
+        '''SELECT * FROM questions
+           WHERE course_id = ? AND COALESCE(week_num, 1) = ?
+             AND (source_key IS NULL OR source_key LIKE 'presentation:%')''',
+        [course_id, week_num]
+    ).fetchall()
+    by_source = {row['source_key']: row for row in existing if row['source_key']}
+    legacy_by_num = {}
+    for row in existing:
+        if not row['source_key']:
+            legacy_by_num.setdefault(row['question_num'], []).append(row)
+
+    retained_ids = set()
+    changed = False
     for q in questions:
-        execute_db(slug,
-            'INSERT INTO questions (course_id, question_num, question_text, title, week_num) VALUES (?, ?, ?, ?, ?)',
-            [course_id, q['num'], q['title'][:200], q['title'], week_num]
-        )
+        source_key = f"presentation:{week_num}:{q['num']}"
+        row = by_source.get(source_key)
+        if row is None:
+            candidates = legacy_by_num.get(q['num'], [])
+            row = next((candidate for candidate in candidates
+                        if candidate['id'] not in retained_ids), None)
+
+        question_text = q['title'][:200]
+        if row is None:
+            cursor = db.execute(
+                '''INSERT INTO questions
+                   (course_id, question_num, question_text, title, week_num, source_key)
+                   VALUES (?, ?, ?, ?, ?, ?)''',
+                [course_id, q['num'], question_text, q['title'], week_num, source_key]
+            )
+            retained_ids.add(cursor.lastrowid)
+            changed = True
+        else:
+            retained_ids.add(row['id'])
+            if (row['question_num'] != q['num'] or
+                    row['question_text'] != question_text or
+                    row['title'] != q['title'] or
+                    row['week_num'] != week_num or
+                    row['source_key'] != source_key):
+                db.execute(
+                    '''UPDATE questions
+                       SET question_num = ?, question_text = ?, title = ?,
+                           week_num = ?, source_key = ?
+                       WHERE id = ?''',
+                    [q['num'], question_text, q['title'], week_num,
+                     source_key, row['id']]
+                )
+                changed = True
+
+    for row in existing:
+        if row['id'] not in retained_ids:
+            db.execute('DELETE FROM questions WHERE id = ?', [row['id']])
+            changed = True
+
+    if changed:
+        db.commit()
     return len(questions)
+
+
+def _read_appendix_question_rows(slug, week_num):
+    """Read valid appendix blocks and assign stable presentation source keys."""
+    appendix_path = _appendix_path(slug, week_num)
+    if not os.path.exists(appendix_path):
+        return []
+
+    with open(appendix_path, 'r', encoding='utf-8') as f:
+        entries = parse_question_blocks(f.read())
+
+    import yaml
+    rows = []
+    seen_numbers = set()
+    for position, (fm_block, body_block) in enumerate(entries, 1):
+        try:
+            metadata = yaml.safe_load(fm_block) or {}
+        except Exception:
+            continue
+        title = str(metadata.get('title') or '').strip()
+        if not title:
+            continue
+
+        body = body_block.strip()
+        label_match = re.match(r'^A(\d+)\s*:', title, re.IGNORECASE)
+        if not label_match:
+            app.logger.warning(
+                'Skipping unlabeled appendix question %s for %s week %s',
+                position, slug, week_num
+            )
+            continue
+        question_num = int(label_match.group(1))
+        if question_num in seen_numbers:
+            app.logger.warning(
+                'Skipping duplicate appendix label A%s for %s week %s',
+                question_num, slug, week_num
+            )
+            continue
+        seen_numbers.add(question_num)
+        rows.append({
+            'source_key': f'appendix:{week_num}:A{question_num}',
+            'question_num': question_num,
+            'question_text': title[:200],
+            'title': title,
+            'content': body,
+        })
+    return rows
+
+
+def sync_appendix_questions(slug, course_id, week_num):
+    """Make a week's appendix questions selectable during presentations."""
+    ensure_schema(slug)
+    desired = _read_appendix_question_rows(slug, week_num)
+    db = get_db(slug)
+    source_prefix = f'appendix:{week_num}:%'
+    existing = db.execute(
+        '''SELECT * FROM questions
+           WHERE course_id = ? AND source_key LIKE ?''',
+        [course_id, source_prefix]
+    ).fetchall()
+    by_source = {row['source_key']: row for row in existing}
+    retained_ids = set()
+    changed = False
+
+    for question in desired:
+        row = by_source.get(question['source_key'])
+        if row is None:
+            # Preserve IDs from the short-lived content-hash key scheme.
+            row = next((candidate for candidate in existing
+                        if candidate['id'] not in retained_ids and
+                        not candidate['source_key'].startswith(
+                            f'appendix:{week_num}:A') and
+                        candidate['title'] == question['title'] and
+                        candidate['content'] == question['content']), None)
+        if row is None:
+            cursor = db.execute(
+                '''INSERT INTO questions
+                   (course_id, question_num, question_text, title, content,
+                    week_num, source_key)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)''',
+                [course_id, question['question_num'], question['question_text'],
+                 question['title'], question['content'], week_num,
+                 question['source_key']]
+            )
+            retained_ids.add(cursor.lastrowid)
+            changed = True
+        else:
+            retained_ids.add(row['id'])
+            if (row['question_num'] != question['question_num'] or
+                    row['question_text'] != question['question_text'] or
+                    row['title'] != question['title'] or
+                    row['content'] != question['content'] or
+                    row['week_num'] != week_num or
+                    row['source_key'] != question['source_key']):
+                db.execute(
+                    '''UPDATE questions
+                       SET question_num = ?, question_text = ?, title = ?,
+                           content = ?, week_num = ?, source_key = ?
+                       WHERE id = ?''',
+                    [question['question_num'], question['question_text'],
+                     question['title'], question['content'], week_num,
+                     question['source_key'], row['id']]
+                )
+                changed = True
+
+    for row in existing:
+        if row['id'] not in retained_ids:
+            db.execute('DELETE FROM questions WHERE id = ?', [row['id']])
+            changed = True
+
+    if changed:
+        db.commit()
+    return len(desired)
 
 
 # In-memory cache for pre-rendered question HTML files.
@@ -170,6 +341,30 @@ def track_student_activity():
                 session['last_active_synced_at'] = now.isoformat()
             except Exception:
                 pass  # db might not exist yet on first request
+
+
+@app.after_request
+def compress_json_response(response):
+    """Gzip sizeable JSON responses when the client advertises support."""
+    if response.direct_passthrough or response.status_code < 200 or response.status_code >= 300:
+        return response
+    if response.mimetype != 'application/json' or response.headers.get('Content-Encoding'):
+        return response
+    response.vary.add('Accept-Encoding')
+    if 'gzip' not in request.headers.get('Accept-Encoding', '').lower():
+        return response
+
+    data = response.get_data()
+    if len(data) < JSON_COMPRESSION_MIN_BYTES:
+        return response
+    compressed = gzip.compress(data, compresslevel=5)
+    if len(compressed) >= len(data):
+        return response
+
+    response.set_data(compressed)
+    response.headers['Content-Encoding'] = 'gzip'
+    response.headers['Content-Length'] = len(compressed)
+    return response
 
 
 @app.template_filter('phase_label')
@@ -278,7 +473,6 @@ def login(slug):
     if request.method == 'POST':
         student_id = request.form.get('student_id', '').strip()
         pin = request.form.get('pin', '').strip()
-        display_name = request.form.get('name', '').strip()
         if not student_id or not pin:
             flash('Please enter both ID and PIN.', 'error')
             return render_template('login.html', slug=slug)
@@ -291,17 +485,8 @@ def login(slug):
                 'UPDATE students SET last_login_at = CURRENT_TIMESTAMP WHERE id = ?',
                 [student['id']]
             )
-            # Update display name if provided on login
-            if display_name:
-                execute_db(slug,
-                    'UPDATE students SET name = ? WHERE id = ?',
-                    [display_name, student['id']]
-                )
-                student_name = display_name
-            else:
-                student_name = student['name'] or student['student_id']
             session['student_id'] = student['student_id']
-            session['name'] = student_name
+            session['name'] = student['name'] or student['student_id']
             session['slug'] = slug
             return redirect(url_for('dashboard'))
         flash('Invalid ID or PIN for this course.', 'error')
@@ -472,12 +657,18 @@ def instructor_course(slug):
         return redirect(url_for('index'))
 
     course = query_db(slug, 'SELECT * FROM courses WHERE slug = ?', [slug], one=True)
+    ensure_schema(slug)
     teams = query_db(slug,
         'SELECT * FROM teams WHERE course_id = ? ORDER BY id', [course['id']]
     )
     state = query_db(slug,
         'SELECT * FROM course_state WHERE course_id = ?', [course['id']], one=True
     )
+    selected_week = state['discussion_week'] if state and state['discussion_week'] else 1
+    if (not state or state['phase'] != 'competition' or
+            not state['active_question_id']):
+        sync_presentation_questions(slug, course['id'], selected_week)
+        sync_appendix_questions(slug, course['id'], selected_week)
     max_teams = get_max_teams(slug, course['id'])
     teams_locked = state['teams_locked'] if state and 'teams_locked' in state.keys() else 0
     students = query_db(slug,
@@ -487,7 +678,11 @@ def instructor_course(slug):
         [course['id']]
     )
     questions = query_db(slug,
-        'SELECT * FROM questions WHERE course_id = ? ORDER BY question_num', [course['id']]
+        '''SELECT * FROM questions
+           WHERE course_id = ? AND COALESCE(week_num, 1) = ?
+           ORDER BY CASE WHEN source_key LIKE 'appendix:%' THEN 1 ELSE 0 END,
+                    question_num, id''',
+        [course['id'], selected_week]
     )
     cutoff = (datetime.utcnow() - timedelta(minutes=3)).strftime('%Y-%m-%d %H:%M:%S')
     students_enhanced = []
@@ -567,6 +762,18 @@ def _get_slug_from_session():
     return None
 
 
+def _bump_roster_version(slug, course_id, db=None):
+    """Mark roster/team membership data as changed for polling clients."""
+    ensure_schema(slug)
+    sql = ('UPDATE course_state '
+           'SET roster_version = COALESCE(roster_version, 0) + 1 '
+           'WHERE course_id = ?')
+    if db is None:
+        execute_db(slug, sql, [course_id])
+    else:
+        db.execute(sql, [course_id])
+
+
 def _delete_student(slug, db_id):
     """Delete a student together with their dependent rows.
 
@@ -578,18 +785,33 @@ def _delete_student(slug, db_id):
     _delete_students(slug, [db_id])
 
 
-def _delete_students(slug, db_ids):
+def _delete_students(slug, db_ids, bump_roster=True):
     """Batch delete multiple students and their dependent rows in one commit."""
     if not db_ids:
         return
     db = get_db(slug)
     ph = ','.join('?' * len(db_ids))
+    course_ids = [row['course_id'] for row in db.execute(
+        f'SELECT DISTINCT course_id FROM students WHERE id IN ({ph})', db_ids
+    ).fetchall()]
     db.execute(f'DELETE FROM peer_reviews WHERE grader_id IN ({ph}) OR recipient_id IN ({ph})',
                db_ids + db_ids)
-    db.execute(f'DELETE FROM discussion_responses WHERE student_id IN ({ph})', db_ids)
     db.execute(f'DELETE FROM presentation_ratings WHERE student_id IN ({ph})', db_ids)
-    db.execute(f'DELETE FROM discussion_selections WHERE student_id IN ({ph})', db_ids)
+    # Old course databases may still contain retired student-input tables.
+    legacy_tables = {
+        row['name'] for row in db.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' "
+            "AND name IN ('discussion_responses', 'discussion_selections')"
+        ).fetchall()
+    }
+    if 'discussion_responses' in legacy_tables:
+        db.execute(f'DELETE FROM discussion_responses WHERE student_id IN ({ph})', db_ids)
+    if 'discussion_selections' in legacy_tables:
+        db.execute(f'DELETE FROM discussion_selections WHERE student_id IN ({ph})', db_ids)
     db.execute(f'DELETE FROM students WHERE id IN ({ph})', db_ids)
+    if bump_roster:
+        for course_id in course_ids:
+            _bump_roster_version(slug, course_id, db=db)
     db.commit()
 
 
@@ -633,12 +855,12 @@ def _compute_top_teams(slug, course_id, history):
     return team_ratings
 
 
-def _compute_state(slug):
+def _compute_state(slug, include_poll_count=True, known_question_id=None):
     """Compute the course-state dict — shared by /api/state and /api/poll.
 
     This is the single source of truth for presentation timer, poll status,
-    active team/question, and the student's own team.  Extracted so the
-    consolidated poll endpoint reuses the exact same logic.
+    active team/question, and the student's own team. Question content is
+    omitted when ``known_question_id`` confirms that the client already has it.
     """
     state = query_db(slug, 'SELECT * FROM course_state LIMIT 1', one=True)
     if state:
@@ -660,15 +882,25 @@ def _compute_state(slug):
 
     active_question = None
     if state and state['active_question_id']:
-        aq = query_db(slug,
-            'SELECT * FROM questions WHERE id = ?', [state['active_question_id']], one=True)
-        if aq:
-            active_question = dict(aq)
-            week = active_question.get('week_num',
-                                     state['discussion_week'] if state and state['discussion_week'] else 1)
-            html = load_question_html(slug, week, active_question['question_num'])
-            if html:
-                active_question['html_content'] = html
+        if known_question_id == state['active_question_id']:
+            active_question = {
+                'id': state['active_question_id'],
+                'content_unchanged': True,
+            }
+        else:
+            aq = query_db(slug,
+                'SELECT * FROM questions WHERE id = ?', [state['active_question_id']], one=True)
+            if aq:
+                active_question = dict(aq)
+                week = active_question.get(
+                    'week_num',
+                    state['discussion_week'] if state and state['discussion_week'] else 1
+                )
+                source_key = active_question.get('source_key') or ''
+                if not source_key.startswith('appendix:'):
+                    html = load_question_html(slug, week, active_question['question_num'])
+                    if html:
+                        active_question['html_content'] = html
 
     # Compute presentation remaining seconds
     presentation_remaining = state['presentation_remaining'] if state else None
@@ -698,9 +930,9 @@ def _compute_state(slug):
 
     # Poll count — use course_id from the already-fetched state row
     # (no separate SELECT needed)
-    poll_count = 0
+    poll_count = None
     pres_key = active_presentation_key(state)
-    if state and pres_key:
+    if include_poll_count and state and pres_key:
         cid = state['course_id']
         cnt = query_db(slug,
             'SELECT COUNT(DISTINCT student_id) as c FROM presentation_ratings '
@@ -708,7 +940,7 @@ def _compute_state(slug):
             [cid, pres_key], one=True)
         poll_count = cnt['c'] if cnt else 0
 
-    return {
+    result = {
         'phase': state['phase'] if state else 'setup',
         'active_team': dict(active_team) if active_team else None,
         'active_question': active_question,
@@ -722,23 +954,22 @@ def _compute_state(slug):
         'poll_started_at': state['poll_started_at'] if state else None,
         'poll_duration': POLL_DURATION,
         'poll_question_key': state['poll_question_key'] if state else None,
-        'poll_count': poll_count,
+        'roster_version': state.get('roster_version', 0) if state else 0,
         'presentation_history': json.loads(state['presentation_history'])
                                 if state and state['presentation_history'] else [],
-        # Internal metadata (used by api_poll to avoid redundant lookups;
-        # harmless values — course id is an auto-increment, max_teams is
-        # visible to students as the team count).
+        # Internal metadata used by api_poll for ended-phase ranking.
         '_course_id': state['course_id'] if state else None,
-        '_max_teams': state['max_teams'] if state else 8,
     }
+    if include_poll_count:
+        result['poll_count'] = poll_count or 0
+    return result
 
 
 def _compute_teams(slug, course_id, max_teams=None):
-    """Compute the teams + members list — shared by /api/teams and /api/poll.
+    """Compute the teams + members list for the versioned roster endpoint.
 
     Uses 2 queries total (teams + all members) instead of N+1.
-    Pass ``max_teams`` to skip the redundant ``get_max_teams`` lookup
-    (the poll hot path already has this value from ``_compute_state``).
+    Pass ``max_teams`` when the caller already has the visible-team limit.
     """
     if max_teams is None:
         max_teams = get_max_teams(slug, course_id)
@@ -786,7 +1017,7 @@ def join_team():
     )
     if not student:
         return jsonify({'error': 'Student not found'}), 404
-    state = query_db(slug, 'SELECT phase, teams_locked FROM course_state LIMIT 1', one=True)
+    state = query_db(slug, 'SELECT course_id, phase, teams_locked FROM course_state LIMIT 1', one=True)
     if not state or state['phase'] != 'setup':
         return jsonify({'error': 'Team selection is closed'}), 403
     if state['teams_locked']:
@@ -795,6 +1026,7 @@ def join_team():
     # Leaving team (team_id = 0 means unassign)
     if not team_id:
         execute_db(slug, 'UPDATE students SET team_id = NULL WHERE id = ?', [student['id']])
+        _bump_roster_version(slug, state['course_id'])
         return jsonify({'success': True})
     try:
         team_id = int(team_id)
@@ -846,6 +1078,7 @@ def join_team():
            WHERE id = ?''',
         [team_id, team_id, student['id']]
     )
+    _bump_roster_version(slug, course['id'])
     return jsonify({'success': True})
 
 
@@ -857,25 +1090,26 @@ def api_state():
         return jsonify({'error': 'Not logged in'}), 401
     if 'student_id' not in session and 'instructor_id' not in session:
         return jsonify({'error': 'Not logged in'}), 401
-    state_data = _compute_state(slug)
+    is_instructor = 'instructor_id' in session
+    state_data = _compute_state(
+        slug,
+        include_poll_count=is_instructor,
+        known_question_id=request.args.get('known_question_id', type=int),
+    )
     # Strip internal + grading metadata from student responses
     state_data.pop('_course_id', None)
-    state_data.pop('_max_teams', None)
     if 'student_id' in session:
-        state_data.pop('poll_count', None)
         state_data.pop('presentation_history', None)
     return jsonify(state_data)
 
 
 @app.route('/api/poll', methods=['GET'])
 def api_poll():
-    """Unified polling endpoint — returns state + teams + discussions in one
-    response, replacing 3 separate calls (/api/state + /api/teams +
-    /api/discussion_responses) for a 3x reduction in HTTP requests.
+    """Lightweight polling endpoint returning frequently changing state.
 
-    Works for both students and instructors.  The response includes a
-    ``poll_interval`` (ms) hint so the client can adapt its polling rate to
-    the current phase without hardcoding.
+    Roster data is fetched separately only when ``roster_version`` changes.
+    Clients may send ``known_question_id`` so unchanged question bodies are
+    omitted. ``poll_interval`` lets clients adapt to the current phase.
     """
     slug = session.get('slug')
     if not slug:
@@ -885,32 +1119,22 @@ def api_poll():
 
     ensure_schema(slug)
 
-    # --- State (also resolves course_id + max_teams internally) ---
-    state_data = _compute_state(slug)
+    is_instructor = 'instructor_id' in session
+
+    # --- State ---
+    state_data = _compute_state(
+        slug,
+        include_poll_count=is_instructor,
+        known_question_id=request.args.get('known_question_id', type=int),
+    )
     course_id = state_data.pop('_course_id')
-    max_teams = state_data.pop('_max_teams')
 
     # Strip grading metadata from student responses — students never see
     # poll counts or presentation history (rating counts per team).
     # Save history first — needed for top-teams computation below.
     pres_history = state_data.get('presentation_history', [])
     if 'student_id' in session:
-        state_data.pop('poll_count', None)
         state_data.pop('presentation_history', None)
-
-    # --- Teams + members (2 queries, not N+1) ---
-    teams_data = _compute_teams(slug, course_id, max_teams=max_teams)
-
-    # --- Discussions (only during discussion phase) ---
-    discussions_data = None
-    if state_data['phase'] == 'discussion':
-        rows = query_db(slug,
-            '''SELECT d.*, s.name, s.student_id, t.name as team_name
-               FROM discussion_responses d
-               JOIN students s ON d.student_id = s.id
-               LEFT JOIN teams t ON s.team_id = t.id
-               ORDER BY d.created_at DESC''')
-        discussions_data = [dict(r) for r in rows]
 
     # --- Top 3 teams (only when session has ended, students only) ---
     top_teams = None
@@ -929,8 +1153,6 @@ def api_poll():
 
     return jsonify({
         'state': state_data,
-        'teams': teams_data,
-        'discussions': discussions_data,
         'top_teams': top_teams,
         'poll_interval': poll_interval
     })
@@ -942,14 +1164,8 @@ def grade_peer():
     slug = session['slug']
     data = request.get_json(silent=True) or {}
     recipient_sid = data.get('recipient_id')
-    criterion = data.get('criterion')
-    score = data.get('score')
-    if recipient_sid is None or criterion is None or score is None:
-        return jsonify({'error': 'Missing fields'}), 400
-    try:
-        score = float(score)
-    except ValueError:
-        return jsonify({'error': 'Invalid score'}), 400
+    if recipient_sid is None:
+        return jsonify({'error': 'Recipient is required'}), 400
     grader = query_db(slug,
         'SELECT * FROM students WHERE student_id = ?',
         [session['student_id']], one=True
@@ -966,8 +1182,8 @@ def grade_peer():
     if grader['id'] == recipient['id']:
         return jsonify({'error': 'Cannot grade yourself'}), 400
     state = query_db(slug, 'SELECT phase FROM course_state LIMIT 1', one=True)
-    if not state or state['phase'] not in ('discussion', 'competition'):
-        return jsonify({'error': 'Peer grading is not open'}), 403
+    if not state or state['phase'] != 'discussion':
+        return jsonify({'error': 'Teammate thumbs are only open during discussion'}), 403
     if not grader['team_id'] or recipient['team_id'] != grader['team_id']:
         return jsonify({'error': 'You can only grade teammates'}), 403
     course = query_db(slug, 'SELECT id FROM courses LIMIT 1', one=True)
@@ -976,33 +1192,7 @@ def grade_peer():
            VALUES (?, ?, ?, ?, ?)
            ON CONFLICT(course_id, grader_id, recipient_id, criterion)
            DO UPDATE SET score=excluded.score''',
-        [course['id'], grader['id'], recipient['id'], criterion, score]
-    )
-    return jsonify({'success': True})
-
-
-@app.route('/api/submit_discussion', methods=['POST'])
-@student_login_required
-def submit_discussion():
-    slug = session['slug']
-    data = request.get_json(silent=True) or {}
-    question = data.get('question', '')
-    response = data.get('response', '')
-    if not question or not response:
-        return jsonify({'error': 'Question and response required'}), 400
-    state = query_db(slug, 'SELECT phase FROM course_state LIMIT 1', one=True)
-    if not state or state['phase'] != 'discussion':
-        return jsonify({'error': 'Discussion responses are not open'}), 403
-    student = query_db(slug,
-        'SELECT id FROM students WHERE student_id = ?',
-        [session['student_id']], one=True
-    )
-    if not student:
-        return jsonify({'error': 'Student not found'}), 404
-    course = query_db(slug, 'SELECT id FROM courses LIMIT 1', one=True)
-    execute_db(slug,
-        'INSERT INTO discussion_responses (course_id, student_id, question, response) VALUES (?, ?, ?, ?)',
-        [course['id'], student['id'], question, response]
+        [course['id'], grader['id'], recipient['id'], 'overall', 1]
     )
     return jsonify({'success': True})
 
@@ -1062,6 +1252,7 @@ def set_question():
 @instructor_login_required
 def set_max_teams():
     slug = session['slug']
+    ensure_schema(slug)
     data = request.get_json(silent=True) or {}
     new_max = data.get('max_teams')
     if not isinstance(new_max, int) or new_max < 1 or new_max > 20:
@@ -1082,7 +1273,9 @@ def set_max_teams():
                 ids
             )
     execute_db(slug,
-        'UPDATE course_state SET max_teams = ? WHERE course_id = ?',
+        '''UPDATE course_state
+           SET max_teams = ?, roster_version = COALESCE(roster_version, 0) + 1
+           WHERE course_id = ?''',
         [new_max, course['id']]
     )
     return jsonify({'success': True, 'max_teams': new_max})
@@ -1151,6 +1344,9 @@ def random_assign():
             [tid, tid] + sids
         )
 
+    if assignments:
+        _bump_roster_version(slug, course['id'])
+
     return jsonify({'success': True, 'assigned': len(assignments)})
 
 
@@ -1193,9 +1389,17 @@ def set_discussion_week():
         [week, course['id']]
     )
     synced_count = sync_presentation_questions(slug, course['id'], week)
+    sync_appendix_questions(slug, course['id'], week)
+    total = query_db(
+        slug,
+        '''SELECT COUNT(*) AS c FROM questions
+           WHERE course_id = ? AND COALESCE(week_num, 1) = ?''',
+        [course['id'], week],
+        one=True
+    )
     return jsonify({
         'success': True,
-        'question_count': synced_count,
+        'question_count': total['c'] if total else 0,
         'question_sync': 'not_found' if synced_count is None else 'synced'
     })
 
@@ -1226,6 +1430,7 @@ def set_max_members():
 
     # If reducing, unassign excess members from affected teams
     current_max = get_max_members_per_team(slug, course['id'])
+    excess_ids = []
     if new_max < current_max:
         # Find teams with more than new_max members, collect all excess IDs
         full_teams = query_db(slug,
@@ -1233,7 +1438,6 @@ def set_max_members():
                WHERE team_id IS NOT NULL GROUP BY team_id HAVING cnt > ?''',
             [new_max]
         )
-        excess_ids = []
         for ft in full_teams:
             # LIFO: remove the most recent joiners first
             excess = query_db(slug,
@@ -1252,6 +1456,8 @@ def set_max_members():
         'UPDATE course_state SET max_members_per_team = ? WHERE course_id = ?',
         [new_max, course['id']]
     )
+    if excess_ids:
+        _bump_roster_version(slug, course['id'])
     return jsonify({'success': True, 'max_members': new_max})
 
 
@@ -1275,7 +1481,12 @@ def discussion_questions():
     week_param = request.args.get('week')
     course = query_db(slug, 'SELECT id FROM courses LIMIT 1', one=True)
     ensure_schema(slug)
-    state = query_db(slug, 'SELECT discussion_week FROM course_state WHERE course_id = ?', [course['id']], one=True)
+    state = query_db(
+        slug,
+        'SELECT discussion_week, current_question FROM course_state WHERE course_id = ?',
+        [course['id']],
+        one=True,
+    )
     saved_week = state['discussion_week'] if state and state['discussion_week'] else 1
 
     questions_list = []
@@ -1328,59 +1539,10 @@ def discussion_questions():
     appendix = _load_md(appendix_path, prefix=f"week-{appendix_week}-a")
     questions_list.extend(appendix)
 
-    # Add sign-up metadata
-    is_instructor = 'instructor_id' in session
-    my_student = None
-    my_team_id = None
-    if 'student_id' in session:
-        my_student = query_db(slug,
-            'SELECT id, team_id FROM students WHERE student_id = ?',
-            [session['student_id']], one=True)
-        if my_student:
-            my_team_id = my_student['team_id']
-
-    # Batch sign-up metadata: 3 queries total regardless of question count
-    # (replaces 3 queries per question = 3N → 3)
-    team_counts_rows = query_db(slug,
-        '''SELECT ds.question_key, COUNT(DISTINCT s.team_id) as c
-           FROM discussion_selections ds
-           JOIN students s ON ds.student_id = s.id
-           WHERE ds.course_id = ? GROUP BY ds.question_key''',
-        [course['id']])
-    teams_presenting_map = {r['question_key']: r['c'] for r in team_counts_rows}
-
-    if is_instructor:
-        presenter_rows = query_db(slug,
-            'SELECT question_key, COUNT(*) as c FROM discussion_selections '
-            'WHERE course_id = ? GROUP BY question_key',
-            [course['id']])
-    elif my_team_id:
-        presenter_rows = query_db(slug,
-            '''SELECT ds.question_key, COUNT(*) as c
-               FROM discussion_selections ds
-               JOIN students s ON ds.student_id = s.id
-               WHERE ds.course_id = ? AND s.team_id = ?
-               GROUP BY ds.question_key''',
-            [course['id'], my_team_id])
-    else:
-        presenter_rows = []
-    presenters_map = {r['question_key']: r['c'] for r in presenter_rows}
-
-    my_selections = set()
-    if my_student:
-        sel_rows = query_db(slug,
-            'SELECT question_key FROM discussion_selections WHERE course_id = ? AND student_id = ?',
-            [course['id'], my_student['id']])
-        my_selections = {r['question_key'] for r in sel_rows}
-
-    for q in questions_list:
-        q['teams_presenting'] = teams_presenting_map.get(q['key'], 0)
-        q['presenters'] = presenters_map.get(q['key'], 0)
-        q['i_selected'] = q['key'] in my_selections
-
     return jsonify({
         'weeks': weeks,
         'current_week': target['num'] if target else None,
+        'current_question': state['current_question'] if state else None,
         'questions': questions_list
     })
 
@@ -1424,23 +1586,38 @@ def add_question():
 
     appendix_path = _appendix_path(slug, week)
 
-    # Count existing appendix entries to auto-label
-    existing = 0
+    # Continue after the highest existing A-number so deletions cannot create
+    # duplicate labels (for example, deleting A2 must not reuse A3).
+    highest_label = 0
     if os.path.exists(appendix_path):
         with open(appendix_path, 'r', encoding='utf-8') as f:
-            existing = len(parse_question_blocks(f.read()))
-    label = f'A{existing + 1}'
+            existing_entries = parse_question_blocks(f.read())
+        import yaml
+        for fm_block, _ in existing_entries:
+            try:
+                metadata = yaml.safe_load(fm_block) or {}
+            except Exception:
+                continue
+            match = re.match(
+                r'^A(\d+)\s*:', str(metadata.get('title') or ''),
+                re.IGNORECASE
+            )
+            if match:
+                highest_label = max(highest_label, int(match.group(1)))
+    label = f'A{highest_label + 1}'
     frontmatter_title = json.dumps(f"{label}: {title}")
 
-    block = f"""---
-title: {frontmatter_title}
----
-
-{content}
-"""
+    block = (
+        f"---\ntitle: {frontmatter_title}\n---\n\n"
+        f"{content}\n"
+    )
     with open(appendix_path, 'a', encoding='utf-8') as f:
         f.write(block)
-    return jsonify({'success': True})
+    sync_appendix_questions(slug, course['id'], week)
+    return jsonify({
+        'success': True,
+        'label': label,
+    })
 
 
 @app.route('/api/delete_appendix_question', methods=['POST'])
@@ -1477,54 +1654,16 @@ def delete_appendix_question():
 
     if not entries:
         os.remove(appendix_path)
-        return jsonify({'success': True})
-
-    # Rebuild file
-    new_content = ''
-    for fm, body in entries:
-        new_content += f"---\n{fm}\n---\n\n{body}\n\n"
-    with open(appendix_path, 'w', encoding='utf-8') as f:
-        f.write(new_content.strip() + '\n')
-    return jsonify({'success': True})
-
-
-@app.route('/api/toggle_present', methods=['POST'])
-@student_login_required
-def toggle_present():
-    """Toggle student sign-up for a discussion question."""
-    slug = session['slug']
-    data = request.get_json(silent=True) or {}
-    question_key = data.get('question_key', '')
-    if not question_key:
-        return jsonify({'error': 'question_key required'}), 400
-
-    student = query_db(slug,
-        'SELECT * FROM students WHERE student_id = ?',
-        [session['student_id']], one=True)
-    if not student:
-        return jsonify({'error': 'Student not found'}), 404
-    course = query_db(slug, 'SELECT id FROM courses LIMIT 1', one=True)
-    state = query_db(slug, 'SELECT phase FROM course_state WHERE course_id = ?',
-                     [course['id']], one=True)
-    if not state or state['phase'] != 'discussion':
-        return jsonify({'error': 'Question sign-up is not open'}), 403
-
-    # Check if already selected
-    existing = query_db(slug,
-        'SELECT id FROM discussion_selections '
-        'WHERE course_id = ? AND student_id = ? AND question_key = ?',
-        [course['id'], student['id'], question_key], one=True)
-
-    if existing:
-        execute_db(slug,
-            'DELETE FROM discussion_selections WHERE id = ?',
-            [existing['id']])
-        return jsonify({'success': True, 'selected': False})
     else:
-        execute_db(slug,
-            'INSERT INTO discussion_selections (course_id, student_id, question_key) VALUES (?, ?, ?)',
-            [course['id'], student['id'], question_key])
-        return jsonify({'success': True, 'selected': True})
+        # Rebuild file
+        new_content = ''
+        for fm, body in entries:
+            new_content += f"---\n{fm}\n---\n\n{body}\n\n"
+        with open(appendix_path, 'w', encoding='utf-8') as f:
+            f.write(new_content.strip() + '\n')
+
+    sync_appendix_questions(slug, course['id'], week)
+    return jsonify({'success': True})
 
 
 @app.route('/api/unassign_all', methods=['POST'])
@@ -1536,6 +1675,7 @@ def unassign_all():
     execute_db(slug,
         'UPDATE students SET team_id = NULL WHERE course_id = ?',
         [course['id']])
+    _bump_roster_version(slug, course['id'])
     count = query_db(slug,
         'SELECT COUNT(*) as c FROM students WHERE course_id = ?',
         [course['id']], one=True)
@@ -1629,7 +1769,7 @@ def upload_roster():
     # Batch delete students not in CSV
     to_remove = [db_id for sid, db_id in existing_by_sid.items() if sid not in csv_sids]
     if to_remove:
-        _delete_students(slug, to_remove)
+        _delete_students(slug, to_remove, bump_roster=False)
         removed = len(to_remove)
 
     # Batch updates and inserts
@@ -1653,6 +1793,9 @@ def upload_roster():
             to_insert)
         db.commit()
         added = len(to_insert)
+
+    if added or updated or removed:
+        _bump_roster_version(slug, course['id'])
 
     return jsonify({'success': True, 'added': added, 'updated': updated, 'removed': removed})
 
@@ -1893,7 +2036,8 @@ def submit_rating():
     state = query_db(slug, 'SELECT * FROM course_state LIMIT 1', one=True)
     # Grading is always open during an active presentation — the poll is just a
     # 30s highlight, not a gate. Key on the active presentation's start time.
-    if not state or not state['active_team_id'] or not state['active_question_id']:
+    if not state or state['phase'] != 'competition' or \
+       not state['active_team_id'] or not state['active_question_id']:
         return jsonify({'error': 'No active presentation to rate'}), 403
 
     student = query_db(slug,
@@ -2020,11 +2164,13 @@ def add_student():
             'UPDATE students SET name = ?, pin = ? WHERE id = ?',
             [name or None, pin, existing['id']]
         )
+        _bump_roster_version(slug, course['id'])
         return jsonify({'success': True, 'updated': True})
     execute_db(slug,
         'INSERT INTO students (course_id, student_id, name, pin) VALUES (?, ?, ?, ?)',
         [course['id'], student_id, name or None, pin]
     )
+    _bump_roster_version(slug, course['id'])
     return jsonify({'success': True, 'added': True})
 
 
@@ -2037,6 +2183,7 @@ def assign_student():
     team_id = data.get('team_id')  # None or '' to unassign
     if not student_id:
         return jsonify({'error': 'Student ID required'}), 400
+    course = query_db(slug, 'SELECT id FROM courses LIMIT 1', one=True)
 
     if team_id:
         team = query_db(slug, 'SELECT id FROM teams WHERE id = ?', [team_id], one=True)
@@ -2049,6 +2196,7 @@ def assign_student():
            WHERE id = ?''',
         [team_id or None, team_id or None, student_id]
     )
+    _bump_roster_version(slug, course['id'])
     return jsonify({'success': True})
 
 
@@ -2064,11 +2212,21 @@ def remove_student(student_db_id):
 @instructor_login_required
 def reset_data():
     slug = session['slug']
+    ensure_schema(slug)
     course = query_db(slug, 'SELECT id FROM courses LIMIT 1', one=True)
     execute_db(slug, 'DELETE FROM peer_reviews WHERE course_id = ?', [course['id']])
-    execute_db(slug, 'DELETE FROM discussion_responses WHERE course_id = ?', [course['id']])
     execute_db(slug, 'DELETE FROM presentation_ratings WHERE course_id = ?', [course['id']])
-    execute_db(slug, 'DELETE FROM discussion_selections WHERE course_id = ?', [course['id']])
+    db = get_db(slug)
+    legacy_tables = {
+        row['name'] for row in db.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' "
+            "AND name IN ('discussion_responses', 'discussion_selections')"
+        ).fetchall()
+    }
+    if 'discussion_responses' in legacy_tables:
+        execute_db(slug, 'DELETE FROM discussion_responses WHERE course_id = ?', [course['id']])
+    if 'discussion_selections' in legacy_tables:
+        execute_db(slug, 'DELETE FROM discussion_selections WHERE course_id = ?', [course['id']])
     execute_db(slug, 'UPDATE students SET team_id = NULL WHERE course_id = ?', [course['id']])
     execute_db(slug,
         '''UPDATE course_state SET
@@ -2083,7 +2241,8 @@ def reset_data():
                poll_question_key = NULL,
                presentation_history = '[]',
                teams_locked = 0,
-               session_started_at = NULL
+               session_started_at = NULL,
+               roster_version = COALESCE(roster_version, 0) + 1
            WHERE course_id = ?''',
         [course['id']]
     )
@@ -2149,15 +2308,6 @@ def export_data(slug):
                WHERE pr.course_id = ?
                ORDER BY pr.question_key, pr.created_at''', [cid])
 
-        discussions = query_db(slug,
-            '''SELECT d.student_id as db_id, s.student_id, s.name,
-                      t.name as team_name, d.question, d.response, d.created_at
-               FROM discussion_responses d
-               JOIN students s ON d.student_id = s.id
-               LEFT JOIN teams t ON s.team_id = t.id
-               WHERE d.course_id = ?
-               ORDER BY d.created_at''', [cid])
-
         # Map question_key → presenting team from presentation_history
         state_row = query_db(slug, 'SELECT * FROM course_state WHERE course_id = ?', [cid], one=True)
         key_to_team = {}
@@ -2211,7 +2361,6 @@ def export_data(slug):
             ('Total Teams', len(teams)),
             ('Total Peer Reviews (thumbs)', len(peer_reviews)),
             ('Total Presentation Ratings', len(ratings)),
-            ('Total Discussion Responses', len(discussions)),
         ]
         for r, (label, val) in enumerate(info_rows, 1):
             ws1.cell(row=r, column=1, value=label).font = bold_font
@@ -2271,9 +2420,7 @@ def export_data(slug):
         s_headers = [
             'student_id', 'name', 'team',
             'thumbs_given', 'thumbs_received',
-            'discussion_responses', 'discussion_selections',
             'presentation_ratings_given',
-            'presented_question',
             'last_login', 'last_active',
         ]
         style_header(ws2, s_headers)
@@ -2282,22 +2429,6 @@ def export_data(slug):
         thumbs_given = collections.Counter(pr['grader_id'] for pr in peer_reviews)
         thumbs_recv = collections.Counter(pr['recipient_id'] for pr in peer_reviews)
         ratings_given = collections.Counter(rt['rater_db_id'] for rt in ratings)
-        disc_count = collections.Counter(d['db_id'] for d in discussions)
-
-        sels = query_db(slug,
-            '''SELECT s.id, COUNT(*) as c FROM discussion_selections ds
-               JOIN students s ON ds.student_id = s.id
-               WHERE ds.course_id = ? GROUP BY s.id''', [cid])
-        sel_count = {s['id']: s['c'] for s in sels}
-
-        # Which question each student presented (from selections)
-        sel_details = query_db(slug,
-            '''SELECT s.id, ds.question_key FROM discussion_selections ds
-               JOIN students s ON ds.student_id = s.id
-               WHERE ds.course_id = ?''', [cid])
-        presented_q = collections.defaultdict(list)
-        for sd in sel_details:
-            presented_q[sd['id']].append(sd['question_key'])
 
         s_rows = []
         for stu in students:
@@ -2307,10 +2438,7 @@ def export_data(slug):
                 stu['team_name'] or '',
                 thumbs_given.get(stu['id'], 0),
                 thumbs_recv.get(stu['id'], 0),
-                disc_count.get(stu['id'], 0),
-                sel_count.get(stu['id'], 0),
                 ratings_given.get(stu['id'], 0),
-                ', '.join(presented_q.get(stu['id'], [])),
                 stu['last_login_at'] or '',
                 stu['last_active_at'] or '',
             ]
@@ -2387,28 +2515,6 @@ def export_data(slug):
             for col, val in enumerate(row, 1):
                 ws5.cell(row=i, column=col, value=val)
         set_col_widths(ws5, rt_headers, rt_rows)
-
-        # ════════════════════════════════════════════════════════════════════
-        # TAB 6: Discussion Responses — raw student text answers
-        # ════════════════════════════════════════════════════════════════════
-        ws6 = wb.create_sheet('Discussion Responses')
-        d_headers = ['student_id', 'name', 'team', 'question', 'response', 'time']
-        style_header(ws6, d_headers)
-
-        d_rows = []
-        for d in discussions:
-            d_rows.append([
-                d['student_id'], d['name'], d['team_name'] or '',
-                d['question'], d['response'], d['created_at'],
-            ])
-        for i, row in enumerate(d_rows, 2):
-            for col, val in enumerate(row, 1):
-                ws6.cell(row=i, column=col, value=val)
-                if col in (4, 5):  # wrap question and response text
-                    ws6.cell(row=i, column=col).alignment = freeze_align
-        set_col_widths(ws6, d_headers, d_rows)
-        # Give response column extra width
-        ws6.column_dimensions['E'].width = 50
 
         # ── save ──
         # Save the workbook to an in-memory buffer

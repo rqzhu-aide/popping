@@ -155,6 +155,17 @@
 
     <section class="card">
         <h2>Discussion Questions</h2>
+        <div class="discussion-post-status{% if state.current_question %} has-posted-question{% endif %}"
+             id="discussion-post-status" aria-live="polite">
+            <span class="discussion-status-dot" aria-hidden="true"></span>
+            <span id="posted-discussion-question">
+                {% if state.current_question %}
+                Currently posted: {{ state.current_question }}
+                {% else %}
+                No question is currently posted to the class.
+                {% endif %}
+            </span>
+        </div>
         <div class="disc-questions-list" id="disc-questions-list">
             <p class="loading">Loading questions...</p>
         </div>
@@ -198,7 +209,12 @@
                 <div class="info-row">
                     <span class="info-label">Question:</span>
                     <span class="info-value markdown-content" id="active-question-text" data-qnum="{{ state.active_question_id }}">
-                        {% for q in questions %}{% if q.id == state.active_question_id %}#{{ q.question_num }}: {% if q.title %}{{ q.title }}{% else %}{{ q.question_text }}{% endif %}{% endif %}{% endfor %}
+                        {% for q in questions %}
+                            {% if q.id == state.active_question_id %}
+                                {% if q.source_key and q.source_key[:9] == 'appendix:' %}Appendix — {% else %}#{{ q.question_num }}: {% endif %}
+                                {% if q.title %}{{ q.title }}{% else %}{{ q.question_text }}{% endif %}
+                            {% endif %}
+                        {% endfor %}
                     </span>
                 </div>
             </div>
@@ -214,7 +230,7 @@
             {# Poll status #}
             <div class="poll-status" id="poll-status" style="display:none; margin-top:12px;">
                 <span class="poll-badge">⭐ Poll active</span>
-                <span class="hint" id="poll-count">0 responses</span>
+                <span class="hint" id="poll-count">0 ratings</span>
                 <button class="btn btn-sm btn-secondary" onclick="stopPoll()">Stop Poll</button>
             </div>
             {% else %}
@@ -234,10 +250,12 @@
                     <select id="comp-question">
                         <option value="">-- Choose question --</option>
                         {% for q in questions %}
-                        {% if q.id not in presented_question_ids %}
-                        <option value="{{ q.id }}">#{{ q.question_num }}: {% if q.title %}{{ q.title[:60] }}{% if q.title|length > 60 %}...{% endif %}{% else %}{{ q.question_text[:60] }}{% if q.question_text|length > 60 %}...{% endif %}{% endif %}</option>
-                        {% endif %}
+                        {% set q_title = q.title if q.title else q.question_text %}
+                        <option value="{{ q.id }}">{% if q.source_key and q.source_key[:9] == 'appendix:' %}Appendix — {% else %}#{{ q.question_num }}: {% endif %}{{ q_title[:60] }}{% if q_title|length > 60 %}...{% endif %}{% if q.id in presented_question_ids %} — previously presented{% endif %}</option>
                         {% endfor %}
+                        {% if not questions %}
+                        <option value="" disabled>No questions available for this week</option>
+                        {% endif %}
                     </select>
                 </div>
                 <div class="form-group">
@@ -255,6 +273,16 @@
                 <h4>Presentation History</h4>
                 <div id="history-list"></div>
             </div>
+        </div>
+    </section>
+
+    <section class="card" id="competition-appendix-form">
+        <h2>➕ Add Appendix Question</h2>
+        <p class="hint">Saved to Week {{ state.discussion_week or 1 }} and added to the presentation question list.</p>
+        <div class="add-student-form" style="flex-direction:column; gap:8px;">
+            <input type="text" id="appendix-title" placeholder="Question title" style="width:100%">
+            <textarea id="appendix-content" placeholder="Question content (supports Markdown)..." rows="4" style="width:100%"></textarea>
+            <button class="btn btn-primary" onclick="addAppendixQuestion()">Add to Appendix</button>
         </div>
     </section>
 

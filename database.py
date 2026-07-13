@@ -92,6 +92,8 @@ def ensure_schema(slug):
         db.execute('ALTER TABLE course_state ADD COLUMN poll_started_at TIMESTAMP')
     if 'presentation_history' not in cs_cols:
         db.execute("ALTER TABLE course_state ADD COLUMN presentation_history TEXT DEFAULT '[]'")
+    if 'roster_version' not in cs_cols:
+        db.execute('ALTER TABLE course_state ADD COLUMN roster_version INTEGER DEFAULT 0')
 
     # questions columns
     q_cols = [row['name'] for row in db.execute('PRAGMA table_info(questions)').fetchall()]
@@ -101,6 +103,10 @@ def ensure_schema(slug):
         db.execute('ALTER TABLE questions ADD COLUMN content TEXT')
     if 'week_num' not in q_cols:
         db.execute('ALTER TABLE questions ADD COLUMN week_num INTEGER DEFAULT 1')
+    if 'source_key' not in q_cols:
+        db.execute('ALTER TABLE questions ADD COLUMN source_key TEXT')
+    db.execute('''CREATE UNIQUE INDEX IF NOT EXISTS idx_questions_course_source
+                  ON questions(course_id, source_key)''')
 
     # students columns
     st_cols = [row['name'] for row in db.execute('PRAGMA table_info(students)').fetchall()]
@@ -126,17 +132,6 @@ def ensure_schema(slug):
         FOREIGN KEY (student_id) REFERENCES students (id),
         UNIQUE(course_id, student_id, question_key)
     )''')
-    db.execute('''CREATE TABLE IF NOT EXISTS discussion_selections (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        course_id INTEGER NOT NULL,
-        student_id INTEGER NOT NULL,
-        question_key TEXT NOT NULL,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (course_id) REFERENCES courses (id),
-        FOREIGN KEY (student_id) REFERENCES students (id),
-        UNIQUE(course_id, student_id, question_key)
-    )''')
-
     db.commit()
     _schema_checked.add(slug)
 

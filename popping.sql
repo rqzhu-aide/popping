@@ -59,9 +59,13 @@ CREATE TABLE questions (
     title TEXT,
     content TEXT,
     week_num INTEGER DEFAULT 1,
+    source_key TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (course_id) REFERENCES courses (id) ON DELETE CASCADE
 );
+
+CREATE UNIQUE INDEX idx_questions_course_source
+    ON questions(course_id, source_key);
 
 CREATE TABLE course_state (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -82,6 +86,7 @@ CREATE TABLE course_state (
     poll_question_key TEXT,
     poll_started_at TIMESTAMP,
     presentation_history TEXT DEFAULT '[]',
+    roster_version INTEGER DEFAULT 0,
     FOREIGN KEY (course_id) REFERENCES courses (id) ON DELETE CASCADE,
     FOREIGN KEY (active_team_id) REFERENCES teams (id) ON DELETE SET NULL,
     FOREIGN KEY (active_question_id) REFERENCES questions (id) ON DELETE SET NULL
@@ -101,17 +106,6 @@ CREATE TABLE peer_reviews (
     UNIQUE(course_id, grader_id, recipient_id, criterion)
 );
 
-CREATE TABLE discussion_responses (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    course_id INTEGER NOT NULL,
-    student_id INTEGER NOT NULL,
-    question TEXT NOT NULL,
-    response TEXT NOT NULL,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (course_id) REFERENCES courses (id) ON DELETE CASCADE,
-    FOREIGN KEY (student_id) REFERENCES students (id) ON DELETE CASCADE
-);
-
 CREATE TABLE presentation_ratings (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     course_id INTEGER NOT NULL,
@@ -119,17 +113,6 @@ CREATE TABLE presentation_ratings (
     question_key TEXT NOT NULL,
     q1_developed INTEGER CHECK(q1_developed >= 1 AND q1_developed <= 5),
     q2_easy INTEGER CHECK(q2_easy >= 1 AND q2_easy <= 5),
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (course_id) REFERENCES courses (id) ON DELETE CASCADE,
-    FOREIGN KEY (student_id) REFERENCES students (id) ON DELETE CASCADE,
-    UNIQUE(course_id, student_id, question_key)
-);
-
-CREATE TABLE discussion_selections (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    course_id INTEGER NOT NULL,
-    student_id INTEGER NOT NULL,
-    question_key TEXT NOT NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (course_id) REFERENCES courses (id) ON DELETE CASCADE,
     FOREIGN KEY (student_id) REFERENCES students (id) ON DELETE CASCADE,

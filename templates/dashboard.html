@@ -21,9 +21,6 @@
         <div class="question-box">
             <p class="current-question" id="current-question">Waiting for question...</p>
         </div>
-        <textarea id="discussion-input" rows="3" placeholder="Type your response..." aria-label="Your discussion response"></textarea>
-        <button class="btn btn-secondary" onclick="submitDiscussion()">Submit Response</button>
-        <div id="discussion-list" class="discussion-list"></div>
     </section>
 
     <!-- Now Presenting: banner, question, timer -->
@@ -119,8 +116,8 @@
                     <button class="btn btn-sm btn-secondary" onclick="hideTeamPicker()" style="margin-top:10px;">Cancel</button>
                 </div>
                 {% endif %}
-                {% else %}
-                {% if teammates and state.phase in ['discussion', 'competition'] %}
+                {% elif state.phase == 'discussion' %}
+                {% if teammates %}
                 <div class="team-instructions">
                     <p>Drag members to arrange seating.</p>
                     <p>Give a <strong>👍</strong> to the significant contributor(s) in your group.</p>
@@ -130,7 +127,7 @@
                 {% endif %}
                 {% endif %}
             </div>
-            {% if teammates and state.phase in ['discussion', 'competition'] %}
+            {% if teammates and state.phase == 'discussion' %}
             <div class="team-table-wrapper">
                 <button class="btn btn-sm btn-primary" onclick="resetCardPositions()">Reset Positions</button>
                 <div class="team-table" id="team-table" data-team-color="{{ team.color }}">
@@ -143,7 +140,7 @@
                             {% if m.name and m.name != m.student_id %}
                             <span class="card-id">{{ m.student_id }}</span>
                             {% endif %}
-                            <button class="thumb-btn thumb-up" aria-label="Thumbs up to {{ m.name or m.student_id }}" onclick="gradeTeammate(this, {{ m.student_id | tojson }}, 1)">👍</button>
+                            <button class="thumb-btn thumb-up" aria-label="Thumbs up to {{ m.name or m.student_id }}" onclick="gradeTeammate(this, {{ m.student_id | tojson }})">👍</button>
                         </div>
                     </div>
                     {% endfor %}

@@ -66,6 +66,16 @@ function renderMarkdown(md) {
     return div.innerHTML;
 }
 
+function renderPresentationQuestion(question) {
+    const sourceKey = question.source_key || '';
+    const title = question.title || '';
+    const heading = sourceKey.startsWith('appendix:')
+        ? `Appendix — ${title}`
+        : `#${question.question_num}: ${title}`;
+    const body = question.content || question.question_text || '';
+    return renderMarkdown(`${heading}\n\n${body}`);
+}
+
 /** Safely run MathJax typeset if the library has loaded. */
 function safeTypeset(el) {
     if (window.MathJax && typeof window.MathJax.typesetPromise === 'function') {
@@ -151,11 +161,13 @@ let pollInterval = null;
 let ratingSubmitted = false;       // has the student submitted for the current presentation?
 let lastRatedPresentationKey = null; // track active presentation to reset the rating UI
 let lastRenderedQuestionKey = null; // track active question to avoid re-rendering same HTML
+let lastKnownQuestionId = null;    // lets the server omit unchanged question bodies
 
 const dashboard = document.querySelector('.dashboard');
 if (dashboard) {
     let _pollInProgress = false;
     let _pollTimer = null;
+    let _rosterVersion = null;
 
     function initDashboard() {
         pollOnce();
@@ -166,14 +178,20 @@ if (dashboard) {
         _pollInProgress = true;
         let interval = 5000;
         try {
-            const res = await fetch('/api/poll');
+            const questionQuery = lastKnownQuestionId == null
+                ? ''
+                : `?known_question_id=${encodeURIComponent(lastKnownQuestionId)}`;
+            const res = await fetch('/api/poll' + questionQuery);
             if (!res.ok) throw new Error('poll failed');
             const data = await res.json();
-            // Feed data directly to existing UI functions — no extra fetches
-            loadRoster(data.teams);
-            loadState(data.state);
-            if (data.discussions) {
-                loadDiscussions(data.discussions);
+            // State is frequent; the roster is fetched only when its version changes.
+            const pageReloading = await loadState(data.state);
+            if (!pageReloading) {
+                try {
+                    await syncRoster(data.state?.roster_version);
+                } catch (e) {
+                    // Keep state polling healthy; retry the roster on the next cycle.
+                }
             }
             if (data.top_teams) {
                 renderTopTeams(data.top_teams);
@@ -226,17 +244,31 @@ if (dashboard) {
     };
 
     async function loadRoster(teams) {
-        if (!teams) {
-            const res = await fetch('/api/teams');
-            teams = await res.json();
-        }
         renderRosterGrid(document.getElementById('roster-table'), teams, dashboard.dataset.you);
+    }
+
+    async function syncRoster(version) {
+        const normalizedVersion = Number.isInteger(version) ? version : 0;
+        if (_rosterVersion === normalizedVersion) return;
+        const res = await fetch(`/api/teams?version=${encodeURIComponent(normalizedVersion)}`);
+        if (!res.ok) throw new Error('roster refresh failed');
+        await loadRoster(await res.json());
+        _rosterVersion = normalizedVersion;
     }
 
     async function loadState(state) {
         if (!state) {
             const res = await fetch('/api/state');
             state = await res.json();
+        }
+
+        // The dashboard's activity controls are rendered server-side for the
+        // current phase and team. Reload once when either changes so students
+        // never keep stale discussion or presentation controls.
+        const currentTeamId = state.my_team ? state.my_team.id : null;
+        if (state.phase !== dashboard.dataset.phase || currentTeamId !== MY_TEAM_ID) {
+            window.location.reload();
+            return true;
         }
 
         const badge = document.querySelector('.phase-badge');
@@ -316,6 +348,7 @@ if (dashboard) {
                     stopTimer();
                     stopPollPulse();
                     lastRenderedQuestionKey = null;
+                    lastKnownQuestionId = null;
                     return;
                 }
 
@@ -327,21 +360,22 @@ if (dashboard) {
                 const qText = document.getElementById('active-question-text');
                 if (qDisplay && qText && state.active_question) {
                     qDisplay.style.display = 'block';
-                    const qKey = `${state.active_question.id}-${state.active_question.question_num}`;
+                    const qKey = String(state.active_question.id);
                     if (qKey !== lastRenderedQuestionKey) {
-                        lastRenderedQuestionKey = qKey;
                         if (state.active_question.html_content) {
                             qText.innerHTML = DOMPurify.sanitize(state.active_question.html_content);
                         } else {
-                            const md = state.active_question.content || state.active_question.question_text || '';
-                            qText.innerHTML = renderMarkdown(`#${state.active_question.question_num}: ${state.active_question.title || ''}\n\n${md}`);
+                            qText.innerHTML = renderPresentationQuestion(state.active_question);
                         }
                         safeTypeset(qText);
                         safeHighlight(qText);
+                        lastRenderedQuestionKey = qKey;
                     }
+                    lastKnownQuestionId = state.active_question.id;
                 } else if (qDisplay) {
                     qDisplay.style.display = 'none';
                     lastRenderedQuestionKey = null;
+                    lastKnownQuestionId = null;
                 }
                 // --- Presentation countdown timer (visible to ALL teams) ---
                 const hasPres = !!state.presentation_started_at;
@@ -401,48 +435,14 @@ if (dashboard) {
         ).join('');
     }
 
-    window.submitPeerGrade = async function(recipientId, score) {
+    window.submitPeerGrade = async function(recipientId) {
         try {
-            const data = await postJSON('/api/grade_peer', { recipient_id: recipientId, criterion: 'overall', score });
+            const data = await postJSON('/api/grade_peer', { recipient_id: recipientId });
             return data && data.success;
         } catch (e) {
             return false;
         }
     };
-
-    window.submitDiscussion = async function() {
-        const input = document.getElementById('discussion-input');
-        const question = document.getElementById('current-question')?.textContent || 'General';
-        if (!input.value.trim()) return;
-        const data = await postJSON('/api/submit_discussion', { question, response: input.value.trim() });
-        if (data && data.success) {
-            input.value = '';
-            // Instant refresh via the poll endpoint (discussions already included)
-            try {
-                const pollRes = await fetch('/api/poll');
-                if (pollRes.ok) {
-                    const pollData = await pollRes.json();
-                    if (pollData.discussions) loadDiscussions(pollData.discussions);
-                }
-            } catch(e) {}
-            showToast('Response submitted');
-        } else {
-            showToast(data?.error || 'Failed to submit response', 'error');
-        }
-    };
-
-    async function loadDiscussions(rows) {
-        const container = document.getElementById('discussion-list');
-        if (!container || !rows) return;
-        container.innerHTML = rows.slice(0, 20).map(r => {
-            const display = formatStudentDisplay(r.name, r.student_id);
-            return `
-            <div class="discussion-item">
-                <div class="meta">${escapeHtmlValue(display)} · ${escapeHtmlValue(r.team_name || 'No team')} · ${escapeHtmlValue(r.created_at)}</div>
-                <div>${escapeHtmlValue(r.response)}</div>
-            </div>
-        `}).join('');
-    }
 
     // --- teammate cards: circle layout + free drag ---
     function initTeammateCards() {
@@ -609,13 +609,13 @@ window.resetCardPositions = function() {
     }
 
     // --- thumb grading on cards ---
-    window.gradeTeammate = async function(btn, recipientId, score) {
+    window.gradeTeammate = async function(btn, recipientId) {
         const card = btn.closest('.teammate-card');
         card.querySelectorAll('.thumb-btn').forEach(b => {
             b.classList.remove('active-green');
         });
         btn.classList.add('active-green');
-        const ok = await submitPeerGrade(recipientId, score);
+        const ok = await submitPeerGrade(recipientId);
         if (!ok) {
             btn.classList.remove('active-green');
             showToast('Failed to save — please try again', 'error');
@@ -654,24 +654,39 @@ if (instructor) {
 
     let _instrPollInProgress = false;
     let _instrPollTimer = null;
+    let _instrRosterVersion = null;
+    let _instrKnownQuestionId = null;
 
     async function instructorPollOnce() {
         if (_instrPollInProgress) return;
         _instrPollInProgress = true;
         let interval = 5000;
         try {
-            const res = await fetch('/api/poll');
+            const questionQuery = _instrKnownQuestionId == null
+                ? ''
+                : `?known_question_id=${encodeURIComponent(_instrKnownQuestionId)}`;
+            const res = await fetch('/api/poll' + questionQuery);
             if (!res.ok) return;
             const data = await res.json();
             const state = data.state;
-            const teams = data.teams;
+
+            if (document.getElementById('discussion-post-status')) {
+                updatePostedDiscussionQuestion(state.current_question || '');
+            }
 
             // --- Roster refresh (setup phase) ---
             const rosterGrid = document.querySelector('.roster-grid');
-            if (rosterGrid) {
+            if (rosterGrid && _instrRosterVersion !== state.roster_version) {
                 const card = rosterGrid.closest('.card');
                 if (card && card.querySelector('h2')?.textContent?.includes('Team and Members')) {
-                    renderRosterGrid(rosterGrid, teams, null);
+                    try {
+                        const rosterResponse = await fetch(`/api/teams?version=${encodeURIComponent(state.roster_version)}`);
+                        if (!rosterResponse.ok) throw new Error('roster refresh failed');
+                        renderRosterGrid(rosterGrid, await rosterResponse.json(), null);
+                        _instrRosterVersion = state.roster_version;
+                    } catch (e) {
+                        // Retry on the next poll without blocking timer/rating updates.
+                    }
                 }
             }
 
@@ -680,27 +695,29 @@ if (instructor) {
             if (timerBox && state) {
                 const pollCount = document.getElementById('poll-count');
                 if (pollCount) {
-                    pollCount.textContent = `${state.poll_count || 0} response${state.poll_count === 1 ? '' : 's'}`;
+                    pollCount.textContent = `${state.poll_count || 0} rating${state.poll_count === 1 ? '' : 's'}`;
                 }
                 // Active question markdown — only re-render when question changes
                 const qText = document.getElementById('active-question-text');
                 if (qText && state.active_question) {
-                    const qKey = `${state.active_question.id}-${state.active_question.question_num}`;
+                    const qKey = String(state.active_question.id);
                     if (qKey !== lastRenderedQuestionKey) {
-                        lastRenderedQuestionKey = qKey;
                         let newHtml;
                         if (state.active_question.html_content) {
                             newHtml = DOMPurify.sanitize(state.active_question.html_content);
                         } else {
-                            newHtml = renderMarkdown(`#${state.active_question.question_num}: ${state.active_question.title || ''}\n\n${state.active_question.content || state.active_question.question_text || ''}`);
+                            newHtml = renderPresentationQuestion(state.active_question);
                         }
                         qText.innerHTML = newHtml;
                         safeTypeset(qText);
                         safeHighlight(qText);
+                        lastRenderedQuestionKey = qKey;
                     }
+                    _instrKnownQuestionId = state.active_question.id;
                 } else if (qText) {
                     qText.innerHTML = '';
                     lastRenderedQuestionKey = null;
+                    _instrKnownQuestionId = null;
                 }
                 // Toggle poll status panel
                 const ps = document.getElementById('poll-status');
@@ -1121,6 +1138,7 @@ window.setDiscussionWeek = async function() {
 window.postActiveQuestion = async function(title) {
     const data = await postJSON('/api/set_question', { question: title });
     if (data && data.success) {
+        updatePostedDiscussionQuestion(title);
         showToast('Question posted: ' + title, 'success');
     } else {
         showToast(data?.error || 'Failed to post question', 'error');
@@ -1140,8 +1158,7 @@ window.startPresentation = async function() {
     const data = await postJSON('/api/start_presentation', {
         team_id: parseInt(teamId, 10),
         question_id: parseInt(questionId, 10),
-        time_cap: timeCap,
-        question_text: document.getElementById('comp-question').selectedOptions[0].text
+        time_cap: timeCap
     });
     if (data.success) {
         window.location.reload();
@@ -1356,20 +1373,6 @@ function initStarRows() {
     });
 }
 
-// ===== DISCUSSION SIGN-UP =====
-
-window.togglePresent = async function(questionKey, btn) {
-    const data = await postJSON('/api/toggle_present', { question_key: questionKey });
-    if (data.success) {
-        btn.classList.toggle('selected', data.selected);
-        btn.textContent = data.selected ? 'Signed Up' : 'Sign Up';
-        // Refresh counts
-        const res = await fetch('/api/discussion_questions');
-        const d = await res.json();
-        renderDiscussionQuestions(d);
-    }
-};
-
 // ===== UNASSIGN ALL =====
 
 window.unassignAll = async function() {
@@ -1388,14 +1391,19 @@ window.addAppendixQuestion = async function() {
     const content = document.getElementById('appendix-content')?.value.trim();
     if (!title || !content) { showToast('Title and content required', 'warning'); return; }
     const data = await postJSON('/api/questions', { title, content });
-    if (data.success) {
+    if (data && data.success) {
         document.getElementById('appendix-title').value = '';
         document.getElementById('appendix-content').value = '';
-        showToast('Appendix question added');
-        // Refresh question list
-        initWeekSelector();
+        showToast(`${data.label || 'Appendix question'} added`, 'success');
+        if (document.getElementById('competition-appendix-form')) {
+            // Reload the low-frequency instructor page so every synced choice,
+            // including the new appendix item, is visible immediately.
+            window.setTimeout(() => window.location.reload(), 250);
+        } else {
+            initWeekSelector();
+        }
     } else {
-        showToast(data.error || 'Failed to add question', 'error');
+        showToast(data?.error || 'Failed to add question', 'error');
     }
 };
 
@@ -1576,12 +1584,12 @@ function renderHistory() {
     container.innerHTML = history.map(h => `
         <div class="history-item">
             <span>${escapeHtmlValue(h.title || 'Untitled')} — <strong>${escapeHtmlValue(h.team || '?')}</strong></span>
-            <span>${escapeHtmlValue(h.responses || 0)} responses</span>
+            <span>${escapeHtmlValue(h.responses || 0)} ratings</span>
         </div>
     `).join('');
 }
 
-// ===== DISCUSSION QUESTIONS RENDER (enhanced with sign-ups) =====
+// ===== DISCUSSION QUESTIONS RENDER =====
 function renderDiscussionQuestions(data) {
     const container = document.getElementById('disc-questions-list');
     if (!container) return;
@@ -1591,29 +1599,21 @@ function renderDiscussionQuestions(data) {
         return;
     }
 
-    const isInstructor = !!document.querySelector('.instructor[data-slug]');
-
     container.innerHTML = data.questions.map((q, i) => {
         const key = q.key || q._key || `week-${data.current_week}-q${i}`;
-        const presenting = q.teams_presenting || 0;
-        const presenters = q.presenters || 0;
-        const selected = q.i_selected ? 'selected' : '';
         const safeTitle = escapeHtmlValue(q.title || 'Untitled');
-        const safeKey = escapeAttrValue(key);
         const isAppendix = key.includes('-a');
         const appendixIndex = isAppendix ? parseInt(key.split('-a').pop(), 10) : -1;
-        const deleteBtn = (isInstructor && isAppendix)
+        const deleteBtn = isAppendix
             ? `<button class="btn btn-sm btn-danger" onclick="event.stopPropagation(); deleteAppendixQuestion(${appendixIndex})">🗑 Delete</button>`
             : '';
-        const action = isInstructor
-            ? `<div class="disc-question-actions">
-                   <button class="btn btn-sm btn-primary" data-question-title="${escapeAttrValue(q.title || '')}" onclick="event.stopPropagation(); postActiveQuestionFromButton(this)">Post to Class</button>
-                   ${deleteBtn}
-                   <span class="presenting-badge">${presenting} team${presenting !== 1 ? 's' : ''}${presenters ? `, ${presenters} presenter${presenters !== 1 ? 's' : ''}` : ''}</span>
-               </div>`
-            : `<button class="toggle-present-btn ${selected}" data-question-key="${safeKey}" onclick="event.stopPropagation(); togglePresent(this.dataset.questionKey, this)">${q.i_selected ? 'Signed Up' : 'Sign Up'}</button>`;
+        const action = `<div class="disc-question-actions">
+               <span class="posted-question-badge" hidden>● Currently Posted</span>
+               <button class="btn btn-sm btn-primary post-question-btn" data-question-title="${escapeAttrValue(q.title || '')}" onclick="event.stopPropagation(); postActiveQuestionFromButton(this)">Post to Class</button>
+               ${deleteBtn}
+           </div>`;
         return `
-        <div class="disc-question-card">
+        <div class="disc-question-card" data-question-title="${escapeAttrValue(q.title || '')}">
             <div class="disc-question-header" onclick="this.parentElement.classList.toggle('expanded')">
                 <span class="disc-question-num">#${i + 1}</span>
                 <span class="disc-question-title">${safeTitle}</span>
@@ -1625,6 +1625,8 @@ function renderDiscussionQuestions(data) {
         </div>
     `}).join('');
 
+    updatePostedDiscussionQuestion(data.current_question || '');
+
     safeTypeset(container);
     safeHighlight(container);
 }
@@ -1632,3 +1634,27 @@ function renderDiscussionQuestions(data) {
 window.postActiveQuestionFromButton = function(btn) {
     postActiveQuestion(btn.dataset.questionTitle || '');
 };
+
+function updatePostedDiscussionQuestion(title) {
+    const postedTitle = title || '';
+    const status = document.getElementById('discussion-post-status');
+    const statusText = document.getElementById('posted-discussion-question');
+    if (status) status.classList.toggle('has-posted-question', !!postedTitle);
+    if (statusText) {
+        statusText.textContent = postedTitle
+            ? `Currently posted: ${postedTitle}`
+            : 'No question is currently posted to the class.';
+    }
+
+    document.querySelectorAll('.disc-question-card[data-question-title]').forEach(card => {
+        const isPosted = !!postedTitle && card.dataset.questionTitle === postedTitle;
+        card.classList.toggle('is-posted', isPosted);
+        const badge = card.querySelector('.posted-question-badge');
+        if (badge) badge.hidden = !isPosted;
+        const button = card.querySelector('.post-question-btn');
+        if (button) {
+            button.disabled = isPosted;
+            button.textContent = isPosted ? 'Posted to Class' : 'Post to Class';
+        }
+    });
+}

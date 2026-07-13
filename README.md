@@ -9,12 +9,12 @@ Each course lives in its own folder with its own SQLite database. This keeps cou
 - **Per-Course Databases**: Each course has its own folder (`data/{slug}/`) with its own `popping.db`.
 - **Team Selection**: Students log in with ID + PIN and pick a team.
 - **Live Roster**: Real-time view of who joined which team (3-second polling).
-- **Discussion Phase**: Students respond to instructor questions.
-- **Peer Grading**: Students grade teammates during discussion.
+- **Discussion Phase**: Students discuss instructor questions with their teams.
+- **Teammate Recognition**: Students give thumbs-up to teammates during discussion.
 - **Competition Mode**: Teams present; instructor selects active team.
 - **Presentation Ratings**: Non-presenting students rate the active presentation.
 - **Instructor Panel**: Control phases, pick presenting team, manage students.
-- **Data Export**: Download per-course grades & responses as an XLSX workbook.
+- **Data Export**: Download a ZIP with course data, teammate thumbs, presentation ratings, and question files.
 
 ## Tech Stack
 
@@ -165,7 +165,7 @@ popping/
 1. Click **Instructor Login** on your course → enter username + PIN.
 2. Go directly to the control panel for that course.
 3. Control phases, manage students, set questions, select presenting teams.
-4. Export the XLSX workbook at the end of class.
+4. Export the ZIP package at the end of class.
 
 ## Course Flow
 
@@ -173,7 +173,7 @@ popping/
 2. **DISCUSSION** → Instructor posts a question; students discuss and peer-grade.
 3. **COMPETITION** → Teams present one at a time (instructor selects active team).
 4. **COMPETITION** → Non-presenting teams rate the active presentation.
-5. **ENDED** → Instructor exports the XLSX workbook and uploads results to Canvas.
+5. **ENDED** → Instructor exports the ZIP package and uploads the workbook results to Canvas.
 
 ## Managing Courses
 

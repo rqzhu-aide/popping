@@ -1109,6 +1109,35 @@ input:focus, textarea:focus {
 }
 
 /* Discussion question cards */
+.discussion-post-status {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    margin: 0 0 14px;
+    padding: 10px 12px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    color: var(--text-muted);
+    background: var(--bg);
+    font-size: 0.9rem;
+    font-weight: 600;
+}
+.discussion-status-dot {
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+    background: var(--text-muted);
+    flex: 0 0 auto;
+}
+.discussion-post-status.has-posted-question {
+    color: var(--success-text);
+    background: var(--success-soft);
+    border-color: var(--success-border);
+}
+.discussion-post-status.has-posted-question .discussion-status-dot {
+    background: var(--success);
+    box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.16);
+}
 .disc-questions-list {
     display: flex;
     flex-direction: column;
@@ -1118,6 +1147,23 @@ input:focus, textarea:focus {
     border: 1px solid var(--border);
     border-radius: 8px;
     overflow: hidden;
+}
+.disc-question-card.is-posted {
+    border-color: var(--success-border);
+    box-shadow: 0 0 0 2px rgba(16, 185, 129, 0.12);
+}
+.posted-question-badge {
+    color: var(--success-text);
+    background: var(--success-soft);
+    border-radius: 999px;
+    padding: 3px 8px;
+    font-size: 0.75rem;
+    font-weight: 700;
+    white-space: nowrap;
+}
+.post-question-btn:disabled {
+    opacity: 0.75;
+    cursor: default;
 }
 .disc-question-header {
     display: flex;
