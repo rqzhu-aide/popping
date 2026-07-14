@@ -61,12 +61,12 @@ def init_demo_db():
         "SELECT id FROM courses WHERE slug = 'demo'"
     ).fetchone()['id']
 
-    # Teams (4 teams)
+    # Teams (4 teams) — colors only, names default to "Team 1", "Team 2", ...
     teams_data = [
-        ('Team Alpha', '#ef4444'),
-        ('Team Beta', '#3b82f6'),
-        ('Team Gamma', '#10b981'),
-        ('Team Delta', '#f59e0b'),
+        ('Team 1', '#ef4444'),
+        ('Team 2', '#3b82f6'),
+        ('Team 3', '#10b981'),
+        ('Team 4', '#f59e0b'),
     ]
     for name, color in teams_data:
         conn.execute(
@@ -152,7 +152,7 @@ def init_demo_db():
     print(f"Demo database created at {DB_PATH}")
     print(f"  Instructor: demo_instructor")
     print(f"  Students:   20 (demo001-demo020, PIN='demo')")
-    print(f"  Teams:      4 (Alpha, Beta, Gamma, Delta)")
+    print(f"  Teams:      4 (Team 1–4)")
     print(f"  Questions:  {len(questions)}")
 
 

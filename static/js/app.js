@@ -157,8 +157,6 @@ const PHASES_WITH_TEAM = ['competition'];
 
 // Track poll state
 let pollSelections = { q1: 0, q2: 0 };
-let pollInterval = null;
-let ratingSubmitted = false;       // has the student submitted for the current presentation?
 let lastRatedPresentationKey = null; // track active presentation to reset the rating UI
 let lastRenderedQuestionKey = null; // track active question to avoid re-rendering same HTML
 let lastKnownQuestionId = null;    // lets the server omit unchanged question bodies
@@ -176,7 +174,7 @@ if (dashboard) {
     async function pollOnce() {
         if (_pollInProgress) return;
         _pollInProgress = true;
-        let interval = 5000;
+        let interval = 1000;
         try {
             const questionQuery = lastKnownQuestionId == null
                 ? ''
@@ -305,6 +303,16 @@ if (dashboard) {
             // "Now Presenting" card shows for all teams; grading card hidden for presenting team
             if (teamGradeSec) teamGradeSec.style.display = (hasActivePresentation && !amPresenting) ? 'block' : 'none';
 
+            // Update rating prompt with the presenting team's name
+            const ratingPrompt = document.getElementById('rating-prompt');
+            if (ratingPrompt) {
+                if (hasActivePresentation && !amPresenting && state.active_team) {
+                    ratingPrompt.innerHTML = `Please rate <strong style="color:${state.active_team.color}">${state.active_team.name}</strong>`;
+                } else {
+                    ratingPrompt.textContent = '';
+                }
+            }
+
             // Detect new presentation — reset rating UI even if the same team presents again
             const currentTeamId = state.active_team ? state.active_team.id : null;
             const currentPresentationKey = state.poll_question_key ||
@@ -313,7 +321,6 @@ if (dashboard) {
                     : currentTeamId);
             if (currentPresentationKey !== lastRatedPresentationKey) {
                 lastRatedPresentationKey = currentPresentationKey;
-                ratingSubmitted = false;
                 pollSelections = { q1: 0, q2: 0 };
                 // Reset star visuals
                 document.querySelectorAll('.star').forEach(s => {
@@ -325,8 +332,10 @@ if (dashboard) {
                 if (sBtn) {
                     sBtn.disabled = false;
                     sBtn.textContent = 'Submit Rating';
-                    sBtn.classList.remove('btn-submitted');
                 }
+                // Clear submitted-rating status
+                const rStatus = document.getElementById('rating-status');
+                if (rStatus) rStatus.style.display = 'none';
             }
 
             if (show) {
@@ -660,7 +669,7 @@ if (instructor) {
     async function instructorPollOnce() {
         if (_instrPollInProgress) return;
         _instrPollInProgress = true;
-        let interval = 5000;
+        let interval = 1000;
         try {
             const questionQuery = _instrKnownQuestionId == null
                 ? ''
@@ -1332,26 +1341,28 @@ window.submitRating = async function() {
         return;
     }
     const btn = document.getElementById('btn-submit-rating');
-    if (btn) btn.disabled = true;
+    if (btn) { btn.disabled = true; btn.textContent = 'Submitting...'; }
     try {
         const data = await postJSON('/api/submit_rating', {
             q1_developed: pollSelections.q1,
             q2_easy: pollSelections.q2
         });
         if (data && data.success) {
-            if (btn) {
-                btn.textContent = '✓ Submitted';
-                btn.classList.add('btn-submitted');
-            }
-            ratingSubmitted = true;
             showToast('Rating submitted', 'success');
+            // Show current rating
+            const rStatus = document.getElementById('rating-status');
+            if (rStatus) {
+                rStatus.textContent = `Your current rating: ${pollSelections.q1}/5 developed · ${pollSelections.q2}/5 clear`;
+                rStatus.style.display = 'block';
+            }
         } else {
-            if (btn) btn.disabled = false;
             showToast(data?.error || 'Failed to submit rating', 'error');
         }
     } catch (e) {
-        if (btn) btn.disabled = false;
         showToast('Network error — please try again', 'error');
+    } finally {
+        // Always re-enable — rating stays open until instructor closes the presentation
+        if (btn) { btn.disabled = false; btn.textContent = 'Submit Rating'; }
     }
 };
 

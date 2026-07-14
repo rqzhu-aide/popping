@@ -571,7 +571,7 @@ def demo_student():
         flash('Demo is not available right now. Please try again later.', 'error')
         return redirect(url_for('demo'))
     session.clear()
-    # Pick the first student (Alice Chen, Team Alpha)
+    # Pick the first student (Alice Chen, Team 1)
     student = query_db('demo',
         'SELECT * FROM students ORDER BY id LIMIT 1', one=True)
     if not student:
@@ -1144,12 +1144,13 @@ def api_poll():
         top_teams = [{'name': t['name']} for t in all_ranked[:3]]
 
     # --- Adaptive interval hint ---
-    if state_data['phase'] == 'competition':
-        poll_interval = 4000
-    elif state_data['phase'] == 'discussion':
+    # 1s during all active phases so instructor actions (phase changes, posting
+    # questions, starting polls, selecting teams) appear within 1 second.
+    # Ended phase has no live actions — 5s is plenty.
+    if state_data['phase'] == 'ended':
         poll_interval = 5000
     else:
-        poll_interval = 8000
+        poll_interval = 1000
 
     return jsonify({
         'state': state_data,

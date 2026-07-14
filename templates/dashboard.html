@@ -22,8 +22,9 @@
             <p class="current-question" id="current-question">Waiting for question...</p>
         </div>
     </section>
+    {% endif %}
 
-    <!-- Now Presenting: banner, question, timer -->
+    <!-- Now Presenting: visible to ALL students during competition -->
     <section class="card team-grading" id="team-section" style="display:none;">
         <h2>Now Presenting</h2>
         <div class="presenting-banner" id="presenting-banner">
@@ -43,9 +44,10 @@
         </div>
     </section>
 
-    <!-- Rate the Presentation: grading cards + poll pulse -->
+    <!-- Rate the Presentation: visible to all non-presenting students -->
     <section class="card team-grading" id="team-grading-section" style="display:none;">
         <h2>Rate the Presentation</h2>
+        <p id="rating-prompt" class="hint" style="margin-bottom:12px;"></p>
         <div class="poll-pulse" id="poll-pulse" style="display:none;">
             <span class="pulse-dot"></span>
             <span id="poll-pulse-text">⏱ 30s left to rate!</span>
@@ -72,9 +74,9 @@
                 </div>
             </div>
             <button class="btn btn-primary" id="btn-submit-rating" onclick="submitRating()">Submit Rating</button>
+            <p id="rating-status" class="rating-status" style="display:none; margin-top:10px; font-weight:600; color:var(--success-text);"></p>
         </div>
     </section>
-    {% endif %}
 
     <!-- Team section -->
     {% if not team %}

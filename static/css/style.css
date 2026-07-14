@@ -247,7 +247,6 @@ a:visited:hover { color: var(--primary-hover); }
 
 .btn-primary { background: var(--primary); }
 .btn-primary:hover { background: var(--primary-hover); }
-.btn-submitted { background: var(--success, #22c55e) !important; cursor: default; }
 
 .btn-secondary {
     background: var(--surface);
@@ -568,26 +567,6 @@ input:focus, textarea:focus {
 }
 .presenting-label { display: block; font-size: 0.8rem; color: var(--text-muted); margin-bottom: 4px; }
 .presenting-name { font-size: 1.3rem; font-weight: 700; }
-
-.discussion-list {
-    margin-top: 16px;
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
-    max-height: 300px;
-    overflow-y: auto;
-}
-.discussion-item {
-    background: var(--bg);
-    border-radius: 8px;
-    padding: 12px;
-    font-size: 0.9rem;
-}
-.discussion-item .meta {
-    font-size: 0.78rem;
-    color: var(--text-muted);
-    margin-bottom: 4px;
-}
 
 .question-box {
     background: var(--accent-bg);
