@@ -78,7 +78,7 @@ REQUIRED_COURSE_SCHEMA = {
     },
     'teams': {'id', 'course_id', 'name', 'color'},
     'students': {
-        'id', 'course_id', 'student_id', 'name', 'pin', 'team_id', 'is_active'
+        'id', 'course_id', 'student_id', 'name', 'pin', 'team_id'
     },
     'questions': {'id', 'course_id', 'question_num', 'question_text'},
     'course_state': {

@@ -251,7 +251,7 @@ def test_database_missing_a_required_column_is_rejected(catalog_env):
     _write_config(catalog_env, slug)
     db_path = _write_database(catalog_env, slug)
     with sqlite3.connect(db_path) as db:
-        db.execute("ALTER TABLE students DROP COLUMN is_active")
+        db.execute("ALTER TABLE students DROP COLUMN pin")
 
     assert app_module._course_availability(slug)["status"] == "invalid"
 
@@ -263,6 +263,7 @@ def test_legacy_database_is_available_then_migrated_on_login(catalog_env):
     with sqlite3.connect(db_path) as db:
         db.execute("DROP TABLE teammate_thumbs")
         db.execute("DROP TABLE presentation_ratings")
+        db.execute("ALTER TABLE students DROP COLUMN is_active")
     database._schema_checked.discard(slug)
     app_module._clear_course_availability_cache(slug)
 
@@ -275,7 +276,11 @@ def test_legacy_database_is_available_then_migrated_on_login(catalog_env):
                 "SELECT name FROM sqlite_master WHERE type = 'table'"
             )
         }
+        student_columns = {
+            row[1] for row in db.execute("PRAGMA table_info(students)")
+        }
     assert {"teammate_thumbs", "presentation_ratings"}.issubset(tables)
+    assert "is_active" in student_columns
 
 
 def test_availability_validation_is_cached_across_login_burst(
