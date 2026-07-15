@@ -72,17 +72,18 @@ MAX_EXPORT_ROWS = 100000
 MAX_EXPORT_BYTES = 50 * 1024 * 1024
 COURSE_AVAILABILITY_TTL = 30
 REQUIRED_COURSE_SCHEMA = {
-    'instructors': {'id', 'name'},
-    'courses': {'id', 'slug', 'instructor_id', 'is_active'},
-    'teams': {'id', 'course_id'},
-    'students': {'id', 'course_id', 'student_id', 'is_active'},
-    'questions': {'id', 'course_id', 'question_num', 'question_text'},
-    'course_state': {'course_id', 'phase'},
-    'presentation_ratings': {
-        'course_id', 'student_id', 'question_key', 'q1_developed', 'q2_easy'
+    'instructors': {'id', 'username', 'name', 'pin'},
+    'courses': {
+        'id', 'name', 'code', 'semester', 'slug', 'instructor_id', 'is_active'
     },
-    'teammate_thumbs': {
-        'course_id', 'session_key', 'question_key', 'grader_id', 'recipient_id'
+    'teams': {'id', 'course_id', 'name', 'color'},
+    'students': {
+        'id', 'course_id', 'student_id', 'name', 'pin', 'team_id', 'is_active'
+    },
+    'questions': {'id', 'course_id', 'question_num', 'question_text'},
+    'course_state': {
+        'id', 'course_id', 'phase', 'active_team_id', 'active_question_id',
+        'current_question', 'presentation_started_at'
     },
 }
 REQUIRED_COURSE_TABLES = frozenset(REQUIRED_COURSE_SCHEMA)

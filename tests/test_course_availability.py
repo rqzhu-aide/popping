@@ -256,6 +256,28 @@ def test_database_missing_a_required_column_is_rejected(catalog_env):
     assert app_module._course_availability(slug)["status"] == "invalid"
 
 
+def test_legacy_database_is_available_then_migrated_on_login(catalog_env):
+    slug = "legacy_course"
+    _write_config(catalog_env, slug)
+    db_path = _write_database(catalog_env, slug)
+    with sqlite3.connect(db_path) as db:
+        db.execute("DROP TABLE teammate_thumbs")
+        db.execute("DROP TABLE presentation_ratings")
+    database._schema_checked.discard(slug)
+    app_module._clear_course_availability_cache(slug)
+
+    assert app_module._course_availability(slug)["status"] == "ready"
+    assert app_module.app.test_client().get(f"/login/{slug}").status_code == 200
+
+    with sqlite3.connect(db_path) as db:
+        tables = {
+            row[0] for row in db.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            )
+        }
+    assert {"teammate_thumbs", "presentation_ratings"}.issubset(tables)
+
+
 def test_availability_validation_is_cached_across_login_burst(
         catalog_env, monkeypatch):
     slug = "cached_course"
