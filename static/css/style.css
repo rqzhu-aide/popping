@@ -242,31 +242,37 @@ a:visited:hover { color: var(--primary-hover); }
     color: #fff;
     background: var(--primary);
 }
-.btn:hover { background: var(--primary-hover); }
-.btn:active { transform: translateY(1px); }
+.btn:not(:disabled):hover { background: var(--primary-hover); }
+.btn:not(:disabled):active { transform: translateY(1px); }
+.btn:disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
+    transform: none;
+    box-shadow: none;
+}
 
 .btn-primary { background: var(--primary); }
-.btn-primary:hover { background: var(--primary-hover); }
+.btn-primary:not(:disabled):hover { background: var(--primary-hover); }
 
 .btn-secondary {
     background: var(--surface);
     color: var(--text);
     border: 1px solid var(--border);
 }
-.btn-secondary:hover { background: var(--bg); }
+.btn-secondary:not(:disabled):hover { background: var(--bg); }
 
 .btn-danger { background: var(--danger); }
-.btn-danger:hover { background: var(--danger-hover); }
+.btn-danger:not(:disabled):hover { background: var(--danger-hover); }
 
 .btn-warning { background: var(--warning); color: #78350f; }
-.btn-warning:hover { background: #d97706; }
+.btn-warning:not(:disabled):hover { background: #d97706; }
 
 .btn-outline {
     background: var(--surface);
     color: var(--text);
     border: 1px solid var(--border);
 }
-.btn-outline:hover, .btn-outline.active {
+.btn-outline:not(:disabled):hover, .btn-outline.active {
     border-color: var(--primary);
     color: var(--primary);
     background: var(--accent-bg);
@@ -384,6 +390,20 @@ input:focus, textarea:focus {
     gap: 10px;
 }
 .dash-header h1 { margin: 0; font-size: 1.6rem; }
+.dashboard-state {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 6px;
+}
+.connection-status {
+    max-width: 320px;
+    color: var(--error-text);
+    font-size: 0.8rem;
+    font-weight: 600;
+    text-align: right;
+}
+.connection-status.recovered { color: var(--success-text); }
 
 .phase-badge {
     font-size: 0.95rem;
@@ -575,6 +595,14 @@ input:focus, textarea:focus {
     margin-bottom: 12px;
     font-weight: 600;
 }
+.team-card:disabled {
+    cursor: not-allowed;
+    opacity: 0.55;
+    transform: none;
+}
+.team-capacity { color: var(--text-muted); font-size: 0.78rem; }
+.current-question h3 { margin: 0 0 10px; }
+.initial-question-content { white-space: pre-wrap; }
 
 .phase-buttons, .team-buttons {
     display: flex;
@@ -842,6 +870,11 @@ input:focus, textarea:focus {
     box-shadow: var(--shadow-lg);
     transform: translateY(-2px);
 }
+.course-card-unavailable:hover {
+    border-color: var(--border);
+    box-shadow: none;
+    transform: none;
+}
 .course-card .course-name {
     font-size: 1.15rem;
     font-weight: 700;
@@ -856,6 +889,14 @@ input:focus, textarea:focus {
 .course-card .course-instructor {
     font-size: 0.85rem;
     color: var(--text-muted);
+}
+.course-availability {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 12px;
+    color: var(--text-muted);
+    font-size: 0.85rem;
 }
 .course-card .course-stats {
     display: flex;
@@ -1247,8 +1288,18 @@ input:focus, textarea:focus {
     .team-layout {
         flex-direction: column;
     }
-    .team-info {
-        flex: none;
+    .team-info,
+    .team-table-wrapper {
+        flex: 0 0 auto;
+        width: 100%;
+        min-width: 0;
+        max-width: none;
+    }
+    .team-table-wrapper {
+        align-items: stretch;
+    }
+    .team-table-wrapper > .btn {
+        align-self: flex-end;
     }
 }
 
@@ -1338,9 +1389,18 @@ input:focus, textarea:focus {
 .thumb-btn:hover {
     transform: scale(1.3);
 }
+.thumb-btn:disabled {
+    cursor: not-allowed;
+    opacity: 0.5;
+    transform: none;
+}
 .thumb-btn.active-green {
     background: var(--success-soft);
     border-color: #86efac;
+}
+.thumb-btn:focus-visible {
+    outline: 3px solid var(--primary);
+    outline-offset: 2px;
 }
 
 /* ===== DEMO MODE STYLES ===== */
@@ -1492,10 +1552,25 @@ input:focus, textarea:focus {
     display: flex;
     gap: 6px;
     font-size: 1.6rem;
-    cursor: pointer;
 }
-.star { color: var(--border); transition: color 0.15s; }
+.star {
+    appearance: none;
+    background: transparent;
+    border: 0;
+    color: var(--border);
+    cursor: pointer;
+    font: inherit;
+    line-height: 1;
+    padding: 3px;
+    transition: color 0.15s, transform 0.15s;
+}
 .star:hover, .star.active { color: #f59e0b; }
+.star:hover { transform: scale(1.08); }
+.star:focus-visible {
+    outline: 3px solid var(--primary);
+    outline-offset: 1px;
+    border-radius: 4px;
+}
 
 /* ===== You Are Up ===== */
 .you-are-up {
@@ -1515,6 +1590,12 @@ input:focus, textarea:focus {
     padding: 14px;
 }
 .history-panel h4 { margin: 0 0 10px; font-size: 1rem; }
+.history-heading {
+    align-items: baseline;
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+}
 .history-item {
     display: flex;
     justify-content: space-between;
@@ -1694,6 +1775,43 @@ html.light .student-timer {
     from { opacity: 0; transform: translateX(40px); }
     to   { opacity: 1; transform: translateX(0); }
 }
+
+/* ===== Roster replacement preview ===== */
+.modal-backdrop {
+    align-items: center;
+    background: rgba(15, 23, 42, 0.72);
+    display: flex;
+    inset: 0;
+    justify-content: center;
+    padding: 20px;
+    position: fixed;
+    z-index: 1200;
+}
+.modal-backdrop[hidden] { display: none; }
+.modal-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow-lg);
+    max-width: 520px;
+    padding: 24px;
+    width: 100%;
+}
+.modal-card h2 { margin-top: 0; }
+.modal-card ul { margin: 12px 0; padding-left: 22px; }
+.modal-actions {
+    display: flex;
+    gap: 10px;
+    justify-content: flex-end;
+    margin-top: 20px;
+}
+.roster-replace-warning,
+.capacity-danger,
+.text-danger { color: var(--danger); }
+.roster-replace-warning { font-weight: 600; }
+.capacity-summary,
+.participation-count { margin: 12px 0 0; color: var(--text-muted); }
+.capacity-summary.capacity-danger { color: var(--danger); font-weight: 600; }
 @keyframes toast-out {
     from { opacity: 1; transform: translateX(0); }
     to   { opacity: 0; transform: translateX(40px); }

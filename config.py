@@ -23,3 +23,4 @@ DATABASE_SCHEMA = os.path.join(BASE_DIR, 'popping.sql')
 SECRET_KEY = os.environ.get('SECRET_KEY', 'dev-secret-key-change-in-production')
 SESSION_COOKIE_SAMESITE = 'Lax'
 SESSION_COOKIE_HTTPONLY = True
+MAX_CONTENT_LENGTH = 2 * 1024 * 1024

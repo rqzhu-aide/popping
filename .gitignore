@@ -217,6 +217,8 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 
-# SQLite databases (per-course)
-data/**/popping.db
+# SQLite runtime databases, backups, staged files, and sidecars
+data/**/*.db
+data/**/*.db-*
 popping.db
+popping.db-*

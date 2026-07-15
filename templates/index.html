@@ -27,7 +27,7 @@
         <p class="hint">Choose your course to log in.</p>
         <div class="course-grid">
             {% for c in courses %}
-            <div class="course-card course-card-large">
+            <div class="course-card course-card-large{% if c.availability_status != 'ready' %} course-card-unavailable{% endif %}">
                 <div class="course-name">
                     {% if c.url %}<a href="{{ c.url }}" target="_blank">{% endif %}
                     {{ c.name }}
@@ -37,10 +37,23 @@
                     {% if c.code %}<span class="badge">{{ c.code }}</span>{% endif %}
                     {% if c.semester %}<span class="badge badge-muted">{{ c.semester }}</span>{% endif %}
                 </div>
+                {% if c.instructor_name %}
                 <div class="course-instructor">Instructor: {{ c.instructor_name }}</div>
+                {% endif %}
+                {% if c.availability_status != 'ready' %}
+                <div class="course-availability" role="status">
+                    <span class="badge badge-muted">{% if c.availability_status == 'missing' %}Setup required{% else %}Unavailable{% endif %}</span>
+                    <span>{{ c.availability_message }}</span>
+                </div>
+                {% endif %}
                 <div class="course-actions">
+                    {% if c.availability_status == 'ready' %}
                     <a href="{{ url_for('login', slug=c.slug) }}" class="btn btn-primary">Student Login</a>
                     <a href="{{ url_for('instructor_login', slug=c.slug) }}" class="btn btn-secondary">Instructor Login</a>
+                    {% else %}
+                    <button type="button" class="btn btn-primary" disabled>Student Login</button>
+                    <button type="button" class="btn btn-secondary" disabled>Instructor Login</button>
+                    {% endif %}
                 </div>
             </div>
             {% else %}

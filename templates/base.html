@@ -65,10 +65,24 @@
             Data may be modified or reset at any time.
         </span>
         <a href="{{ url_for('demo_reset') }}" class="demo-banner-reset"
-           onclick="return confirm('Reset demo data? This will restore everything to its initial state.')">
+           data-course-slug="{{ session.slug or '' }}" onclick="return confirmDemoReset()">
             🔄 Reset
         </a>
         <a href="{{ url_for('demo_exit') }}" class="demo-banner-exit">Exit Demo →</a>
+    </div>
+    {% endif %}
+
+    {% if session.instructor_id %}
+    <div class="modal-backdrop" id="roster-preview-dialog" role="dialog" aria-modal="true"
+         aria-labelledby="roster-preview-title" hidden>
+        <div class="modal-card">
+            <h2 id="roster-preview-title">Confirm Roster Replacement</h2>
+            <div id="roster-preview-summary"></div>
+            <div class="modal-actions">
+                <button type="button" class="btn btn-secondary" onclick="cancelRosterUpload()">Cancel</button>
+                <button type="button" class="btn btn-danger" id="btn-confirm-roster-upload" onclick="confirmRosterUpload()">Replace Roster</button>
+            </div>
+        </div>
     </div>
     {% endif %}
 

@@ -3,7 +3,7 @@ name: Machine Learning in Data Science
 url: https://teazrq.github.io/stat546/index.html
 code: STAT 546
 semester: Fall 2026
-active: true
+active: false
 teams:
 - color: '#ef4444'
 - color: '#3b82f6'

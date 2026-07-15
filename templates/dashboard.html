@@ -3,26 +3,42 @@
 {% block title %}Dashboard - Popping{% endblock %}
 
 {% block content %}
-<div class="dashboard" data-phase="{{ state.phase }}" data-you="{{ student.student_id }}">
+<div class="dashboard" data-phase="{{ state.phase }}" data-you="{{ student.student_id }}"
+     data-course-slug="{{ course.slug }}"
+     data-team-id="{{ team.id if team else '' }}"
+     data-teams-locked="{{ 1 if teams_locked else 0 }}"
+     data-max-teams="{{ max_teams if max_teams is defined else teams|length }}"
+     data-max-members="{{ max_members if max_members is defined else '' }}"
+     data-discussion-key="{{ state.current_discussion_key or '' }}">
     <header class="dash-header">
         <div>
             <h1>Hello, {{ student | display_name }}</h1>
             <p class="course-name-sm">{{ course.name }}</p>
         </div>
-        <div class="phase-badge phase-{{ state.phase }}">
-            Phase: {{ state.phase | phase_label }}
+        <div class="dashboard-state">
+            <div class="phase-badge phase-{{ state.phase }}">
+                Phase: {{ state.phase | phase_label }}
+            </div>
+            <div id="connection-status" class="connection-status" role="status"
+                 aria-live="polite" hidden></div>
         </div>
     </header>
 
     <!-- Main activity sections (top when active) -->
-    {% if team %}
-    <section class="card discussion" id="discussion-section">
+    <section class="card discussion" id="discussion-section"
+             style="{% if state.phase != 'discussion' %}display:none{% endif %}">
         <h2>Discussion</h2>
         <div class="question-box">
-            <p class="current-question" id="current-question">Waiting for question...</p>
+            <div class="current-question markdown-content" id="current-question">
+                {% if state.current_discussion_key %}
+                <h3>{{ state.current_discussion_title or 'Discussion question' }}</h3>
+                <div class="initial-question-content">{{ state.current_discussion_content or '' }}</div>
+                {% else %}
+                Waiting for the instructor to post a question...
+                {% endif %}
+            </div>
         </div>
     </section>
-    {% endif %}
 
     <!-- Now Presenting: visible to ALL students during competition -->
     <section class="card team-grading" id="team-section" style="display:none;">
@@ -55,22 +71,22 @@
         <div class="poll-section" id="poll-section" style="display:none;">
             <div class="poll-card">
                 <p>Was the team's answer well-developed and convincing?</p>
-                <div class="star-row" data-question="q1">
-                    <span class="star" data-value="1">&#9734;</span>
-                    <span class="star" data-value="2">&#9734;</span>
-                    <span class="star" data-value="3">&#9734;</span>
-                    <span class="star" data-value="4">&#9734;</span>
-                    <span class="star" data-value="5">&#9734;</span>
+                <div class="star-row" data-question="q1" role="group" aria-label="Answer quality rating">
+                    <button type="button" class="star" data-value="1" aria-label="1 out of 5" aria-pressed="false">&#9734;</button>
+                    <button type="button" class="star" data-value="2" aria-label="2 out of 5" aria-pressed="false">&#9734;</button>
+                    <button type="button" class="star" data-value="3" aria-label="3 out of 5" aria-pressed="false">&#9734;</button>
+                    <button type="button" class="star" data-value="4" aria-label="4 out of 5" aria-pressed="false">&#9734;</button>
+                    <button type="button" class="star" data-value="5" aria-label="5 out of 5" aria-pressed="false">&#9734;</button>
                 </div>
             </div>
             <div class="poll-card">
                 <p>Was the team's explanation easy to follow?</p>
-                <div class="star-row" data-question="q2">
-                    <span class="star" data-value="1">&#9734;</span>
-                    <span class="star" data-value="2">&#9734;</span>
-                    <span class="star" data-value="3">&#9734;</span>
-                    <span class="star" data-value="4">&#9734;</span>
-                    <span class="star" data-value="5">&#9734;</span>
+                <div class="star-row" data-question="q2" role="group" aria-label="Explanation clarity rating">
+                    <button type="button" class="star" data-value="1" aria-label="1 out of 5" aria-pressed="false">&#9734;</button>
+                    <button type="button" class="star" data-value="2" aria-label="2 out of 5" aria-pressed="false">&#9734;</button>
+                    <button type="button" class="star" data-value="3" aria-label="3 out of 5" aria-pressed="false">&#9734;</button>
+                    <button type="button" class="star" data-value="4" aria-label="4 out of 5" aria-pressed="false">&#9734;</button>
+                    <button type="button" class="star" data-value="5" aria-label="5 out of 5" aria-pressed="false">&#9734;</button>
                 </div>
             </div>
             <button class="btn btn-primary" id="btn-submit-rating" onclick="submitRating()">Submit Rating</button>
@@ -82,18 +98,25 @@
     {% if not team %}
     <section class="card team-select">
         {% if state.phase == 'setup' %}
+        {% if teams_locked %}
+        <h2>Team Selection Locked</h2>
+        <p class="hint">The instructor has temporarily locked team changes.</p>
+        {% else %}
         <h2>Select Your Team</h2>
         <p class="hint">Choose a team to join. You can change this during setup.</p>
         <div class="team-grid">
             {% for t in teams %}
+            {% set is_full = max_members and t.member_count >= max_members %}
             <button class="team-card" data-team-id="{{ t.id }}"
                     style="--team-color: {{ t.color }}"
-                    onclick="joinTeam({{ t.id }})">
+                    onclick="joinTeam({{ t.id }})"{% if is_full %} disabled title="Team is full"{% endif %}>
                 <span class="team-dot" style="background: {{ t.color }}"></span>
                 <span class="team-name">{{ t.name }}</span>
+                <span class="team-capacity">{{ t.member_count }}/{{ max_members }}{% if is_full %} · Full{% endif %}</span>
             </button>
             {% endfor %}
         </div>
+        {% endif %}
         {% else %}
         <h2>Waiting for Team Assignment</h2>
         <p class="hint">Team selection is closed. Please ask your instructor to assign you to a team.</p>
@@ -142,7 +165,12 @@
                             {% if m.name and m.name != m.student_id %}
                             <span class="card-id">{{ m.student_id }}</span>
                             {% endif %}
-                            <button class="thumb-btn thumb-up" aria-label="Thumbs up to {{ m.name or m.student_id }}" onclick="gradeTeammate(this, {{ m.student_id | tojson }})">👍</button>
+                            <button class="thumb-btn thumb-up"
+                                    aria-label="Thumbs up to {{ m.name or m.student_id }}"
+                                    aria-pressed="false"
+                                    data-question-available="{{ 1 if state.current_discussion_key else 0 }}"
+                                    {% if not state.current_discussion_key %}disabled title="Wait for the instructor to post a question"{% endif %}
+                                    onclick="gradeTeammate(this, this.closest('.teammate-card').dataset.studentId)">👍</button>
                         </div>
                     </div>
                     {% endfor %}
@@ -169,7 +197,7 @@
     <!-- Roster (always bottom) -->
     <section class="card roster">
         <div style="display:flex; align-items:center; justify-content:space-between;">
-            <h2 style="margin:0;">Class Roster</h2>
+            <h2 style="margin:0;">Team Overview</h2>
             <button class="btn btn-sm btn-primary" onclick="toggleRoster()" id="btn-toggle-roster">Hide</button>
         </div>
         <div id="roster-content">
