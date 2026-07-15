@@ -193,6 +193,7 @@ def _ensure_schema_locked(db):
     ).fetchall()]
     for column, definition in (
         ('session_key', 'INTEGER DEFAULT 0'),
+        ('week_num', 'INTEGER'),
         ('presenting_team_id', 'INTEGER'),
         ('presenting_team_name', 'TEXT'),
         ('question_id', 'INTEGER'),
@@ -209,6 +210,7 @@ def _ensure_schema_locked(db):
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         course_id INTEGER NOT NULL,
         session_key INTEGER NOT NULL,
+        week_num INTEGER,
         question_key TEXT NOT NULL,
         source_question_key TEXT,
         question_title TEXT,
@@ -231,6 +233,7 @@ def _ensure_schema_locked(db):
         'PRAGMA table_info(teammate_thumbs)'
     ).fetchall()]
     for column, definition in (
+        ('week_num', 'INTEGER'),
         ('source_question_key', 'TEXT'),
         ('question_title', 'TEXT'),
         ('grader_team_id', 'INTEGER'),
@@ -246,10 +249,35 @@ def _ensure_schema_locked(db):
         '''UPDATE teammate_thumbs SET source_question_key = question_key
            WHERE source_question_key IS NULL'''
     )
+    db.execute(
+        '''UPDATE presentation_ratings
+           SET week_num = (
+               SELECT COALESCE(q.week_num, 1)
+               FROM questions q
+               WHERE q.id = presentation_ratings.question_id
+                 AND q.course_id = presentation_ratings.course_id
+           )
+           WHERE week_num IS NULL AND question_id IS NOT NULL'''
+    )
+    unknown_thumb_weeks = db.execute(
+        '''SELECT id, source_question_key FROM teammate_thumbs
+           WHERE week_num IS NULL'''
+    ).fetchall()
+    for thumb in unknown_thumb_weeks:
+        match = re.match(r'^week-(\d+)-', thumb['source_question_key'] or '')
+        if match:
+            db.execute(
+                'UPDATE teammate_thumbs SET week_num = ? WHERE id = ?',
+                [int(match.group(1)), thumb['id']],
+            )
     db.execute('''CREATE INDEX IF NOT EXISTS idx_thumbs_current
                   ON teammate_thumbs(course_id, session_key, question_key)''')
+    db.execute('''CREATE INDEX IF NOT EXISTS idx_thumbs_export_week
+                  ON teammate_thumbs(course_id, week_num)''')
     db.execute('''CREATE INDEX IF NOT EXISTS idx_ratings_presentation
                   ON presentation_ratings(course_id, question_key)''')
+    db.execute('''CREATE INDEX IF NOT EXISTS idx_ratings_export_week
+                  ON presentation_ratings(course_id, week_num)''')
     db.execute('''INSERT OR IGNORE INTO teammate_thumbs
                   (course_id, session_key, question_key, source_question_key,
                    grader_id, recipient_id, created_at, updated_at)

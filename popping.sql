@@ -137,6 +137,7 @@ CREATE TABLE presentation_ratings (
     student_id INTEGER NOT NULL,
     question_key TEXT NOT NULL,
     session_key INTEGER DEFAULT 0,
+    week_num INTEGER,
     presenting_team_id INTEGER,
     presenting_team_name TEXT,
     question_id INTEGER,
@@ -161,6 +162,7 @@ CREATE TABLE teammate_thumbs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     course_id INTEGER NOT NULL,
     session_key INTEGER NOT NULL,
+    week_num INTEGER,
     question_key TEXT NOT NULL,
     source_question_key TEXT,
     question_title TEXT,
@@ -182,3 +184,9 @@ CREATE TABLE teammate_thumbs (
 
 CREATE INDEX idx_thumbs_current
     ON teammate_thumbs(course_id, session_key, question_key);
+
+CREATE INDEX idx_thumbs_export_week
+    ON teammate_thumbs(course_id, week_num);
+
+CREATE INDEX idx_ratings_export_week
+    ON presentation_ratings(course_id, week_num);

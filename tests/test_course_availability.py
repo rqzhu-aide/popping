@@ -279,8 +279,103 @@ def test_legacy_database_is_available_then_migrated_on_login(catalog_env):
         student_columns = {
             row[1] for row in db.execute("PRAGMA table_info(students)")
         }
+        thumb_columns = {
+            row[1] for row in db.execute("PRAGMA table_info(teammate_thumbs)")
+        }
+        rating_columns = {
+            row[1] for row in db.execute(
+                "PRAGMA table_info(presentation_ratings)"
+            )
+        }
     assert {"teammate_thumbs", "presentation_ratings"}.issubset(tables)
     assert "is_active" in student_columns
+    assert "week_num" in thumb_columns
+    assert "week_num" in rating_columns
+
+
+def test_activity_week_migration_backfills_only_inferable_rows(catalog_env):
+    slug = "legacy_activity_weeks"
+    _write_config(catalog_env, slug)
+    db_path = _write_database(catalog_env, slug)
+    with sqlite3.connect(db_path) as db:
+        course_id = db.execute("SELECT id FROM courses").fetchone()[0]
+        team_id = db.execute(
+            "INSERT INTO teams (course_id, name) VALUES (?, 'Team 1')",
+            (course_id,),
+        ).lastrowid
+        student_1 = db.execute(
+            """INSERT INTO students
+               (course_id, student_id, name, pin, team_id)
+               VALUES (?, 's1', 'Student 1', '1111', ?)""",
+            (course_id, team_id),
+        ).lastrowid
+        student_2 = db.execute(
+            """INSERT INTO students
+               (course_id, student_id, name, pin, team_id)
+               VALUES (?, 's2', 'Student 2', '2222', ?)""",
+            (course_id, team_id),
+        ).lastrowid
+        question_id = db.execute(
+            """INSERT INTO questions
+               (course_id, question_num, question_text, title, week_num,
+                source_key)
+               VALUES (?, 1, 'Week 2', 'Week 2', 2, 'presentation:2:1')""",
+            (course_id,),
+        ).lastrowid
+        db.execute("DROP INDEX idx_thumbs_export_week")
+        db.execute("DROP INDEX idx_ratings_export_week")
+        db.execute("ALTER TABLE teammate_thumbs DROP COLUMN week_num")
+        db.execute("ALTER TABLE presentation_ratings DROP COLUMN week_num")
+        db.execute(
+            """INSERT INTO teammate_thumbs
+               (course_id, session_key, question_key, source_question_key,
+                grader_id, recipient_id)
+               VALUES (?, 1, 'inferable-thumb', 'week-2-shared-question',
+                       ?, ?)""",
+            (course_id, student_1, student_2),
+        )
+        db.execute(
+            """INSERT INTO teammate_thumbs
+               (course_id, session_key, question_key, source_question_key,
+                grader_id, recipient_id)
+               VALUES (?, 1, 'unknown-thumb', 'manual:legacy', ?, ?)""",
+            (course_id, student_1, student_2),
+        )
+        db.execute(
+            """INSERT INTO presentation_ratings
+               (course_id, student_id, question_key, session_key, question_id,
+                q1_developed, q2_easy)
+               VALUES (?, ?, 'inferable-rating', 1, ?, 4, 5)""",
+            (course_id, student_1, question_id),
+        )
+        db.execute(
+            """INSERT INTO presentation_ratings
+               (course_id, student_id, question_key, session_key, question_id,
+                q1_developed, q2_easy)
+               VALUES (?, ?, 'unknown-rating', 1, NULL, 3, 3)""",
+            (course_id, student_1),
+        )
+        db.commit()
+    database._schema_checked.discard(slug)
+    app_module._clear_course_availability_cache(slug)
+
+    assert app_module.app.test_client().get(f"/login/{slug}").status_code == 200
+
+    with sqlite3.connect(db_path) as db:
+        thumb_weeks = dict(db.execute(
+            "SELECT question_key, week_num FROM teammate_thumbs"
+        ))
+        rating_weeks = dict(db.execute(
+            "SELECT question_key, week_num FROM presentation_ratings"
+        ))
+    assert thumb_weeks == {
+        "inferable-thumb": 2,
+        "unknown-thumb": None,
+    }
+    assert rating_weeks == {
+        "inferable-rating": 2,
+        "unknown-rating": None,
+    }
 
 
 def test_availability_validation_is_cached_across_login_burst(

@@ -2152,13 +2152,17 @@ def grade_peer():
             team_names = {row['id']: row['name'] for row in team_rows}
             db.execute(
                 '''INSERT INTO teammate_thumbs
-                   (course_id, session_key, question_key, source_question_key,
-                    question_title, grader_id, recipient_id,
+                   (course_id, session_key, week_num, question_key,
+                    source_question_key, question_title, grader_id, recipient_id,
                     grader_team_id, grader_team_name,
                     recipient_team_id, recipient_team_name)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(course_id, session_key, question_key, grader_id, recipient_id)
                    DO UPDATE SET
+                       week_num = COALESCE(
+                           teammate_thumbs.week_num,
+                           excluded.week_num
+                       ),
                        source_question_key = COALESCE(
                            teammate_thumbs.source_question_key,
                            excluded.source_question_key
@@ -2186,6 +2190,7 @@ def grade_peer():
                        updated_at = CURRENT_TIMESTAMP''',
                 [
                     grader['course_id'], state['session_key'] or 0,
+                    state['discussion_week'] or 1,
                     state['current_discussion_key'],
                     active_discussion_source_key(state),
                     state['current_discussion_title'] or '',
@@ -2306,6 +2311,7 @@ def _finalize_active_presentation(slug, course_id, db=None):
             history.append({
                 'presentation_key': presentation_key,
                 'session_key': state['session_key'] or 0,
+                'week_num': state['discussion_week'] or 1,
                 'title': title,
                 'team_id': state['active_team_id'],
                 'team': team['name'] if team else 'Unknown',
@@ -3978,19 +3984,21 @@ def submit_rating():
     ).fetchone()
     db.execute(
         '''INSERT INTO presentation_ratings
-           (course_id, student_id, question_key, session_key,
+           (course_id, student_id, question_key, session_key, week_num,
             presenting_team_id, presenting_team_name, question_id,
             question_title, rater_team_id, rater_team_name,
             q1_developed, q2_easy)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(course_id, student_id, question_key)
            DO UPDATE SET q1_developed = excluded.q1_developed,
                          q2_easy = excluded.q2_easy,
+                         week_num = excluded.week_num,
                          rater_team_id = excluded.rater_team_id,
                          rater_team_name = excluded.rater_team_name,
                          created_at = CURRENT_TIMESTAMP''',
         [student['course_id'], student['id'], question_key,
-         state['session_key'] or 0, state['active_team_id'],
+         state['session_key'] or 0, state['discussion_week'] or 1,
+         state['active_team_id'],
          presenting_team['name'] if presenting_team else 'Unknown',
          state['active_question_id'],
          (question['title'] or question['question_text']) if question else '',
@@ -4368,6 +4376,7 @@ def export_data(slug):
     db = None
     snapshot_open = False
     try:
+        ensure_schema(slug)
         db = get_db(slug)
         db.execute('BEGIN')
         snapshot_open = True
@@ -4385,32 +4394,53 @@ def export_data(slug):
             [cid],
             one=True,
         )
+        current_week = (
+            state_row['discussion_week'] if state_row else None
+        ) or 1
         max_teams = (state_row['max_teams'] if state_row else None) or 8
 
         asset_files = []
         asset_bytes = 0
+
+        def add_asset(fpath, archive_name):
+            nonlocal asset_bytes
+            if not os.path.isfile(fpath):
+                return
+            asset_files.append((fpath, archive_name))
+            asset_bytes += os.path.getsize(fpath)
+
         class_dir = os.path.join(config.CLASSES_DIR, slug)
         if os.path.isdir(class_dir):
-            for root, _dirs, files in os.walk(class_dir):
-                for fname in files:
-                    if fname in ('course.yaml', 'course.json'):
-                        continue
-                    fpath = os.path.join(root, fname)
-                    if not os.path.isfile(fpath):
-                        continue
-                    relpath = os.path.relpath(
-                        fpath, class_dir
-                    ).replace('\\', '/')
-                    asset_files.append((fpath, f'questions/{relpath}'))
-                    asset_bytes += os.path.getsize(fpath)
+            discussion_path = os.path.join(
+                class_dir, f'week-{current_week}-questions.md'
+            )
+            add_asset(
+                discussion_path,
+                f'questions/week-{current_week}-questions.md',
+            )
 
-        appendix_dir = os.path.join(config.DATA_DIR, slug, 'appendix')
-        if os.path.isdir(appendix_dir):
-            for fname in os.listdir(appendix_dir):
-                fpath = os.path.join(appendix_dir, fname)
-                if os.path.isfile(fpath):
-                    asset_files.append((fpath, f'appendix/{fname}'))
-                    asset_bytes += os.path.getsize(fpath)
+            presentation_dir = os.path.join(class_dir, f'week{current_week}')
+            if os.path.isdir(presentation_dir):
+                for root, _dirs, files in os.walk(presentation_dir):
+                    for fname in sorted(files):
+                        fpath = os.path.join(root, fname)
+                        relpath = os.path.relpath(
+                            fpath, class_dir
+                        ).replace('\\', '/')
+                        add_asset(fpath, f'questions/{relpath}')
+
+        appendix_path = os.path.join(
+            config.DATA_DIR, slug, 'appendix',
+            f'week-{current_week}-appendix.md',
+        )
+        if not os.path.isfile(appendix_path):
+            appendix_path = os.path.join(
+                class_dir, f'week-{current_week}-appendix.md'
+            )
+        add_asset(
+            appendix_path,
+            f'appendix/week-{current_week}-appendix.md',
+        )
 
         if asset_bytes > MAX_EXPORT_BYTES:
             db.rollback()
@@ -4427,10 +4457,10 @@ def export_data(slug):
                         ORDER BY id LIMIT ?
                     )) AS teams,
                    (SELECT COUNT(*) FROM teammate_thumbs
-                    WHERE course_id = ?) AS thumbs,
+                    WHERE course_id = ? AND week_num = ?) AS thumbs,
                    (SELECT COUNT(*) FROM presentation_ratings
-                    WHERE course_id = ?) AS ratings''',
-            [cid, cid, max_teams, cid, cid],
+                    WHERE course_id = ? AND week_num = ?) AS ratings''',
+            [cid, cid, max_teams, cid, current_week, cid, current_week],
             one=True
         )
         if sum(row_counts) > MAX_EXPORT_ROWS:
@@ -4461,17 +4491,18 @@ def export_data(slug):
                       r.student_id as recipient_sid, r.name as recipient_name,
                       p.grader_team_id, p.grader_team_name,
                       p.recipient_team_id, p.recipient_team_name,
-                      p.session_key, p.question_key, p.source_question_key,
+                      p.session_key, p.week_num, p.question_key,
+                      p.source_question_key,
                       p.question_title,
                       'overall' AS criterion, 1 AS score, p.created_at
                FROM teammate_thumbs p
                JOIN students g ON p.grader_id = g.id
                JOIN students r ON p.recipient_id = r.id
-               WHERE p.course_id = ?
-               ORDER BY p.created_at''', [cid])
+               WHERE p.course_id = ? AND p.week_num = ?
+               ORDER BY p.created_at''', [cid, current_week])
 
         ratings = query_db(slug,
-            '''SELECT pr.question_key, pr.session_key,
+            '''SELECT pr.question_key, pr.session_key, pr.week_num,
                       pr.presenting_team_id, pr.presenting_team_name,
                       pr.question_id, pr.question_title,
                       pr.rater_team_id, pr.rater_team_name,
@@ -4480,14 +4511,31 @@ def export_data(slug):
                       pr.q1_developed, pr.q2_easy, pr.created_at
                FROM presentation_ratings pr
                JOIN students s ON pr.student_id = s.id
-               WHERE pr.course_id = ?
-               ORDER BY pr.question_key, pr.created_at''', [cid])
+               WHERE pr.course_id = ? AND pr.week_num = ?
+               ORDER BY pr.question_key, pr.created_at''', [cid, current_week])
 
-        # Map question_key → presenting team from presentation_history
+        question_weeks = {
+            row['id']: row['week_num'] or 1
+            for row in query_db(
+                slug,
+                'SELECT id, week_num FROM questions WHERE course_id = ?',
+                [cid],
+            )
+        }
+
+        # Map this week's presentation keys to their teams.
         key_to_team = {}
+        weekly_rating_keys = {rating['question_key'] for rating in ratings}
         if state_row and state_row['presentation_history']:
             for h in json.loads(state_row['presentation_history']):
                 qkey = h.get('presentation_key') or f"pres-{h.get('started_at', '')}"
+                history_week = h.get('week_num')
+                if history_week is None:
+                    history_week = question_weeks.get(h.get('question_id'))
+                if history_week is None and qkey in weekly_rating_keys:
+                    history_week = current_week
+                if history_week != current_week:
+                    continue
                 key_to_team[qkey] = h.get('team', 'Unknown')
 
         # Team id → name lookup
@@ -4534,12 +4582,13 @@ def export_data(slug):
             ('Course', course['name']),
             ('Code', course['code'] or ''),
             ('Semester', course['semester'] or ''),
+            ('Lecture Week', current_week),
             ('Export Date', datetime.now().strftime('%Y-%m-%d %H:%M')),
             ('Active Students', sum(1 for student in students if student['is_active'])),
             ('Archived Students', sum(1 for student in students if not student['is_active'])),
             ('Current Visible Teams', len(teams)),
-            ('Total Peer Reviews (thumbs)', len(peer_reviews)),
-            ('Total Presentation Ratings', len(ratings)),
+            ('Week Peer Reviews (thumbs)', len(peer_reviews)),
+            ('Week Presentation Ratings', len(ratings)),
         ]
         for r, (label, val) in enumerate(info_rows, 1):
             ws1.cell(row=r, column=1, value=label).font = bold_font
@@ -4683,7 +4732,7 @@ def export_data(slug):
         pr_headers = [
             'grader_id', 'grader_name', 'grader_team_id', 'grader_team',
             'recipient_id', 'recipient_name', 'recipient_team_id',
-            'recipient_team', 'session_key', 'discussion_post_key',
+            'recipient_team', 'session_key', 'week', 'discussion_post_key',
             'source_question_key', 'question_title', 'criterion', 'score',
             'time',
         ]
@@ -4696,7 +4745,7 @@ def export_data(slug):
                 pr['grader_team_name'], pr['recipient_sid'],
                 pr['recipient_name'], pr['recipient_team_id'],
                 pr['recipient_team_name'], pr['session_key'],
-                pr['question_key'], pr['source_question_key'],
+                pr['week_num'], pr['question_key'], pr['source_question_key'],
                 pr['question_title'],
                 pr['criterion'], pr['score'], pr['created_at'],
             ])
@@ -4709,7 +4758,7 @@ def export_data(slug):
         # TAB 5: Presentation Ratings — raw star ratings
         # ════════════════════════════════════════════════════════════════════
         ws5 = wb.create_sheet('Presentation Ratings')
-        rt_headers = ['session_key', 'presentation_key', 'question_id',
+        rt_headers = ['session_key', 'week', 'presentation_key', 'question_id',
                       'question_title', 'presenting_team_id', 'presenting_team',
                       'rater_id', 'rater_name', 'rater_team_id', 'rater_team',
                       'developed_1to5', 'easy_1to5', 'time']
@@ -4719,6 +4768,7 @@ def export_data(slug):
         for rt in ratings:
             rt_rows.append([
                 rt['session_key'],
+                rt['week_num'],
                 rt['question_key'],
                 rt['question_id'], rt['question_title'] or '',
                 rt['presenting_team_id'],
@@ -4762,7 +4812,9 @@ def export_data(slug):
                 zf.write(fpath, archive_name)
 
         zip_buf.seek(0)
-        filename = f"popping_{course['code'] or slug}_export.zip"
+        filename = (
+            f"popping_{course['code'] or slug}_week_{current_week}_export.zip"
+        )
         return send_file(
             zip_buf,
             mimetype='application/zip',

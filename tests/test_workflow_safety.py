@@ -9,6 +9,7 @@ from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 import io
+import json
 from pathlib import Path
 import sqlite3
 import sys
@@ -275,11 +276,13 @@ def _seed_response_history(env):
     with _connect(env) as db:
         db.execute(
             """INSERT INTO teammate_thumbs
-               (course_id, session_key, question_key, grader_id, recipient_id)
-               VALUES (?, ?, ?, ?, ?)""",
+               (course_id, session_key, week_num, question_key,
+                grader_id, recipient_id)
+               VALUES (?, ?, ?, ?, ?, ?)""",
             (
                 env["course_id"],
                 SESSION_KEY,
+                1,
                 "discussion-1",
                 env["students"]["s2"],
                 env["students"]["s1"],
@@ -287,16 +290,17 @@ def _seed_response_history(env):
         )
         db.execute(
             """INSERT INTO presentation_ratings
-               (course_id, student_id, question_key, session_key,
+               (course_id, student_id, question_key, session_key, week_num,
                 presenting_team_id, presenting_team_name, question_id,
                 question_title, rater_team_id, rater_team_name,
                 q1_developed, q2_easy)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 env["course_id"],
                 env["students"]["s1"],
                 "presentation-1",
                 SESSION_KEY,
+                1,
                 env["teams"]["Team 2"],
                 "Team 2",
                 env["question_id"],
@@ -424,6 +428,7 @@ def test_end_session_requires_explicit_confirmation(course_env):
 
 
 def test_next_presentation_waits_for_open_poll(course_env):
+    _set_state(course_env, discussion_week=2)
     _activate_presentation(
         course_env,
         poll_active=1,
@@ -445,7 +450,9 @@ def test_next_presentation_waits_for_open_poll(course_env):
     assert finished.status_code == 200
     state = _state_row(course_env)
     assert state["active_team_id"] is None
-    assert '"presentation_key": "pres-current"' in state["presentation_history"]
+    history = json.loads(state["presentation_history"])
+    assert history[-1]["presentation_key"] == "pres-current"
+    assert history[-1]["week_num"] == 2
 
 
 def test_leaving_ended_starts_exactly_one_new_session(course_env):
@@ -757,6 +764,7 @@ def test_student_thumb_requires_the_displayed_discussion_question(course_env):
     _set_state(
         course_env,
         phase="discussion",
+        discussion_week=2,
         current_discussion_key="discussion-current",
         current_discussion_title="Current question",
         current_discussion_content="Discuss the current question.",
@@ -790,6 +798,49 @@ def test_student_thumb_requires_the_displayed_discussion_question(course_env):
     )
     assert saved.status_code == 200
     assert _history_counts(course_env)["thumbs"] == 1
+    with _connect(course_env) as db:
+        saved_week = db.execute(
+            "SELECT week_num FROM teammate_thumbs"
+        ).fetchone()[0]
+    assert saved_week == 2
+
+
+def test_student_rating_records_selected_week(course_env):
+    with _connect(course_env) as db:
+        question_id = db.execute(
+            """INSERT INTO questions
+               (course_id, question_num, question_text, title, week_num,
+                source_key)
+               VALUES (?, 1, 'Week 2 question', 'Week 2 question', 2,
+                       'presentation:2:1')""",
+            (course_env["course_id"],),
+        ).lastrowid
+        db.execute(
+            "UPDATE course_state SET discussion_week = 2"
+        )
+        db.commit()
+    _activate_presentation(
+        course_env,
+        active_question_id=question_id,
+        poll_active=1,
+        poll_started_at=datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+    )
+
+    response = _student_client(course_env, "s4").post(
+        "/api/submit_rating",
+        json={
+            "presentation_key": "pres-current",
+            "q1_developed": 4,
+            "q2_easy": 5,
+        },
+    )
+
+    assert response.status_code == 200
+    with _connect(course_env) as db:
+        saved_week = db.execute(
+            "SELECT week_num FROM presentation_ratings"
+        ).fetchone()[0]
+    assert saved_week == 2
 
 
 def test_set_question_rejects_stale_post_and_unpost(course_env):
@@ -1249,9 +1300,192 @@ def test_export_returns_a_valid_streamed_zip(course_env):
         assert "course_data.xlsx" in archive.namelist()
 
 
+def test_export_assets_and_filename_use_only_selected_week(course_env):
+    _write_catalog_week(course_env, 1)
+    _write_catalog_week(course_env, 2)
+    appendix_dir = (
+        course_env["data_dir"] / course_env["slug"] / "appendix"
+    )
+    appendix_dir.mkdir()
+    (appendix_dir / "week-1-appendix.md").write_text(
+        "Appendix week 1", encoding="utf-8"
+    )
+    legacy_appendix = (
+        Path(config.CLASSES_DIR) / course_env["slug"]
+        / "week-2-appendix.md"
+    )
+    legacy_appendix.write_text("Appendix week 2", encoding="utf-8")
+    _set_state(course_env, discussion_week=2)
+
+    response = _instructor_client(course_env).get(
+        f"/export/{course_env['slug']}"
+    )
+
+    assert response.status_code == 200
+    assert (
+        "filename=popping_SAFE101_week_2_export.zip"
+        in response.headers["Content-Disposition"]
+    )
+    with zipfile.ZipFile(io.BytesIO(response.data)) as archive:
+        names = set(archive.namelist())
+        appendix_text = archive.read(
+            "appendix/week-2-appendix.md"
+        ).decode("utf-8")
+    assert {
+        "course_data.xlsx",
+        "questions/week-2-questions.md",
+        "questions/week2/index.md",
+        "questions/week2/q01.html",
+        "appendix/week-2-appendix.md",
+    }.issubset(names)
+    assert appendix_text == "Appendix week 2"
+    assert not any("week-1" in name or "week1/" in name for name in names)
+
+
+def test_export_workbook_activity_is_scoped_to_selected_week(course_env):
+    from openpyxl import load_workbook
+
+    with _connect(course_env) as db:
+        week_2_question_id = db.execute(
+            """INSERT INTO questions
+               (course_id, question_num, question_text, title, week_num,
+                source_key)
+               VALUES (?, 1, 'Week 2 question', 'Week 2 question', 2,
+                       'presentation:2:1')""",
+            (course_env["course_id"],),
+        ).lastrowid
+        thumb_rows = (
+            (1, SESSION_KEY, "week-1-thumb", "week-1-q-one"),
+            (2, SESSION_KEY, "week-2-thumb-a", "week-2-q-one"),
+            (2, SESSION_KEY + 1, "week-2-thumb-b", "week-2-q-two"),
+        )
+        for index, (week, session_key, question_key, source_key) in enumerate(
+            thumb_rows
+        ):
+            grader = course_env["students"]["s1" if index != 1 else "s2"]
+            recipient = course_env["students"]["s2" if index != 1 else "s1"]
+            db.execute(
+                """INSERT INTO teammate_thumbs
+                   (course_id, session_key, week_num, question_key,
+                    source_question_key, question_title, grader_id,
+                    recipient_id)
+                   VALUES (?, ?, ?, ?, ?, 'Question', ?, ?)""",
+                (
+                    course_env["course_id"], session_key, week, question_key,
+                    source_key, grader, recipient,
+                ),
+            )
+
+        rating_rows = (
+            (
+                1, SESSION_KEY, "pres-week-1", course_env["question_id"],
+                course_env["students"]["s1"],
+                course_env["teams"]["Team 2"], "Team 2", 1, 1,
+            ),
+            (
+                2, SESSION_KEY, "pres-week-2-a", week_2_question_id,
+                course_env["students"]["s1"],
+                course_env["teams"]["Team 2"], "Team 2", 4, 5,
+            ),
+            (
+                2, SESSION_KEY + 1, "pres-week-2-b", week_2_question_id,
+                course_env["students"]["s4"],
+                course_env["teams"]["Team 1"], "Team 1", 3, 3,
+            ),
+        )
+        for (
+            week, session_key, question_key, question_id, student_id,
+            presenting_team_id, presenting_team_name, developed, easy,
+        ) in rating_rows:
+            db.execute(
+                """INSERT INTO presentation_ratings
+                   (course_id, student_id, question_key, session_key, week_num,
+                    presenting_team_id, presenting_team_name, question_id,
+                    question_title, q1_developed, q2_easy)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'Question', ?, ?)""",
+                (
+                    course_env["course_id"], student_id, question_key,
+                    session_key, week, presenting_team_id,
+                    presenting_team_name, question_id, developed, easy,
+                ),
+            )
+        history = [
+            {
+                "presentation_key": "pres-week-1",
+                "week_num": 1,
+                "team": "Team 2",
+                "question_id": course_env["question_id"],
+            },
+            {
+                "presentation_key": "pres-week-2-a",
+                "team": "Team 2",
+                "question_id": week_2_question_id,
+            },
+            {
+                "presentation_key": "pres-week-2-b",
+                "team": "Team 1",
+                "question_id": None,
+            },
+        ]
+        db.execute(
+            """UPDATE course_state
+               SET discussion_week = 2, presentation_history = ?""",
+            (json.dumps(history),),
+        )
+        db.commit()
+
+    response = _instructor_client(course_env).get(
+        f"/export/{course_env['slug']}"
+    )
+    assert response.status_code == 200
+    with zipfile.ZipFile(io.BytesIO(response.data)) as archive:
+        workbook = load_workbook(
+            io.BytesIO(archive.read("course_data.xlsx")), read_only=True
+        )
+
+    summary = {
+        row[0]: row[1]
+        for row in workbook["Summary"].iter_rows(values_only=True)
+        if row[0]
+    }
+    assert summary["Lecture Week"] == 2
+    assert summary["Week Peer Reviews (thumbs)"] == 2
+    assert summary["Week Presentation Ratings"] == 2
+
+    def sheet_rows(name):
+        values = list(workbook[name].iter_rows(values_only=True))
+        return [dict(zip(values[0], row)) for row in values[1:]]
+
+    peer_rows = sheet_rows("Peer Reviews")
+    assert {row["week"] for row in peer_rows} == {2}
+    assert {row["session_key"] for row in peer_rows} == {
+        SESSION_KEY, SESSION_KEY + 1,
+    }
+    assert {row["discussion_post_key"] for row in peer_rows} == {
+        "week-2-thumb-a", "week-2-thumb-b",
+    }
+
+    presentation_rows = sheet_rows("Presentation Ratings")
+    assert {row["week"] for row in presentation_rows} == {2}
+    assert {row["session_key"] for row in presentation_rows} == {
+        SESSION_KEY, SESSION_KEY + 1,
+    }
+    assert {row["presentation_key"] for row in presentation_rows} == {
+        "pres-week-2-a", "pres-week-2-b",
+    }
+
+    students = {row["student_id"]: row for row in sheet_rows("Students")}
+    assert students["s1"]["thumbs_given"] == 1
+    assert students["s1"]["presentation_ratings_given"] == 1
+    teams = {row["team_name"]: row for row in sheet_rows("Teams")}
+    assert teams["Team 1"]["presentations"] == 1
+    assert teams["Team 2"]["presentations"] == 1
+    assert teams["Team 2"]["combined_avg"] == 4.5
+
+
 def test_export_reports_question_asset_failure(course_env, monkeypatch):
     class_dir = Path(config.CLASSES_DIR) / course_env["slug"]
-    (class_dir / "question-asset.txt").write_text(
+    (class_dir / "week-1-questions.md").write_text(
         "question asset", encoding="utf-8"
     )
 
@@ -1277,16 +1511,17 @@ def test_export_limits_normal_team_views_but_keeps_historical_ratings(course_env
         db.execute("UPDATE course_state SET max_teams = 2")
         db.execute(
             """INSERT INTO presentation_ratings
-               (course_id, student_id, question_key, session_key,
+               (course_id, student_id, question_key, session_key, week_num,
                 presenting_team_id, presenting_team_name, question_id,
                 question_title, rater_team_id, rater_team_name,
                 q1_developed, q2_easy)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 course_env["course_id"],
                 course_env["students"]["s1"],
                 "historical-hidden-team",
                 SESSION_KEY,
+                1,
                 hidden_team_id,
                 "Team 4",
                 course_env["question_id"],
@@ -1321,7 +1556,7 @@ def test_export_limits_normal_team_views_but_keeps_historical_ratings(course_env
     ]
     assert team_names == ["Team 1", "Team 2"]
     raw_presenting_teams = [
-        row[5]
+        row[6]
         for row in workbook["Presentation Ratings"].iter_rows(
             min_row=2, values_only=True
         )
