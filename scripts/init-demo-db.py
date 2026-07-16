@@ -3,8 +3,8 @@
 
 Creates a self-contained 'demo' course with:
   - 1 instructor (no real password needed — demo bypasses login)
-  - 12 pre-assigned students across 4 teams
-  - 10 sample questions
+  - 20 pre-assigned students across 4 teams
+  - Sample questions read from classes/demo/week1/index.md
   - Course state in 'setup' phase
 
 Usage:
@@ -14,34 +14,70 @@ Usage:
 import sys
 import os
 import sqlite3
+import tempfile
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCHEMA = os.path.join(BASE_DIR, 'popping.sql')
 
-if os.path.isdir('/data'):
-    DATA_DIR = '/data'
-else:
-    DATA_DIR = os.path.join(BASE_DIR, 'data')
 
+def resolve_data_dir():
+    """Same resolution logic as init-course-db.py and restore-course-db.py."""
+    configured = os.environ.get('DATA_DIR')
+    if configured:
+        return os.path.abspath(os.path.expanduser(configured))
+    if os.path.isdir('/data'):
+        return '/data'
+    return os.path.join(BASE_DIR, 'data')
+
+
+DATA_DIR = resolve_data_dir()
 DB_DIR = os.path.join(DATA_DIR, 'demo')
 DB_PATH = os.path.join(DB_DIR, 'popping.db')
 
+_SIDEcar_SUFFIXES = ('-wal', '-shm', '-journal')
 
-def init_demo_db():
-    os.makedirs(DB_DIR, exist_ok=True)
 
-    # Remove old DB
-    if os.path.exists(DB_PATH):
-        os.remove(DB_PATH)
+def _remove_sidecars(db_path):
+    """Remove WAL/journal sidecar files belonging to *db_path*."""
+    for suffix in _SIDEcar_SUFFIXES:
+        try:
+            os.remove(db_path + suffix)
+        except FileNotFoundError:
+            pass
 
-    conn = sqlite3.connect(DB_PATH)
+
+def _validate_demo_db(path):
+    """Run integrity and shape checks on the freshly built database."""
+    uri = f'file:{path}?mode=ro'
+    conn = sqlite3.connect(uri, uri=True)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys = ON")
+    try:
+        ok = conn.execute('PRAGMA integrity_check').fetchone()[0]
+        if ok != 'ok':
+            raise RuntimeError(f'integrity_check failed: {ok}')
+        fk_errors = conn.execute('PRAGMA foreign_key_check').fetchall()
+        if fk_errors:
+            raise RuntimeError(f'foreign_key_check found {len(fk_errors)} violation(s)')
+        for table in ('instructors', 'courses', 'teams', 'students',
+                       'questions', 'course_state'):
+            row = conn.execute(
+                "SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?",
+                (table,)
+            ).fetchone()
+            if not row or row[0] == 0:
+                raise RuntimeError(f'Missing required table: {table}')
+        # Verify exactly one course with slug 'demo'
+        course = conn.execute(
+            "SELECT count(*) FROM courses WHERE slug = 'demo'"
+        ).fetchone()[0]
+        if course != 1:
+            raise RuntimeError(f'Expected 1 demo course, found {course}')
+    finally:
+        conn.close()
 
-    # Load schema
-    with open(SCHEMA) as f:
-        conn.executescript(f.read())
 
+def _populate(conn):
+    """Insert instructor, course, teams, students, questions, and state."""
     # Instructor
     conn.execute(
         "INSERT INTO instructors (username, name, pin) VALUES (?, ?, ?)",
@@ -82,7 +118,7 @@ def init_demo_db():
         ('demo003', 'Cara Singh',     0),
         ('demo004', 'Derek Wright',   0),
         ('demo005', 'Eva Müller',     0),
-        ('demo006', 'Finn O\'Brien',  1),
+        ('demo006', "Finn O'Brien",   1),
         ('demo007', 'Gina Rossi',     1),
         ('demo008', 'Hiro Tanaka',    1),
         ('demo009', 'Iris Novak',     1),
@@ -147,13 +183,55 @@ def init_demo_db():
         (course_id,)
     )
 
-    conn.commit()
-    conn.close()
+    return len(questions)
+
+
+def init_demo_db():
+    """Create or reset the demo database atomically.
+
+    Builds to a temp file, validates, then replaces the old DB in one
+    os.rename call so a crashed run never leaves a half-written file.
+    """
+    os.makedirs(DB_DIR, exist_ok=True)
+
+    # Build in a temp file in the same directory (same filesystem → atomic rename)
+    tmp_fd, tmp_path = tempfile.mkstemp(suffix='.db', dir=DB_DIR)
+    os.close(tmp_fd)
+
+    try:
+        conn = sqlite3.connect(tmp_path)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys = ON")
+
+        # Load schema
+        with open(SCHEMA) as f:
+            conn.executescript(f.read())
+
+        q_count = _populate(conn)
+        conn.commit()
+        conn.close()
+
+        # Validate before swapping
+        _validate_demo_db(tmp_path)
+
+        # Atomic replacement
+        _remove_sidecars(DB_PATH)
+        if os.path.exists(DB_PATH):
+            os.remove(DB_PATH)
+        os.replace(tmp_path, DB_PATH)
+    except Exception:
+        # Clean up the temp file on failure
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+        raise
+
     print(f"Demo database created at {DB_PATH}")
     print(f"  Instructor: demo_instructor")
     print(f"  Students:   20 (demo001-demo020, PIN='demo')")
     print(f"  Teams:      4 (Team 1–4)")
-    print(f"  Questions:  {len(questions)}")
+    print(f"  Questions:  {q_count}")
 
 
 if __name__ == '__main__':
