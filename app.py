@@ -21,7 +21,7 @@ from flask import (
     Flask, render_template, request, redirect,
     url_for, session, jsonify, flash, g, make_response, send_file
 )
-from werkzeug.exceptions import RequestEntityTooLarge
+from werkzeug.exceptions import HTTPException, RequestEntityTooLarge
 from werkzeug.middleware.proxy_fix import ProxyFix
 
 import config
@@ -40,6 +40,23 @@ def request_too_large(_error):
     if request.path.startswith('/api/'):
         return jsonify({'error': 'Request is too large'}), 413
     return 'Request is too large', 413
+
+
+@app.errorhandler(HTTPException)
+def handle_http_exception(error):
+    """HTTP errors (404, 403, 405 …): JSON for API routes, default page otherwise."""
+    if request.path.startswith('/api/'):
+        return jsonify({'error': error.name or 'Request failed'}), error.code
+    return error.get_response()
+
+
+@app.errorhandler(Exception)
+def handle_unexpected_error(error):
+    """Genuine unhandled exception: log server-side, return a safe message."""
+    app.logger.exception('Unhandled error on %s %s', request.method, request.path)
+    if request.path.startswith('/api/'):
+        return jsonify({'error': 'Something went wrong. Please try again.'}), 500
+    return 'Internal Server Error', 500
 
 PHASES = ['setup', 'discussion', 'competition', 'ended']
 
