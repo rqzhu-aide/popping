@@ -20,7 +20,21 @@ CLASSES_DIR = os.path.join(BASE_DIR, 'classes')
 CONFIG_DIR = CLASSES_DIR
 
 DATABASE_SCHEMA = os.path.join(BASE_DIR, 'popping.sql')
-SECRET_KEY = os.environ.get('SECRET_KEY', 'dev-secret-key-change-in-production')
+
+# In production (Render), SECRET_KEY must be set explicitly. The hard-coded
+# fallback below is for local development only and must never be accepted on Render.
+IS_PRODUCTION = os.environ.get('RENDER') is not None
+_DEFAULT_DEV_KEY = 'dev-secret-key-change-in-production'
+SECRET_KEY = os.environ.get('SECRET_KEY')
+if IS_PRODUCTION and (not SECRET_KEY or SECRET_KEY == _DEFAULT_DEV_KEY):
+    raise RuntimeError(
+        'SECRET_KEY must be set to a secure random value in production.\n'
+        'Generate one with:  python -c "import secrets; print(secrets.token_hex(32))"'
+    )
+if not SECRET_KEY:
+    SECRET_KEY = _DEFAULT_DEV_KEY
+
 SESSION_COOKIE_SAMESITE = 'Lax'
 SESSION_COOKIE_HTTPONLY = True
+SESSION_COOKIE_SECURE = IS_PRODUCTION
 MAX_CONTENT_LENGTH = 2 * 1024 * 1024
