@@ -3817,43 +3817,52 @@ def start_poll():
     ensure_schema(slug)
     db = get_db(slug)
     db.execute('BEGIN IMMEDIATE')
-    state = db.execute('SELECT * FROM course_state LIMIT 1').fetchone()
-    guard = _presentation_guard(data, state)
-    if guard:
-        db.rollback()
-        return jsonify({'error': guard[0]}), guard[1]
-    if _poll_is_open(state):
-        started_at = state['poll_started_at']
-        db.rollback()
-        return jsonify({
+    try:
+        state = db.execute('SELECT * FROM course_state LIMIT 1').fetchone()
+        guard = _presentation_guard(data, state)
+        if guard:
+            db.rollback()
+            return jsonify({'error': guard[0]}), guard[1]
+        if _poll_is_open(state):
+            started_at = state['poll_started_at']
+            db.rollback()
+            return jsonify({
+                'success': True,
+                'already_active': True,
+                'poll_started_at': started_at,
+                'poll_duration': POLL_DURATION,
+                'poll_remaining': _derive_timing_state(state)['poll_remaining'],
+            })
+        # Derive the rating key from server state — never trust client input.
+        question_key = active_presentation_key(state)
+        if not question_key:
+            db.rollback()
+            return jsonify({'error': 'No active presentation'}), 400
+        db.execute(
+            '''UPDATE course_state
+               SET poll_active = 1, poll_question_key = ?, poll_started_at = CURRENT_TIMESTAMP
+               WHERE course_id = ?''',
+            [question_key, state['course_id']]
+        )
+        fresh = db.execute(
+            'SELECT * FROM course_state WHERE course_id = ?',
+            [state['course_id']]
+        ).fetchone()
+        # Build the response before committing so that a failure during
+        # response construction rolls back the poll-start rather than
+        # leaving a committed poll with no response to the instructor.
+        timing = _derive_timing_state(fresh)
+        response = jsonify({
             'success': True,
-            'already_active': True,
-            'poll_started_at': started_at,
+            'poll_started_at': fresh['poll_started_at'] if fresh else None,
             'poll_duration': POLL_DURATION,
-            'poll_remaining': _derive_timing_state(state)['poll_remaining'],
+            'poll_remaining': timing['poll_remaining'],
         })
-    # Derive the rating key from server state — never trust client input.
-    question_key = active_presentation_key(state)
-    if not question_key:
+        db.commit()
+        return response
+    except Exception:
         db.rollback()
-        return jsonify({'error': 'No active presentation'}), 400
-    db.execute(
-        '''UPDATE course_state
-           SET poll_active = 1, poll_question_key = ?, poll_started_at = CURRENT_TIMESTAMP
-           WHERE course_id = ?''',
-        [question_key, state['course_id']]
-    )
-    fresh = db.execute(
-        'SELECT * FROM course_state WHERE course_id = ?',
-        [state['course_id']]
-    ).fetchone()
-    db.commit()
-    return jsonify({
-        'success': True,
-        'poll_started_at': fresh['poll_started_at'] if fresh else None,
-        'poll_duration': POLL_DURATION,
-        'poll_remaining': _derive_timing_state(fresh)['poll_remaining'],
-    })
+        raise
 
 
 @app.route('/api/stop_poll', methods=['POST'])
@@ -3951,79 +3960,83 @@ def submit_rating():
     ensure_schema(slug)
     db = get_db(slug)
     db.execute('BEGIN IMMEDIATE')
-    state = db.execute('SELECT * FROM course_state LIMIT 1').fetchone()
-    # Read and write under one lock so a delayed request cannot cross into the
-    # next presentation after it passed validation.
-    if not state or state['phase'] != 'competition' or \
-       not state['active_team_id'] or not state['active_question_id']:
-        db.rollback()
-        return jsonify({'error': 'No active presentation to rate'}), 403
+    try:
+        state = db.execute('SELECT * FROM course_state LIMIT 1').fetchone()
+        # Read and write under one lock so a delayed request cannot cross into the
+        # next presentation after it passed validation.
+        if not state or state['phase'] != 'competition' or \
+           not state['active_team_id'] or not state['active_question_id']:
+            db.rollback()
+            return jsonify({'error': 'No active presentation to rate'}), 403
 
-    student = db.execute(
-        'SELECT * FROM students WHERE student_id = ? AND is_active = 1',
-        [session['student_id']]
-    ).fetchone()
-    if not student:
-        db.rollback()
-        return jsonify({'error': 'Student not found'}), 404
+        student = db.execute(
+            'SELECT * FROM students WHERE student_id = ? AND is_active = 1',
+            [session['student_id']]
+        ).fetchone()
+        if not student:
+            db.rollback()
+            return jsonify({'error': 'Student not found'}), 404
 
-    # Block self-grading — the presenting team cannot rate their own presentation.
-    if student['team_id'] and state['active_team_id'] and \
-       student['team_id'] == state['active_team_id']:
-        db.rollback()
-        return jsonify({'error': 'You cannot rate your own presentation'}), 403
-    question_key = active_presentation_key(state)
-    if not question_key:
-        db.rollback()
-        return jsonify({'error': 'No active presentation to rate'}), 403
-    if expected_key != question_key:
-        db.rollback()
-        return jsonify({'error': 'The presentation has changed; refresh and try again'}), 409
-    if not _poll_is_open(state):
-        db.rollback()
-        return jsonify({'error': 'The rating poll is closed'}), 403
-    if not student['team_id']:
-        db.rollback()
-        return jsonify({'error': 'Join a team before rating presentations'}), 403
+        # Block self-grading — the presenting team cannot rate their own presentation.
+        if student['team_id'] and state['active_team_id'] and \
+           student['team_id'] == state['active_team_id']:
+            db.rollback()
+            return jsonify({'error': 'You cannot rate your own presentation'}), 403
+        question_key = active_presentation_key(state)
+        if not question_key:
+            db.rollback()
+            return jsonify({'error': 'No active presentation to rate'}), 403
+        if expected_key != question_key:
+            db.rollback()
+            return jsonify({'error': 'The presentation has changed; refresh and try again'}), 409
+        if not _poll_is_open(state):
+            db.rollback()
+            return jsonify({'error': 'The rating poll is closed'}), 403
+        if not student['team_id']:
+            db.rollback()
+            return jsonify({'error': 'Join a team before rating presentations'}), 403
 
-    presenting_team = db.execute(
-        'SELECT name FROM teams WHERE id = ? AND course_id = ?',
-        [state['active_team_id'], student['course_id']]
-    ).fetchone()
-    rater_team = db.execute(
-        'SELECT name FROM teams WHERE id = ? AND course_id = ?',
-        [student['team_id'], student['course_id']]
-    ).fetchone()
-    question = db.execute(
-        '''SELECT title, question_text FROM questions
-           WHERE id = ? AND course_id = ?''',
-        [state['active_question_id'], student['course_id']]
-    ).fetchone()
-    db.execute(
-        '''INSERT INTO presentation_ratings
-           (course_id, student_id, question_key, session_key, week_num,
-            presenting_team_id, presenting_team_name, question_id,
-            question_title, rater_team_id, rater_team_name,
-            q1_developed, q2_easy)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-           ON CONFLICT(course_id, student_id, question_key)
-           DO UPDATE SET q1_developed = excluded.q1_developed,
-                         q2_easy = excluded.q2_easy,
-                         week_num = excluded.week_num,
-                         rater_team_id = excluded.rater_team_id,
-                         rater_team_name = excluded.rater_team_name,
-                         created_at = CURRENT_TIMESTAMP''',
-        [student['course_id'], student['id'], question_key,
-         state['session_key'] or 0, state['discussion_week'] or 1,
-         state['active_team_id'],
-         presenting_team['name'] if presenting_team else 'Unknown',
-         state['active_question_id'],
-         (question['title'] or question['question_text']) if question else '',
-         student['team_id'], rater_team['name'] if rater_team else 'Unknown',
-         q1, q2]
-    )
-    db.commit()
-    return jsonify({'success': True, 'presentation_key': question_key})
+        presenting_team = db.execute(
+            'SELECT name FROM teams WHERE id = ? AND course_id = ?',
+            [state['active_team_id'], student['course_id']]
+        ).fetchone()
+        rater_team = db.execute(
+            'SELECT name FROM teams WHERE id = ? AND course_id = ?',
+            [student['team_id'], student['course_id']]
+        ).fetchone()
+        question = db.execute(
+            '''SELECT title, question_text FROM questions
+               WHERE id = ? AND course_id = ?''',
+            [state['active_question_id'], student['course_id']]
+        ).fetchone()
+        db.execute(
+            '''INSERT INTO presentation_ratings
+               (course_id, student_id, question_key, session_key, week_num,
+                presenting_team_id, presenting_team_name, question_id,
+                question_title, rater_team_id, rater_team_name,
+                q1_developed, q2_easy)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(course_id, student_id, question_key)
+               DO UPDATE SET q1_developed = excluded.q1_developed,
+                             q2_easy = excluded.q2_easy,
+                             week_num = excluded.week_num,
+                             rater_team_id = excluded.rater_team_id,
+                             rater_team_name = excluded.rater_team_name,
+                             created_at = CURRENT_TIMESTAMP''',
+            [student['course_id'], student['id'], question_key,
+             state['session_key'] or 0, state['discussion_week'] or 1,
+             state['active_team_id'],
+             presenting_team['name'] if presenting_team else 'Unknown',
+             state['active_question_id'],
+             (question['title'] or question['question_text']) if question else '',
+             student['team_id'], rater_team['name'] if rater_team else 'Unknown',
+             q1, q2]
+        )
+        db.commit()
+        return jsonify({'success': True, 'presentation_key': question_key})
+    except Exception:
+        db.rollback()
+        raise
 
 
 @app.route('/api/students', methods=['GET'])
