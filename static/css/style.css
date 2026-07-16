@@ -110,6 +110,10 @@ a:visited:hover { color: var(--primary-hover); }
 }
 @media (max-width: 640px) {
     .brand-tagline { display: none; }
+    .nav-user-name { display: none; }
+    .navbar { padding: 0 12px; }
+    .nav-links { gap: 12px; }
+    .brand-text { display: none; }
 }
 
 .nav-links { display: flex; gap: 20px; align-items: center; }
@@ -313,13 +317,7 @@ a:visited:hover { color: var(--primary-hover); }
     border-color: #FF5F05;
     color: #fff;
     background: #FF5F05;
-    animation: phase-glow 1.5s ease-in-out infinite;
     box-shadow: 0 0 18px rgba(255, 95, 5, 0.6);
-}
-
-@keyframes phase-glow {
-    0%, 100% { box-shadow: 0 0 8px rgba(255, 95, 5, 0.4), 0 0 20px rgba(255, 95, 5, 0.2); }
-    50% { box-shadow: 0 0 20px rgba(255, 95, 5, 0.8), 0 0 40px rgba(255, 95, 5, 0.4), 0 0 60px rgba(255, 95, 5, 0.15); }
 }
 
 .btn-full { width: 100%; }
@@ -414,16 +412,11 @@ input:focus, textarea:focus {
     border-radius: 999px;
     background: var(--border);
     color: var(--text-muted);
-    animation: badge-glow 2s ease-in-out infinite;
 }
 .phase-setup { background: #e0e7ff; color: #3730a3; box-shadow: 0 0 16px rgba(79, 70, 229, 0.25); }
 .phase-discussion { background: var(--success-soft); color: var(--success-text); box-shadow: 0 0 16px rgba(16, 185, 129, 0.25); }
 .phase-competition { background: #fef3c7; color: #92400e; box-shadow: 0 0 16px rgba(245, 158, 11, 0.25); }
 .phase-ended { background: var(--timer-bg); color: var(--text-muted); }
-@keyframes badge-glow {
-    0%, 100% { filter: brightness(1); }
-    50% { filter: brightness(1.08); }
-}
 
 .team-grid {
     display: grid;
@@ -1830,3 +1823,14 @@ html.light .student-timer {
 .result-row:last-child { border-bottom: none; }
 .result-medal { font-size: 2.2rem; }
 .result-team { font-size: 1.3rem; font-weight: 600; }
+
+/* Respect reduced-motion preference: effectively disables all animations
+   and transitions for users who request it. */
+@media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+        animation-duration: 0.01ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.01ms !important;
+        scroll-behavior: auto !important;
+    }
+}

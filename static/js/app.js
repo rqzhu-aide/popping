@@ -1675,28 +1675,37 @@ window.confirmModifyTeams = async function() {
     }
 };
 
+// Prevents double-click from firing two concurrent instructor mutations.
+let _instructorActionInFlight = false;
+
 window.setPhase = async function(phase) {
-    const currentPhase = instructor?.dataset?.phase || '';
-    const leavingActivePresentation = phase !== 'competition' && document.getElementById('timer-box');
-    let confirmEndSession = false;
-    if (phase === 'ended' && currentPhase !== 'ended') {
-        const message = leavingActivePresentation
-            ? 'End this session and finalize the active presentation? This closes the current classroom session.'
-            : 'End this classroom session?';
-        if (!confirm(message)) return;
-        confirmEndSession = true;
-    } else if (leavingActivePresentation &&
-               !confirm('A presentation is still active. Leave this phase and finalize the current presentation?')) {
-        return;
-    }
-    const data = await postJSON('/api/set_phase', instructorStatePayload({
-        phase,
-        confirm_end_session: confirmEndSession
-    }));
-    if (data.success) {
-        window.location.reload();
-    } else {
-        showInstructorMutationError(data, 'Failed to change phase');
+    if (_instructorActionInFlight) return;
+    _instructorActionInFlight = true;
+    try {
+        const currentPhase = instructor?.dataset?.phase || '';
+        const leavingActivePresentation = phase !== 'competition' && document.getElementById('timer-box');
+        let confirmEndSession = false;
+        if (phase === 'ended' && currentPhase !== 'ended') {
+            const message = leavingActivePresentation
+                ? 'End this session and finalize the active presentation? This closes the current classroom session.'
+                : 'End this classroom session?';
+            if (!confirm(message)) return;
+            confirmEndSession = true;
+        } else if (leavingActivePresentation &&
+                   !confirm('A presentation is still active. Leave this phase and finalize the current presentation?')) {
+            return;
+        }
+        const data = await postJSON('/api/set_phase', instructorStatePayload({
+            phase,
+            confirm_end_session: confirmEndSession
+        }));
+        if (data.success) {
+            window.location.reload();
+        } else {
+            showInstructorMutationError(data, 'Failed to change phase');
+        }
+    } finally {
+        _instructorActionInFlight = false;
     }
 };
 
@@ -2053,20 +2062,26 @@ if (document.getElementById('setup-week-select') || document.getElementById('dis
 }
 
 window.startPresentation = async function() {
+    if (_instructorActionInFlight) return;
     const teamId = document.getElementById('comp-team').value;
     const questionId = document.getElementById('comp-question').value;
     const timeCap = parseInt(document.getElementById('time-cap')?.value || '300', 10);
     if (!teamId || !questionId) { showToast('Select both a team and a question', 'warning'); return; }
-    const data = await postJSON('/api/start_presentation', {
-        ...instructorStatePayload(),
-        team_id: parseInt(teamId, 10),
-        question_id: parseInt(questionId, 10),
-        time_cap: timeCap
-    });
-    if (data.success) {
-        window.location.reload();
-    } else {
-        showInstructorMutationError(data, 'Failed to start presentation');
+    _instructorActionInFlight = true;
+    try {
+        const data = await postJSON('/api/start_presentation', {
+            ...instructorStatePayload(),
+            team_id: parseInt(teamId, 10),
+            question_id: parseInt(questionId, 10),
+            time_cap: timeCap
+        });
+        if (data.success) {
+            window.location.reload();
+        } else {
+            showInstructorMutationError(data, 'Failed to start presentation');
+        }
+    } finally {
+        _instructorActionInFlight = false;
     }
 };
 
@@ -2116,28 +2131,40 @@ window.resetTimer = async function() {
 };
 
 window.nextPresentation = async function() {
-    const data = await postJSON('/api/next_presentation', instructorStatePayload());
-    if (data.success) {
-        window.location.reload();
-    } else {
-        showInstructorMutationError(data, 'Failed to finish presentation');
+    if (_instructorActionInFlight) return;
+    _instructorActionInFlight = true;
+    try {
+        const data = await postJSON('/api/next_presentation', instructorStatePayload());
+        if (data.success) {
+            window.location.reload();
+        } else {
+            showInstructorMutationError(data, 'Failed to finish presentation');
+        }
+    } finally {
+        _instructorActionInFlight = false;
     }
 };
 
 window.cancelPresentation = async function() {
+    if (_instructorActionInFlight) return;
     if (!confirm('Cancel this mistaken presentation without adding it to history?')) return;
-    let data = await postJSON('/api/cancel_presentation', instructorStatePayload());
-    if (data.requires_discard) {
-        const count = Number(data.rating_count) || 0;
-        if (!confirm(`This will permanently discard ${count} submitted rating${count === 1 ? '' : 's'}. Continue?`)) return;
-        data = await postJSON('/api/cancel_presentation', instructorStatePayload({
-            discard_ratings: true
-        }));
-    }
-    if (data.success) {
-        window.location.reload();
-    } else {
-        showInstructorMutationError(data, 'Failed to cancel presentation');
+    _instructorActionInFlight = true;
+    try {
+        let data = await postJSON('/api/cancel_presentation', instructorStatePayload());
+        if (data.requires_discard) {
+            const count = Number(data.rating_count) || 0;
+            if (!confirm(`This will permanently discard ${count} submitted rating${count === 1 ? '' : 's'}. Continue?`)) return;
+            data = await postJSON('/api/cancel_presentation', instructorStatePayload({
+                discard_ratings: true
+            }));
+        }
+        if (data.success) {
+            window.location.reload();
+        } else {
+            showInstructorMutationError(data, 'Failed to cancel presentation');
+        }
+    } finally {
+        _instructorActionInFlight = false;
     }
 };
 

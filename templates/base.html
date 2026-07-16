@@ -41,7 +41,7 @@
             </button>
             {% if session.student_id %}
                 <a href="{{ url_for('dashboard') }}" class="nav-link">Dashboard</a>
-                <a href="{{ url_for('logout') }}" class="nav-link logout">Logout ({{ session.name }})</a>
+                <a href="{{ url_for('logout') }}" class="nav-link logout">Logout <span class="nav-user-name">({{ session.name }})</span></a>
             {% elif session.instructor_id and session.slug %}
                 <div class="nav-dropdown" id="tools-dropdown">
                     <button class="nav-link nav-dropdown-btn" onclick="toggleToolsDropdown()">Tools ▾</button>
@@ -52,7 +52,7 @@
                         <input type="file" id="roster-file-input" accept=".csv" style="display:none" onchange="handleRosterFile(event)">
                     </div>
                 </div>
-                <a href="{{ url_for('logout') }}" class="nav-link logout">Logout ({{ session.instructor_name }})</a>
+                <a href="{{ url_for('logout') }}" class="nav-link logout">Logout <span class="nav-user-name">({{ session.instructor_name }})</span></a>
             {% endif %}
         </div>
     </nav>
