@@ -1216,7 +1216,14 @@ def _ensure_demo_db():
     try:
         import subprocess
         script = os.path.join(os.path.dirname(__file__), 'scripts', 'init-demo-db.py')
-        subprocess.run([sys.executable, script], check=True, capture_output=True, timeout=30)
+        env = dict(os.environ, DATA_DIR=config.DATA_DIR)
+        subprocess.run(
+            [sys.executable, script, '--ensure'],
+            check=True,
+            capture_output=True,
+            timeout=30,
+            env=env,
+        )
         return os.path.exists(db_path)
     except Exception:
         return False
@@ -1285,7 +1292,10 @@ def demo_reset():
     import subprocess
     script = os.path.join(os.path.dirname(__file__), 'scripts', 'init-demo-db.py')
     try:
-        subprocess.run([sys.executable, script], check=True, capture_output=True)
+        env = dict(os.environ, DATA_DIR=config.DATA_DIR)
+        subprocess.run(
+            [sys.executable, script], check=True, capture_output=True, env=env
+        )
         flash('Demo has been reset to its initial state.', 'success')
     except Exception as e:
         flash(f'Could not reset demo: {e}', 'error')

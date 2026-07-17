@@ -85,6 +85,7 @@ a:visited:hover { color: var(--primary-hover); }
     padding: 0 24px;
     height: 64px;
     display: flex;
+    gap: 16px;
     align-items: center;
     justify-content: space-between;
     position: sticky;
@@ -94,6 +95,7 @@ a:visited:hover { color: var(--primary-hover); }
 
 .nav-brand {
     display: flex;
+    min-width: 0;
     align-items: center;
     gap: 10px;
     font-weight: 700;
@@ -103,26 +105,31 @@ a:visited:hover { color: var(--primary-hover); }
 .logo { font-size: 1.4rem; }
 .brand-text { letter-spacing: -0.02em; }
 .brand-tagline {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
     font-weight: 400;
     font-size: 0.8rem;
     color: var(--text-muted);
     white-space: nowrap;
 }
-@media (max-width: 640px) {
-    .brand-tagline { display: none; }
-    .nav-user-name { display: none; }
-    .navbar { padding: 0 12px; }
-    .nav-links { gap: 12px; }
-    .brand-text { display: none; }
-}
 
-.nav-links { display: flex; gap: 20px; align-items: center; }
+.nav-links { display: flex; flex: 0 0 auto; gap: 20px; align-items: center; }
 .nav-link {
     color: var(--text-muted);
     text-decoration: none;
     font-weight: 500;
     font-size: 0.9rem;
+    white-space: nowrap;
     transition: color 0.15s;
+}
+.nav-user-name {
+    display: inline-block;
+    max-width: 16ch;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    vertical-align: bottom;
 }
 .nav-link:hover { color: var(--text); }
 .nav-link.logout { color: var(--danger); }
@@ -175,10 +182,22 @@ a:visited:hover { color: var(--primary-hover); }
 
 .nav-home {
     display: flex;
+    min-width: 0;
     align-items: center;
     gap: 10px;
     text-decoration: none;
     color: inherit;
+}
+
+@media (max-width: 900px) {
+    .brand-tagline,
+    .nav-user-name { display: none; }
+    .navbar { padding: 0 12px; gap: 12px; }
+    .nav-links { gap: 12px; }
+}
+
+@media (max-width: 420px) {
+    .brand-text { display: none; }
 }
 
 .container {

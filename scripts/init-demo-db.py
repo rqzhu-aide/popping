@@ -9,12 +9,14 @@ Creates a self-contained 'demo' course with:
 
 Usage:
     python3 scripts/init-demo-db.py           # create or reset
+    python3 scripts/init-demo-db.py --ensure  # create only when missing
     python3 scripts/init-demo-db.py --check   # exit 0 if exists, 1 if not
 """
 import sys
 import os
 import sqlite3
 import tempfile
+from contextlib import contextmanager
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCHEMA = os.path.join(BASE_DIR, 'popping.sql')
@@ -33,45 +35,99 @@ def resolve_data_dir():
 DATA_DIR = resolve_data_dir()
 DB_DIR = os.path.join(DATA_DIR, 'demo')
 DB_PATH = os.path.join(DB_DIR, 'popping.db')
+LOCK_PATH = os.path.join(DB_DIR, '.demo-init-lock.sqlite3')
 
-_SIDEcar_SUFFIXES = ('-wal', '-shm', '-journal')
+_RESET_TABLES = (
+    'discussion_responses',
+    'discussion_selections',
+    'peer_reviews',
+    'teammate_thumbs',
+    'presentation_ratings',
+    'login_attempts',
+    'course_state',
+    'students',
+    'questions',
+    'teams',
+    'courses',
+    'instructors',
+)
 
 
-def _remove_sidecars(db_path):
-    """Remove WAL/journal sidecar files belonging to *db_path*."""
-    for suffix in _SIDEcar_SUFFIXES:
-        try:
-            os.remove(db_path + suffix)
-        except FileNotFoundError:
-            pass
+def _validate_demo_connection(conn, require_seeded_shape=False):
+    """Validate a demo database, including uncommitted reset data."""
+    ok = conn.execute('PRAGMA integrity_check').fetchone()[0]
+    if ok != 'ok':
+        raise RuntimeError(f'integrity_check failed: {ok}')
+    fk_errors = conn.execute('PRAGMA foreign_key_check').fetchall()
+    if fk_errors:
+        raise RuntimeError(f'foreign_key_check found {len(fk_errors)} violation(s)')
+
+    required_tables = (
+        'instructors', 'courses', 'teams', 'students', 'questions', 'course_state'
+    )
+    existing_tables = {
+        row[0] for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()
+    }
+    for table in required_tables:
+        if table not in existing_tables:
+            raise RuntimeError(f'Missing required table: {table}')
+
+    course_rows = conn.execute(
+        "SELECT id, instructor_id FROM courses WHERE slug = 'demo'"
+    ).fetchall()
+    if len(course_rows) != 1:
+        raise RuntimeError(f'Expected 1 demo course, found {len(course_rows)}')
+
+    course_id = course_rows[0]['id']
+    state = conn.execute(
+        "SELECT phase FROM course_state WHERE course_id = ?", (course_id,)
+    ).fetchone()
+    if not state:
+        raise RuntimeError('Demo course state is missing')
+
+    if not require_seeded_shape:
+        return
+
+    instructor_id = course_rows[0]['instructor_id']
+    instructor = conn.execute(
+        "SELECT username FROM instructors WHERE id = ?", (instructor_id,)
+    ).fetchone()
+    if not instructor or instructor['username'] != 'demo_instructor':
+        raise RuntimeError('Demo instructor is missing or invalid')
+
+    team_rows = conn.execute(
+        '''SELECT t.id, count(s.id) AS student_count
+           FROM teams t
+           LEFT JOIN students s ON s.team_id = t.id AND s.is_active = 1
+           WHERE t.course_id = ?
+           GROUP BY t.id
+           ORDER BY t.id''',
+        (course_id,)
+    ).fetchall()
+    if len(team_rows) != 4 or any(row['student_count'] != 5 for row in team_rows):
+        raise RuntimeError('Demo must have 4 teams with 5 active students each')
+
+    question_count = conn.execute(
+        "SELECT count(*) FROM questions WHERE course_id = ?", (course_id,)
+    ).fetchone()[0]
+    if question_count < 1:
+        raise RuntimeError('Demo must have at least one question')
 
 
-def _validate_demo_db(path):
-    """Run integrity and shape checks on the freshly built database."""
+def _validate_demo_db(path, require_seeded_shape=False):
+    """Open and validate a completed demo database."""
     uri = f'file:{path}?mode=ro'
     conn = sqlite3.connect(uri, uri=True)
     conn.row_factory = sqlite3.Row
     try:
-        ok = conn.execute('PRAGMA integrity_check').fetchone()[0]
-        if ok != 'ok':
-            raise RuntimeError(f'integrity_check failed: {ok}')
-        fk_errors = conn.execute('PRAGMA foreign_key_check').fetchall()
-        if fk_errors:
-            raise RuntimeError(f'foreign_key_check found {len(fk_errors)} violation(s)')
-        for table in ('instructors', 'courses', 'teams', 'students',
-                       'questions', 'course_state'):
-            row = conn.execute(
-                "SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?",
-                (table,)
-            ).fetchone()
-            if not row or row[0] == 0:
-                raise RuntimeError(f'Missing required table: {table}')
-        # Verify exactly one course with slug 'demo'
-        course = conn.execute(
-            "SELECT count(*) FROM courses WHERE slug = 'demo'"
+        _validate_demo_connection(conn, require_seeded_shape)
+        return conn.execute(
+            '''SELECT count(*) FROM questions q
+               JOIN courses c ON c.id = q.course_id
+               WHERE c.slug = 'demo' '''
         ).fetchone()[0]
-        if course != 1:
-            raise RuntimeError(f'Expected 1 demo course, found {course}')
     finally:
         conn.close()
 
@@ -186,55 +242,115 @@ def _populate(conn):
     return len(questions)
 
 
-def init_demo_db():
-    """Create or reset the demo database atomically.
-
-    Builds to a temp file, validates, then replaces the old DB in one
-    os.rename call so a crashed run never leaves a half-written file.
-    """
-    os.makedirs(DB_DIR, exist_ok=True)
-
-    # Build in a temp file in the same directory (same filesystem → atomic rename)
-    tmp_fd, tmp_path = tempfile.mkstemp(suffix='.db', dir=DB_DIR)
-    os.close(tmp_fd)
-
+@contextmanager
+def _initialization_lock():
+    """Serialize demo creation and reset across web worker processes."""
+    lock = sqlite3.connect(LOCK_PATH, timeout=30)
     try:
-        conn = sqlite3.connect(tmp_path)
+        lock.execute('PRAGMA busy_timeout = 30000')
+        lock.execute(
+            'CREATE TABLE IF NOT EXISTS lock_state (id INTEGER PRIMARY KEY)'
+        )
+        lock.commit()
+        lock.execute('BEGIN IMMEDIATE')
+        yield
+    finally:
+        lock.rollback()
+        lock.close()
+
+
+def _build_candidate(path):
+    """Build and validate a new demo database at *path*."""
+    conn = sqlite3.connect(path)
+    try:
         conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA foreign_keys = ON")
-
-        # Load schema
-        with open(SCHEMA) as f:
+        conn.execute('PRAGMA foreign_keys = ON')
+        with open(SCHEMA, encoding='utf-8') as f:
             conn.executescript(f.read())
-
         q_count = _populate(conn)
         conn.commit()
-        conn.close()
-
-        # Validate before swapping
-        _validate_demo_db(tmp_path)
-
-        # Atomic replacement
-        _remove_sidecars(DB_PATH)
-        if os.path.exists(DB_PATH):
-            os.remove(DB_PATH)
-        os.replace(tmp_path, DB_PATH)
     except Exception:
-        # Clean up the temp file on failure
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+    _validate_demo_db(path, require_seeded_shape=True)
+    return q_count
+
+
+def _create_demo_db():
+    """Create the first demo database and publish it after validation."""
+    tmp_fd, tmp_path = tempfile.mkstemp(
+        prefix='.demo-candidate-', suffix='.db', dir=DB_DIR
+    )
+    os.close(tmp_fd)
+    try:
+        q_count = _build_candidate(tmp_path)
+        os.replace(tmp_path, DB_PATH)
+        return q_count
+    finally:
         try:
             os.remove(tmp_path)
-        except OSError:
+        except FileNotFoundError:
             pass
-        raise
 
-    print(f"Demo database created at {DB_PATH}")
+
+def _reset_demo_db():
+    """Reset an existing demo in one transaction without replacing its file."""
+    conn = sqlite3.connect(DB_PATH, timeout=30)
+    conn.row_factory = sqlite3.Row
+    try:
+        conn.execute('PRAGMA busy_timeout = 30000')
+        conn.execute('PRAGMA foreign_keys = ON')
+        conn.execute('BEGIN IMMEDIATE')
+
+        existing_tables = {
+            row[0] for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        for table in _RESET_TABLES:
+            if table in existing_tables:
+                conn.execute(f'DELETE FROM "{table}"')
+        if 'sqlite_sequence' in existing_tables:
+            conn.execute('DELETE FROM sqlite_sequence')
+
+        q_count = _populate(conn)
+        _validate_demo_connection(conn, require_seeded_shape=True)
+        conn.commit()
+        return q_count
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def init_demo_db(ensure_only=False):
+    """Create the demo if absent, or transactionally reset it when requested."""
+    os.makedirs(DB_DIR, exist_ok=True)
+
+    with _initialization_lock():
+        if os.path.exists(DB_PATH):
+            if ensure_only:
+                q_count = _validate_demo_db(DB_PATH, require_seeded_shape=True)
+                action = 'ready'
+            else:
+                q_count = _reset_demo_db()
+                action = 'reset'
+        else:
+            q_count = _create_demo_db()
+            action = 'created'
+
+    print(f"Demo database {action} at {DB_PATH}")
     print(f"  Instructor: demo_instructor")
     print(f"  Students:   20 (demo001-demo020, PIN='demo')")
     print(f"  Teams:      4 (Team 1–4)")
     print(f"  Questions:  {q_count}")
+    return q_count
 
 
 if __name__ == '__main__':
     if '--check' in sys.argv:
         sys.exit(0 if os.path.exists(DB_PATH) else 1)
-    init_demo_db()
+    init_demo_db(ensure_only='--ensure' in sys.argv)
