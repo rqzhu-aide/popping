@@ -1077,6 +1077,9 @@ def _scan_courses():
     if not os.path.isdir(config.CLASSES_DIR):
         return courses
     for slug in sorted(os.listdir(config.CLASSES_DIR)):
+        # The demo course is reachable only via /demo — never list it publicly.
+        if slug == 'demo':
+            continue
         availability = _course_availability(slug)
         cfg = availability.get('config')
         if not availability['configured_active'] or not isinstance(cfg, dict):
@@ -1209,9 +1212,24 @@ def instructor_login(slug):
 
 
 def _ensure_demo_db():
-    """Create the demo database if it doesn't exist yet."""
+    """Create the demo database if it doesn't exist yet.
+
+    Existing databases created before the demo course used ``is_active=1``
+    are healed in place — the availability check refuses inactive courses.
+    """
     db_path = os.path.join(config.DATA_DIR, 'demo', 'popping.db')
     if os.path.exists(db_path):
+        try:
+            conn = sqlite3.connect(db_path, timeout=5)
+            try:
+                conn.execute(
+                    "UPDATE courses SET is_active = 1 WHERE slug = 'demo' AND is_active != 1"
+                )
+                conn.commit()
+            finally:
+                conn.close()
+        except sqlite3.Error:
+            pass
         return True
     try:
         import subprocess
@@ -1238,8 +1256,7 @@ def demo():
 @app.route('/demo/instructor')
 def demo_instructor():
     """Log in as the demo instructor — no password needed."""
-    db_path = os.path.join(config.DATA_DIR, 'demo', 'popping.db')
-    if not os.path.exists(db_path):
+    if not _ensure_demo_db():
         flash('Demo is not available right now. Please try again later.', 'error')
         return redirect(url_for('demo'))
     session.clear()
@@ -1259,8 +1276,7 @@ def demo_instructor():
 @app.route('/demo/student')
 def demo_student():
     """Log in as a demo student — no password needed."""
-    db_path = os.path.join(config.DATA_DIR, 'demo', 'popping.db')
-    if not os.path.exists(db_path):
+    if not _ensure_demo_db():
         flash('Demo is not available right now. Please try again later.', 'error')
         return redirect(url_for('demo'))
     ensure_schema('demo')

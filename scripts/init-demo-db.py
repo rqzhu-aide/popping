@@ -146,7 +146,8 @@ def _populate(conn):
     # Course
     conn.execute(
         "INSERT INTO courses (name, code, semester, slug, instructor_id, is_active) "
-        "VALUES (?, ?, ?, ?, ?, 0)",  # is_active=0 so it doesn't show on landing page
+        "VALUES (?, ?, ?, ?, ?, 1)",  # is_active=1: required by course availability
+        # checks; the demo is kept off the landing list by slug in _scan_courses().
         ('Popping Demo Course', 'DEMO 101', 'Always', 'demo', instructor_id)
     )
     course_id = conn.execute(

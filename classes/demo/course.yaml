@@ -1,0 +1,10 @@
+slug: demo
+name: Popping Demo Course
+code: DEMO 101
+semester: Always
+active: true
+teams:
+- color: '#ef4444'
+- color: '#3b82f6'
+- color: '#10b981'
+- color: '#f59e0b'
