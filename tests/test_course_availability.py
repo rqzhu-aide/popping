@@ -1,5 +1,6 @@
 """Focused tests for course discovery and login availability checks."""
 
+import builtins
 from pathlib import Path
 import sqlite3
 import sys
@@ -401,6 +402,69 @@ def test_availability_validation_is_cached_across_login_burst(
         assert client.get(f"/login/{slug}").status_code == 200
 
     assert inspected == 1
+
+
+@pytest.mark.parametrize("failure_kind", ("database", "filesystem"))
+def test_transient_course_unavailability_preserves_session_and_recovers(
+        catalog_env, monkeypatch, failure_kind):
+    slug = f"temporary_{failure_kind}_failure"
+    _write_config(catalog_env, slug)
+    db_path = _write_database(catalog_env, slug)
+    with sqlite3.connect(db_path) as db:
+        instructor_id = db.execute(
+            "SELECT instructor_id FROM courses WHERE slug = ?", (slug,)
+        ).fetchone()[0]
+
+    client = app_module.app.test_client()
+    with client.session_transaction() as browser_session:
+        browser_session["slug"] = slug
+        browser_session["role"] = "instructor"
+        browser_session["instructor_id"] = instructor_id
+
+    assert client.get("/api/poll").status_code == 200
+
+    outage = {"active": True}
+    if failure_kind == "database":
+        original_connect = sqlite3.connect
+
+        def flaky_connect(database_path, *args, **kwargs):
+            if outage["active"] and kwargs.get("uri") is True:
+                raise sqlite3.OperationalError("temporary disk I/O failure")
+            return original_connect(database_path, *args, **kwargs)
+
+        monkeypatch.setattr(sqlite3, "connect", flaky_connect)
+    else:
+        original_open = builtins.open
+        config_path = catalog_env["classes_dir"] / slug / "course.yaml"
+
+        def flaky_open(path, *args, **kwargs):
+            if outage["active"] and str(path) == str(config_path):
+                raise OSError("temporary filesystem failure")
+            return original_open(path, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "open", flaky_open)
+
+    app_module._clear_course_availability_cache(slug)
+    assert app_module._course_availability(slug)["status"] == "unavailable"
+
+    unavailable = client.get("/api/poll")
+    assert unavailable.status_code == 503
+    assert unavailable.get_json() == {
+        "error": "Course data is temporarily unavailable. Please try again."
+    }
+    assert unavailable.headers["Retry-After"] == "5"
+    with client.session_transaction() as browser_session:
+        assert browser_session["slug"] == slug
+        assert browser_session["role"] == "instructor"
+        assert browser_session["instructor_id"] == instructor_id
+
+    outage["active"] = False
+    app_module._clear_course_availability_cache(slug)
+    assert client.get("/api/poll").status_code == 200
+    with client.session_transaction() as browser_session:
+        assert browser_session["slug"] == slug
+        assert browser_session["role"] == "instructor"
+        assert browser_session["instructor_id"] == instructor_id
 
 
 def test_existing_instructor_session_is_revoked_when_course_is_deactivated(

@@ -1,31 +1,32 @@
-"""Smoke tests for demo database initialization.
+"""Database tests for the legacy CLI seed and private web demo instances."""
 
-Verifies that init-demo-db.py:
-  - Produces a valid, complete database
-  - Honors the DATA_DIR environment variable
-  - Resets transactionally while readers remain connected
-  - Serializes concurrent first-time initialization
-  - Exits with the correct status for --check
-"""
 import importlib.util
 import os
 import sqlite3
 import subprocess
 import sys
-import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 import pytest
 
-SCRIPT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'scripts', 'init-demo-db.py')
-PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+SCRIPT = PROJECT_ROOT / 'scripts' / 'init-demo-db.py'
+SCHEMA = PROJECT_ROOT / 'popping.sql'
+CLASSES_DIR = PROJECT_ROOT / 'classes'
+
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+import demo_instance  # noqa: E402
 
 
 def _run_init(data_dir, *args):
-    """Run init-demo-db.py with DATA_DIR set, return CompletedProcess."""
     env = dict(os.environ, DATA_DIR=str(data_dir))
     return subprocess.run(
-        [sys.executable, SCRIPT, *args],
+        [sys.executable, str(SCRIPT), *args],
         capture_output=True,
         text=True,
         env=env,
@@ -34,357 +35,298 @@ def _run_init(data_dir, *args):
 
 
 def _open_db(path):
-    conn = sqlite3.connect(path, timeout=30)
-    conn.row_factory = sqlite3.Row
-    return conn
+    connection = sqlite3.connect(path, timeout=30)
+    connection.row_factory = sqlite3.Row
+    return connection
 
 
 def _load_init_module(data_dir, monkeypatch):
-    """Load the script directly so failure paths can be controlled."""
     monkeypatch.setenv('DATA_DIR', str(data_dir))
-    spec = importlib.util.spec_from_file_location('init_demo_db_test', SCRIPT)
+    spec = importlib.util.spec_from_file_location(
+        f'init_demo_db_test_{time.time_ns()}', SCRIPT
+    )
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
 
 
 @pytest.fixture
-def demo_db(tmp_path):
-    """Create a fresh demo DB in a temp directory."""
+def cli_demo_db(tmp_path):
     result = _run_init(tmp_path)
-    assert result.returncode == 0, f'stderr: {result.stderr}'
-    db_path = tmp_path / 'demo' / 'popping.db'
-    assert db_path.exists(), f'DB not created at {db_path}'
-    yield db_path
+    assert result.returncode == 0, result.stderr
+    path = tmp_path / 'demo' / 'popping.db'
+    assert path.is_file()
+    return path
 
 
-class TestDemoDbCreation:
-    """Verify the freshly created demo database is valid and complete."""
-
-    def test_integrity_check_passes(self, demo_db):
-        conn = _open_db(demo_db)
-        assert conn.execute('PRAGMA integrity_check').fetchone()[0] == 'ok'
-        conn.close()
-
-    def test_foreign_key_check_passes(self, demo_db):
-        conn = _open_db(demo_db)
-        assert conn.execute('PRAGMA foreign_key_check').fetchall() == []
-        conn.close()
-
-    def test_one_course_with_slug_demo(self, demo_db):
-        conn = _open_db(demo_db)
-        row = conn.execute(
-            "SELECT count(*) FROM courses WHERE slug = 'demo'"
+def _assert_seed_shape(path, expected_slug='demo'):
+    connection = _open_db(path)
+    try:
+        assert connection.execute('PRAGMA integrity_check').fetchone()[0] == 'ok'
+        assert connection.execute('PRAGMA foreign_key_check').fetchall() == []
+        assert connection.execute('SELECT COUNT(*) FROM instructors').fetchone()[0] == 1
+        assert connection.execute('SELECT COUNT(*) FROM students').fetchone()[0] == 2
+        assert connection.execute('SELECT COUNT(*) FROM teams').fetchone()[0] == 2
+        assert connection.execute(
+            'SELECT COUNT(*) FROM students WHERE team_id IS NULL'
+        ).fetchone()[0] == 2
+        assert connection.execute(
+            'SELECT COUNT(*) FROM courses WHERE slug = ?', [expected_slug]
+        ).fetchone()[0] == 1
+        state = connection.execute(
+            '''SELECT phase, max_teams, max_members_per_team
+               FROM course_state'''
         ).fetchone()
-        assert row[0] == 1
-        conn.close()
-
-    def test_four_teams(self, demo_db):
-        conn = _open_db(demo_db)
-        count = conn.execute('SELECT count(*) FROM teams').fetchone()[0]
-        assert count == 4
-        conn.close()
-
-    def test_twenty_students_across_teams(self, demo_db):
-        conn = _open_db(demo_db)
-        total = conn.execute('SELECT count(*) FROM students').fetchone()[0]
-        per_team = conn.execute(
-            'SELECT count(*) FROM students GROUP BY team_id ORDER BY team_id'
-        ).fetchall()
-        assert total == 20
-        assert len(per_team) == 4
-        for row in per_team:
-            assert row[0] == 5
-        conn.close()
-
-    def test_course_state_in_setup(self, demo_db):
-        conn = _open_db(demo_db)
-        phase = conn.execute('SELECT phase FROM course_state').fetchone()[0]
-        assert phase == 'setup'
-        conn.close()
-
-    def test_questions_exist(self, demo_db):
-        conn = _open_db(demo_db)
-        count = conn.execute('SELECT count(*) FROM questions').fetchone()[0]
-        assert count >= 1, 'Demo should have at least one question'
-        conn.close()
-
-    def test_required_tables_exist(self, demo_db):
-        conn = _open_db(demo_db)
-        for table in ('instructors', 'courses', 'teams', 'students',
-                       'questions', 'course_state'):
-            row = conn.execute(
-                "SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?",
-                (table,)
-            ).fetchone()
-            assert row[0] == 1, f'Missing table: {table}'
-        conn.close()
+        assert tuple(state) == ('setup', 2, 2)
+        assert connection.execute('SELECT COUNT(*) FROM questions').fetchone()[0] >= 1
+        assert connection.execute('PRAGMA user_version').fetchone()[0] == 2
+    finally:
+        connection.close()
 
 
-class TestDemoDbHonorsDataDir:
-    """Verify the script respects the DATA_DIR environment variable."""
+class TestCliDemoSeed:
+    """Keep the maintenance script safe even though web requests do not call it."""
 
-    def test_db_created_in_custom_data_dir(self, tmp_path):
+    def test_fresh_seed_has_exact_small_shape(self, cli_demo_db):
+        _assert_seed_shape(cli_demo_db)
+
+    def test_honors_data_dir(self, tmp_path):
         custom = tmp_path / 'custom-data'
         result = _run_init(custom)
-        assert result.returncode == 0
-        assert (custom / 'demo' / 'popping.db').exists()
+        assert result.returncode == 0, result.stderr
+        assert (custom / 'demo' / 'popping.db').is_file()
 
-
-class TestDemoDbReset:
-    """Verify reset is complete, transactional, and safe for WAL readers."""
-
-    def test_reset_replaces_old_data(self, tmp_path):
-        result = _run_init(tmp_path)
-        assert result.returncode == 0
-        db_path = tmp_path / 'demo' / 'popping.db'
-
-        # Modify the database
-        conn = _open_db(db_path)
-        initial_ids = (
-            conn.execute("SELECT id FROM instructors").fetchone()[0],
-            conn.execute("SELECT id FROM courses").fetchone()[0],
-        )
-        conn.execute("UPDATE course_state SET phase = 'competition'")
-        conn.execute("INSERT INTO students (course_id, student_id, name, pin) VALUES (1, 'extra', 'Extra', 'x')")
-        conn.commit()
-        conn.close()
-
-        # Reset
-        result = _run_init(tmp_path)
-        assert result.returncode == 0
-
-        # Verify old modifications are gone
-        conn = _open_db(db_path)
-        assert conn.execute("SELECT phase FROM course_state").fetchone()[0] == 'setup'
-        assert conn.execute("SELECT count(*) FROM students WHERE student_id = 'extra'").fetchone()[0] == 0
-        assert conn.execute('SELECT count(*) FROM students').fetchone()[0] == 20
-        reset_ids = (
-            conn.execute("SELECT id FROM instructors").fetchone()[0],
-            conn.execute("SELECT id FROM courses").fetchone()[0],
-        )
-        assert reset_ids == initial_ids == (1, 1)
-        conn.close()
-
-    def test_failed_reset_rolls_back_existing_data(self, tmp_path, monkeypatch):
-        result = _run_init(tmp_path)
-        assert result.returncode == 0
-        db_path = tmp_path / 'demo' / 'popping.db'
-
-        conn = _open_db(db_path)
-        conn.execute("UPDATE course_state SET phase = 'competition'")
-        conn.execute(
-            "INSERT INTO students (course_id, student_id, name, pin) "
-            "VALUES (1, 'sentinel', 'Keep Me', 'x')"
-        )
-        conn.commit()
-        conn.close()
-
-        module = _load_init_module(tmp_path, monkeypatch)
-        original_populate = module._populate
-
-        def fail_after_populating(conn):
-            original_populate(conn)
-            raise RuntimeError('injected reset failure')
-
-        monkeypatch.setattr(module, '_populate', fail_after_populating)
-        with pytest.raises(RuntimeError, match='injected reset failure'):
-            module.init_demo_db()
-
-        conn = _open_db(db_path)
-        assert conn.execute("SELECT phase FROM course_state").fetchone()[0] == 'competition'
-        assert conn.execute(
-            "SELECT count(*) FROM students WHERE student_id = 'sentinel'"
-        ).fetchone()[0] == 1
-        assert conn.execute('PRAGMA integrity_check').fetchone()[0] == 'ok'
-        assert conn.execute('PRAGMA foreign_key_check').fetchall() == []
-        conn.close()
-
-    def test_reset_keeps_live_wal_reader_available(self, tmp_path, monkeypatch):
-        result = _run_init(tmp_path)
-        assert result.returncode == 0
-        db_path = tmp_path / 'demo' / 'popping.db'
-
-        setup = _open_db(db_path)
-        assert setup.execute('PRAGMA journal_mode=WAL').fetchone()[0] == 'wal'
-        setup.execute("UPDATE course_state SET phase = 'competition'")
-        setup.commit()
-        setup.close()
-
-        module = _load_init_module(tmp_path, monkeypatch)
-        original_populate = module._populate
-        writer_ready = threading.Event()
-        release_writer = threading.Event()
-        writer_errors = []
-
-        def pause_after_populating(conn):
-            count = original_populate(conn)
-            writer_ready.set()
-            if not release_writer.wait(timeout=10):
-                raise RuntimeError('reader test timed out')
-            return count
-
-        monkeypatch.setattr(module, '_populate', pause_after_populating)
-
-        def forbid_live_database_replace(_source, destination):
-            if os.path.abspath(destination) == os.path.abspath(db_path):
-                raise AssertionError('reset must not replace the live database')
-            return original_replace(_source, destination)
-
-        original_replace = module.os.replace
-        monkeypatch.setattr(module.os, 'replace', forbid_live_database_replace)
-
-        reader = _open_db(db_path)
-        reader.execute('BEGIN')
-        assert reader.execute("SELECT phase FROM course_state").fetchone()[0] == 'competition'
-
-        def reset_in_thread():
-            try:
-                module.init_demo_db()
-            except Exception as exc:
-                writer_errors.append(exc)
-
-        writer = threading.Thread(target=reset_in_thread)
-        writer.start()
-        try:
-            assert writer_ready.wait(timeout=10)
-            assert db_path.exists()
-            assert reader.execute(
-                "SELECT phase FROM course_state"
-            ).fetchone()[0] == 'competition'
-
-            concurrent_reader = _open_db(db_path)
-            try:
-                assert concurrent_reader.execute(
-                    "SELECT phase FROM course_state"
-                ).fetchone()[0] == 'competition'
-            finally:
-                concurrent_reader.close()
-
-            release_writer.set()
-            writer.join(timeout=10)
-            assert not writer.is_alive()
-            assert writer_errors == []
-            assert reader.execute(
-                "SELECT phase FROM course_state"
-            ).fetchone()[0] == 'competition'
-            reader.commit()
-        finally:
-            release_writer.set()
-            writer.join(timeout=10)
-            reader.close()
-
-        final = _open_db(db_path)
-        try:
-            assert final.execute(
-                "SELECT phase FROM course_state"
-            ).fetchone()[0] == 'setup'
-        finally:
-            final.close()
-
-
-class TestDemoDbConcurrency:
-    """Verify simultaneous workers publish one complete first demo."""
-
-    def test_ensure_does_not_reset_existing_demo(self, tmp_path):
+    def test_reset_restores_database_and_appendix(self, tmp_path):
         assert _run_init(tmp_path).returncode == 0
         db_path = tmp_path / 'demo' / 'popping.db'
-        conn = _open_db(db_path)
-        conn.execute("UPDATE course_state SET phase = 'competition'")
-        conn.commit()
-        conn.close()
+        appendix_dir = tmp_path / 'demo' / 'appendix'
+        appendix = appendix_dir / 'week-1-appendix.md'
+        shipped = (CLASSES_DIR / 'demo' / 'week-1-appendix.md').read_text(
+            encoding='utf-8'
+        )
+
+        connection = _open_db(db_path)
+        connection.execute("UPDATE course_state SET phase = 'competition'")
+        connection.execute(
+            "UPDATE students SET team_id = (SELECT id FROM teams ORDER BY id LIMIT 1)"
+        )
+        connection.commit()
+        connection.close()
+        appendix.write_text('changed', encoding='utf-8')
+        (appendix_dir / 'week-2-appendix.md').write_text('extra', encoding='utf-8')
+
+        result = _run_init(tmp_path)
+        assert result.returncode == 0, result.stderr
+        _assert_seed_shape(db_path)
+        assert appendix.read_text(encoding='utf-8') == shipped
+        assert not (appendix_dir / 'week-2-appendix.md').exists()
+
+    def test_failed_reset_rolls_back_existing_data(self, tmp_path, monkeypatch):
+        assert _run_init(tmp_path).returncode == 0
+        db_path = tmp_path / 'demo' / 'popping.db'
+        connection = _open_db(db_path)
+        connection.execute("UPDATE course_state SET phase = 'competition'")
+        connection.commit()
+        connection.close()
+
+        module = _load_init_module(tmp_path, monkeypatch)
+
+        def fail_population(_connection):
+            raise RuntimeError('controlled seed failure')
+
+        monkeypatch.setattr(module, '_populate', fail_population)
+        with pytest.raises(RuntimeError, match='controlled seed failure'):
+            module.init_demo_db()
+
+        connection = _open_db(db_path)
+        try:
+            assert connection.execute(
+                'SELECT phase FROM course_state'
+            ).fetchone()[0] == 'competition'
+            assert connection.execute('SELECT COUNT(*) FROM students').fetchone()[0] == 2
+        finally:
+            connection.close()
+
+    def test_ensure_preserves_current_data(self, tmp_path):
+        assert _run_init(tmp_path).returncode == 0
+        db_path = tmp_path / 'demo' / 'popping.db'
+        connection = _open_db(db_path)
+        connection.execute("UPDATE course_state SET phase = 'competition'")
+        connection.commit()
+        connection.close()
 
         result = _run_init(tmp_path, '--ensure')
         assert result.returncode == 0, result.stderr
+        connection = _open_db(db_path)
+        try:
+            assert connection.execute(
+                'SELECT phase FROM course_state'
+            ).fetchone()[0] == 'competition'
+        finally:
+            connection.close()
 
-        conn = _open_db(db_path)
-        assert conn.execute(
-            "SELECT phase FROM course_state"
-        ).fetchone()[0] == 'competition'
-        conn.close()
+    def test_ensure_upgrades_old_seed_to_two_students(self, tmp_path):
+        assert _run_init(tmp_path).returncode == 0
+        db_path = tmp_path / 'demo' / 'popping.db'
+        connection = _open_db(db_path)
+        connection.execute('PRAGMA user_version = 1')
+        connection.execute(
+            "INSERT INTO students (course_id, student_id, name, pin) "
+            "VALUES (1, 'old-extra', 'Old Extra', 'demo')"
+        )
+        connection.commit()
+        connection.close()
 
-    def test_concurrent_ensure_calls_leave_complete_demo(self, tmp_path):
-        start_gate = threading.Barrier(4)
+        result = _run_init(tmp_path, '--ensure')
+        assert result.returncode == 0, result.stderr
+        _assert_seed_shape(db_path)
 
-        def run_ensure():
-            start_gate.wait(timeout=5)
+    def test_concurrent_ensure_leaves_one_complete_seed(self, tmp_path):
+        def run_ensure(_index):
             return _run_init(tmp_path, '--ensure')
 
         with ThreadPoolExecutor(max_workers=4) as executor:
-            results = list(executor.map(lambda _index: run_ensure(), range(4)))
-        for result in results:
-            assert result.returncode == 0, (
-                f'stdout: {result.stdout}\nstderr: {result.stderr}'
-            )
-
-        db_path = tmp_path / 'demo' / 'popping.db'
-        conn = _open_db(db_path)
-        assert conn.execute('PRAGMA integrity_check').fetchone()[0] == 'ok'
-        assert conn.execute('PRAGMA foreign_key_check').fetchall() == []
-        assert conn.execute("SELECT count(*) FROM courses WHERE slug = 'demo'").fetchone()[0] == 1
-        assert conn.execute('SELECT count(*) FROM teams').fetchone()[0] == 4
-        assert conn.execute('SELECT count(*) FROM students').fetchone()[0] == 20
-        conn.close()
+            results = list(executor.map(run_ensure, range(4)))
+        assert all(result.returncode == 0 for result in results), [
+            result.stderr for result in results
+        ]
+        _assert_seed_shape(tmp_path / 'demo' / 'popping.db')
         assert list((tmp_path / 'demo').glob('.demo-candidate-*')) == []
 
-
-class TestDemoDbAppIntegration:
-    """Verify the web app selects create-only versus explicit reset behavior."""
-
-    def test_app_ensure_uses_create_only_mode_and_configured_data_dir(
-            self, tmp_path, monkeypatch):
-        import app as app_module
-
-        monkeypatch.setattr(app_module.config, 'DATA_DIR', str(tmp_path))
-        captured = {}
-
-        def fake_run(command, **kwargs):
-            captured['command'] = command
-            captured['kwargs'] = kwargs
-            db_path = tmp_path / 'demo' / 'popping.db'
-            db_path.parent.mkdir(parents=True, exist_ok=True)
-            db_path.touch()
-
-        monkeypatch.setattr(subprocess, 'run', fake_run)
-        assert app_module._ensure_demo_db() is True
-        assert captured['command'][-1] == '--ensure'
-        assert captured['kwargs']['env']['DATA_DIR'] == str(tmp_path)
-
-    def test_app_reset_uses_explicit_reset_and_configured_data_dir(
-            self, tmp_path, monkeypatch):
-        import app as app_module
-
-        monkeypatch.setattr(app_module.config, 'DATA_DIR', str(tmp_path))
-        captured = {}
-
-        def fake_run(command, **kwargs):
-            captured['command'] = command
-            captured['kwargs'] = kwargs
-
-        monkeypatch.setattr(subprocess, 'run', fake_run)
-        with app_module.app.test_request_context('/demo/reset'):
-            response = app_module.demo_reset()
-
-        assert response.status_code == 302
-        assert '--ensure' not in captured['command']
-        assert captured['kwargs']['env']['DATA_DIR'] == str(tmp_path)
-
-
-class TestCheckFlag:
-    """Verify --check exits correctly."""
-
-    def test_check_returns_1_when_no_db(self, tmp_path):
+    def test_check_flag(self, tmp_path):
         env = dict(os.environ, DATA_DIR=str(tmp_path))
-        result = subprocess.run(
-            [sys.executable, SCRIPT, '--check'], capture_output=True, env=env, timeout=10
+        missing = subprocess.run(
+            [sys.executable, str(SCRIPT), '--check'],
+            capture_output=True,
+            env=env,
+            timeout=10,
         )
-        assert result.returncode == 1
+        assert missing.returncode == 1
+        assert _run_init(tmp_path).returncode == 0
+        present = subprocess.run(
+            [sys.executable, str(SCRIPT), '--check'],
+            capture_output=True,
+            env=env,
+            timeout=10,
+        )
+        assert present.returncode == 0
 
-    def test_check_returns_0_after_init(self, tmp_path):
-        result = _run_init(tmp_path)
-        assert result.returncode == 0
-        env = dict(os.environ, DATA_DIR=str(tmp_path))
-        result = subprocess.run(
-            [sys.executable, SCRIPT, '--check'], capture_output=True, env=env, timeout=10
+
+@pytest.fixture
+def private_demo_env(tmp_path):
+    data_dir = tmp_path / 'data'
+    data_dir.mkdir()
+    return {
+        'data_dir': data_dir,
+        'classes_dir': CLASSES_DIR,
+        'schema': SCHEMA,
+    }
+
+
+def _create_private(env, slug=None):
+    instance_slug = demo_instance.create_demo_instance(
+        str(env['data_dir']),
+        str(env['classes_dir']),
+        str(env['schema']),
+        slug=slug,
+    )
+    path = Path(demo_instance.demo_database_path(
+        str(env['data_dir']), instance_slug
+    ))
+    return instance_slug, path
+
+
+class TestPrivateDemoDatabase:
+    def test_instance_uses_random_valid_slug_and_exact_shape(self, private_demo_env):
+        slug, path = _create_private(private_demo_env)
+        assert demo_instance.is_demo_instance_slug(slug)
+        assert demo_instance.canonical_class_slug(slug) == 'demo'
+        assert path == private_demo_env['data_dir'] / slug / 'popping.db'
+        _assert_seed_shape(path, expected_slug=slug)
+
+    def test_instances_have_separate_databases_and_appendices(self, private_demo_env):
+        slug_a, path_a = _create_private(private_demo_env)
+        slug_b, path_b = _create_private(private_demo_env)
+        assert slug_a != slug_b
+        assert path_a != path_b
+
+        connection = _open_db(path_a)
+        connection.execute("UPDATE course_state SET phase = 'competition'")
+        connection.execute(
+            "UPDATE students SET team_id = (SELECT id FROM teams ORDER BY id LIMIT 1) "
+            "WHERE student_id = 'demo001'"
         )
-        assert result.returncode == 0
+        connection.commit()
+        connection.close()
+        appendix_a = private_demo_env['data_dir'] / slug_a / 'appendix' / 'week-1-appendix.md'
+        appendix_b = private_demo_env['data_dir'] / slug_b / 'appendix' / 'week-1-appendix.md'
+        appendix_a.write_text('instance A only', encoding='utf-8')
+
+        connection = _open_db(path_b)
+        try:
+            assert connection.execute(
+                'SELECT phase FROM course_state'
+            ).fetchone()[0] == 'setup'
+            assert connection.execute(
+                'SELECT COUNT(*) FROM students WHERE team_id IS NOT NULL'
+            ).fetchone()[0] == 0
+        finally:
+            connection.close()
+        assert appendix_b.read_text(encoding='utf-8') != 'instance A only'
+
+    def test_reset_restores_only_requested_instance(self, private_demo_env):
+        slug_a, path_a = _create_private(private_demo_env)
+        slug_b, path_b = _create_private(private_demo_env)
+        for path in (path_a, path_b):
+            connection = _open_db(path)
+            connection.execute("UPDATE course_state SET phase = 'competition'")
+            connection.execute(
+                "UPDATE students SET team_id = (SELECT id FROM teams ORDER BY id LIMIT 1) "
+                "WHERE student_id = 'demo001'"
+            )
+            connection.commit()
+            connection.close()
+
+        demo_instance.reset_demo_instance(
+            str(private_demo_env['data_dir']),
+            str(private_demo_env['classes_dir']),
+            slug_a,
+        )
+        _assert_seed_shape(path_a, expected_slug=slug_a)
+        connection = _open_db(path_b)
+        try:
+            assert connection.execute(
+                'SELECT phase FROM course_state'
+            ).fetchone()[0] == 'competition'
+            assert connection.execute(
+                'SELECT COUNT(*) FROM students WHERE team_id IS NOT NULL'
+            ).fetchone()[0] == 1
+        finally:
+            connection.close()
+
+    @pytest.mark.parametrize('slug', [
+        'demo',
+        'demo_bad',
+        'demo_' + 'a' * 31,
+        'demo_' + 'g' * 32,
+        '../demo_' + 'a' * 32,
+    ])
+    def test_rejects_invalid_instance_slugs(self, private_demo_env, slug):
+        with pytest.raises(ValueError, match='Invalid demo instance'):
+            _create_private(private_demo_env, slug=slug)
+
+    def test_cleanup_removes_expired_instance_but_keeps_fresh_one(
+            self, private_demo_env):
+        expired_slug, _path = _create_private(private_demo_env)
+        fresh_slug, _path = _create_private(private_demo_env)
+        old_time = time.time() - demo_instance.DEMO_INSTANCE_TTL_SECONDS - 1
+        demo_instance.touch_demo_instance(
+            str(private_demo_env['data_dir']), expired_slug, now=old_time
+        )
+
+        removed = demo_instance.cleanup_expired_demo_instances(
+            str(private_demo_env['data_dir']), now=time.time()
+        )
+        assert removed == [expired_slug]
+        assert not (private_demo_env['data_dir'] / expired_slug).exists()
+        assert (private_demo_env['data_dir'] / fresh_slug).is_dir()

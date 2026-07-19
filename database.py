@@ -77,15 +77,20 @@ def ensure_schema(slug):
     _schema_checked.add(slug)
 
 
+def forget_schema(slug):
+    """Forget a removed short-lived database from the process cache."""
+    _schema_checked.discard(slug)
+
+
 def _ensure_schema_locked(db):
     """Add missing columns/tables to existing databases (migration).
     Runs only once per slug per process; subsequent calls are a no-op."""
     # course_state columns
     cs_cols = [row['name'] for row in db.execute('PRAGMA table_info(course_state)').fetchall()]
     if 'max_teams' not in cs_cols:
-        db.execute('ALTER TABLE course_state ADD COLUMN max_teams INTEGER DEFAULT 8')
+        db.execute('ALTER TABLE course_state ADD COLUMN max_teams INTEGER DEFAULT 6')
     if 'max_members_per_team' not in cs_cols:
-        db.execute('ALTER TABLE course_state ADD COLUMN max_members_per_team INTEGER DEFAULT 5')
+        db.execute('ALTER TABLE course_state ADD COLUMN max_members_per_team INTEGER DEFAULT 10')
     if 'teams_locked' not in cs_cols:
         db.execute('ALTER TABLE course_state ADD COLUMN teams_locked INTEGER DEFAULT 0')
     if 'discussion_week' not in cs_cols:
@@ -376,7 +381,7 @@ def get_max_teams(slug, course_id):
     if state and state['max_teams'] is not None:
         return state['max_teams']
     total = query_db(slug, 'SELECT COUNT(*) as c FROM teams WHERE course_id = ?', [course_id], one=True)
-    return total['c'] if total else 5
+    return min(total['c'], 6) if total else 6
 
 
 def get_max_members_per_team(slug, course_id):

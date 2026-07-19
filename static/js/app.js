@@ -1,7 +1,22 @@
-async function postJSON(url, body) {
-    let res;
+const REQUEST_TIMEOUT_MS = 15000;
+const UPLOAD_TIMEOUT_MS = 30000;
+
+async function fetchJSONWithTimeout(url, options = {}, timeoutMs = REQUEST_TIMEOUT_MS) {
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
     try {
-        res = await fetch(url, {
+        const res = await fetch(url, { ...options, signal: controller.signal });
+        const data = await res.json().catch(() => ({}));
+        return { res, data };
+    } finally {
+        window.clearTimeout(timeout);
+    }
+}
+
+async function postJSON(url, body) {
+    let result;
+    try {
+        result = await fetchJSONWithTimeout(url, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(body)
@@ -14,20 +29,20 @@ async function postJSON(url, body) {
             _status: 0
         };
     }
+    const { res, data } = result;
     if (res.status === 401) {
         window.location.href = '/';
         return { success: false, error: 'Session expired' };
     }
-    const data = await res.json().catch(() => ({}));
     data._status = res.status;
     if (!res.ok && !data.error) data.error = 'Request failed';
     return data;
 }
 
 async function deleteJSON(url, body = {}) {
-    let res;
+    let result;
     try {
-        res = await fetch(url, {
+        result = await fetchJSONWithTimeout(url, {
             method: 'DELETE',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(body)
@@ -40,11 +55,11 @@ async function deleteJSON(url, body = {}) {
             _status: 0
         };
     }
+    const { res, data } = result;
     if (res.status === 401) {
         window.location.href = '/';
         return { success: false, error: 'Session expired' };
     }
-    const data = await res.json().catch(() => ({}));
     data._status = res.status;
     if (!res.ok && !data.error) data.error = 'Request failed';
     return data;
@@ -127,7 +142,7 @@ function renderPresentationQuestion(question) {
     const sourceKey = question.source_key || '';
     const title = question.title || '';
     const heading = sourceKey.startsWith('appendix:')
-        ? `Appendix — ${title}`
+        ? `Appendix: ${title}`
         : `#${question.question_num}: ${title}`;
     const body = question.content || question.question_text || '';
     return renderMarkdown(`${heading}\n\n${body}`);
@@ -243,12 +258,15 @@ window.handleRosterFile = async function(e) {
         const formData = new FormData();
         formData.append('file', file);
         appendInstructorStateForm(formData);
-        const res = await fetch('/api/upload_roster', { method: 'POST', body: formData });
+        const { res, data } = await fetchJSONWithTimeout(
+            '/api/upload_roster',
+            { method: 'POST', body: formData },
+            UPLOAD_TIMEOUT_MS
+        );
         if (res.status === 401) {
             window.location.href = '/';
             return;
         }
-        const data = await res.json().catch(() => ({}));
         if (res.ok && data.requires_confirmation && data.preview_token) {
             showRosterPreview(file, data);
         } else {
@@ -277,12 +295,15 @@ window.confirmRosterUpload = async function() {
         formData.append('confirm', 'true');
         formData.append('preview_token', pendingRosterUpload.token);
         appendInstructorStateForm(formData);
-        const res = await fetch('/api/upload_roster', { method: 'POST', body: formData });
+        const { res, data } = await fetchJSONWithTimeout(
+            '/api/upload_roster',
+            { method: 'POST', body: formData },
+            UPLOAD_TIMEOUT_MS
+        );
         if (res.status === 401) {
             window.location.href = '/';
             return;
         }
-        const data = await res.json().catch(() => ({}));
         if (!res.ok || !data.success) {
             data._status = res.status;
             showInstructorMutationError(
@@ -404,14 +425,15 @@ if (dashboard) {
                 pollParams.set('known_discussion_key', lastRenderedDiscussionKey);
             }
             const questionQuery = pollParams.toString();
-            const res = await fetch('/api/poll' + (questionQuery ? `?${questionQuery}` : ''));
+            const { res, data } = await fetchJSONWithTimeout(
+                '/api/poll' + (questionQuery ? `?${questionQuery}` : '')
+            );
             if (res.status === 401) {
                 _pollStopped = true;
                 window.location.href = '/';
                 return;
             }
             if (!res.ok) throw new Error('poll failed');
-            const data = await res.json();
             if (_connectionInterrupted) showConnectionStatus('Live updates restored.', true);
             _pollFailures = 0;
             // State is frequent; the roster is fetched only when its version changes.
@@ -494,13 +516,12 @@ if (dashboard) {
         const grid = document.getElementById('team-picker-grid');
         grid.innerHTML = '<p class="loading">Loading teams...</p>';
         try {
-            const res = await fetch('/api/teams');
+            const { res, data: teams } = await fetchJSONWithTimeout('/api/teams');
             if (res.status === 401) {
                 window.location.href = '/';
                 return;
             }
             if (!res.ok) throw new Error('team load failed');
-            const teams = await res.json();
             if (!Array.isArray(teams)) throw new Error('invalid team response');
             const maxMembers = Number(dashboard.dataset.maxMembers) || null;
             grid.innerHTML = `
@@ -508,7 +529,7 @@ if (dashboard) {
                     <span class="team-name" style="color:var(--text-muted)">Remove me from my team</span>
                 </button>
             ` + teams.map(t => {
-                const memberCount = Array.isArray(t.members) ? t.members.length : Number(t.member_count) || 0;
+                const memberCount = Number(t.member_count ?? t.members?.length ?? 0);
                 const isFull = maxMembers != null && memberCount >= maxMembers && t.id !== MY_TEAM_ID;
                 return `
                 <button class="team-card" data-team-id="${t.id}"
@@ -543,9 +564,9 @@ if (dashboard) {
             const teamId = Number(card.dataset.teamId);
             const team = teamById.get(teamId);
             if (!team) return;
-            const memberCount = Array.isArray(team.members)
-                ? team.members.length
-                : Number(team.member_count) || 0;
+            const memberCount = Number(
+                team.member_count ?? team.members?.length ?? 0
+            );
             const isFull = memberCount >= maxMembers && teamId !== myTeamId;
             const capacity = card.querySelector('.team-capacity');
             if (capacity) {
@@ -568,9 +589,11 @@ if (dashboard) {
     async function syncRoster(version) {
         const normalizedVersion = Number.isInteger(version) ? version : 0;
         if (_rosterVersion === normalizedVersion) return;
-        const res = await fetch(`/api/teams?version=${encodeURIComponent(normalizedVersion)}`);
+        const { res, data: teams } = await fetchJSONWithTimeout(
+            `/api/teams?version=${encodeURIComponent(normalizedVersion)}`
+        );
         if (!res.ok) throw new Error('roster refresh failed');
-        await loadRoster(await res.json());
+        await loadRoster(teams);
         _rosterVersion = normalizedVersion;
     }
 
@@ -621,14 +644,14 @@ if (dashboard) {
             return;
         }
 
-        fetch('/api/my_responses').then(async res => {
+        fetchJSONWithTimeout('/api/my_responses').then(({ res, data }) => {
             if (res.status === 401) {
                 _pollStopped = true;
                 window.location.href = '/';
                 return null;
             }
             if (!res.ok) return null;
-            return res.json();
+            return data;
         }).then(data => {
             if (!data || requestId !== _responseRequestId || context !== _responseContext) return;
             responseNeedsRefresh = false;
@@ -679,8 +702,9 @@ if (dashboard) {
 
     async function loadState(state) {
         if (!state) {
-            const res = await fetch('/api/state');
-            state = await res.json();
+            const result = await fetchJSONWithTimeout('/api/state');
+            if (!result.res.ok) throw new Error('state load failed');
+            state = result.data;
         }
 
         // The dashboard's activity controls are rendered server-side for the
@@ -1130,7 +1154,7 @@ if (dashboard) {
         if (!ok) {
             btn.classList.toggle('active-green', wasSelected);
             btn.setAttribute('aria-pressed', wasSelected ? 'true' : 'false');
-            showToast('Failed to save — please try again', 'error');
+            showToast('Failed to save. Please try again.', 'error');
         }
         requestImmediatePoll();
     };
@@ -1312,14 +1336,15 @@ if (instructor) {
                 pollParams.set('known_question_revision', _instrKnownQuestionRevision);
             }
             const questionQuery = pollParams.toString();
-            const res = await fetch('/api/poll' + (questionQuery ? `?${questionQuery}` : ''));
+            const { res, data } = await fetchJSONWithTimeout(
+                '/api/poll' + (questionQuery ? `?${questionQuery}` : '')
+            );
             if (res.status === 401) {
                 _instrPollStopped = true;
                 window.location.href = '/';
                 return;
             }
             if (!res.ok) throw new Error('poll failed');
-            const data = await res.json();
             if (_instrConnectionInterrupted) {
                 showInstructorConnectionStatus('Live updates restored.', true);
             }
@@ -1355,9 +1380,12 @@ if (instructor) {
                 const card = rosterGrid.closest('.card');
                 if (card && card.querySelector('h2')?.textContent?.includes('Team and Members')) {
                     try {
-                        const rosterResponse = await fetch(`/api/teams?version=${encodeURIComponent(state.roster_version)}`);
+                        const { res: rosterResponse, data: rosterData } =
+                            await fetchJSONWithTimeout(
+                                `/api/teams?version=${encodeURIComponent(state.roster_version)}`
+                            );
                         if (!rosterResponse.ok) throw new Error('roster refresh failed');
-                        renderRosterGrid(rosterGrid, await rosterResponse.json(), null);
+                        renderRosterGrid(rosterGrid, rosterData, null);
                         _instrRosterVersion = state.roster_version;
                         instructor.dataset.rosterVersion = String(state.roster_version || 0);
                     } catch (e) {
@@ -1649,7 +1677,7 @@ window.confirmModifyTeams = async function() {
         return;
     }
     if (newMax < _originalMaxTeams) {
-        if (!confirm(`Reducing to ${newMax} teams will unassign students in teams ${newMax+1}–${_originalMaxTeams}. Continue?`)) {
+        if (!confirm(`Reducing to ${newMax} teams will unassign students in teams ${newMax + 1} through ${_originalMaxTeams}. Continue?`)) {
             return;
         }
     }
@@ -1695,10 +1723,11 @@ window.setPhase = async function(phase) {
                    !confirm('A presentation is still active. Leave this phase and finalize the current presentation?')) {
             return;
         }
-        const data = await postJSON('/api/set_phase', instructorStatePayload({
+        const phasePayload = instructorStatePayload({
             phase,
             confirm_end_session: confirmEndSession
-        }));
+        });
+        const data = await postJSON('/api/set_phase', phasePayload);
         if (data.success) {
             window.location.reload();
         } else {
@@ -1760,13 +1789,15 @@ window.loadStudentTable = async function() {
     });
     let data;
     try {
-        const res = await fetch('/api/students?' + params);
+        const { res, data: studentData } = await fetchJSONWithTimeout(
+            '/api/students?' + params
+        );
         if (res.status === 401) {
             window.location.href = '/';
             return;
         }
         if (!res.ok) throw new Error('student load failed');
-        data = await res.json();
+        data = studentData;
     } catch (error) {
         const tbody = document.getElementById('student-tbody');
         if (tbody && !tbody.querySelector('tr[data-id]')) {
@@ -1808,7 +1839,7 @@ window.loadStudentTable = async function() {
         const statusHtml = s.is_online
             ? '<span class="online-dot"></span> Online'
             : '<span class="offline-dot"></span> Offline';
-        const loginTime = s.last_login_at ? s.last_login_at.substring(0, 19) : '—';
+        const loginTime = s.last_login_at ? s.last_login_at.substring(0, 19) : 'Not yet';
         const name = s.name || s.student_id;
 
         const tr = document.createElement('tr');
@@ -1952,13 +1983,15 @@ let discussionPostPending = false;
 async function initWeekSelector() {
     let data;
     try {
-        const res = await fetch('/api/discussion_questions');
+        const { res, data: questionData } = await fetchJSONWithTimeout(
+            '/api/discussion_questions'
+        );
         if (res.status === 401) {
             window.location.href = '/';
             return;
         }
         if (!res.ok) throw new Error('question load failed');
-        data = await res.json();
+        data = questionData;
         discussionCurrentWeek = Number(data.current_week) || null;
     } catch (error) {
         const setupSel = document.getElementById('setup-week-select');
@@ -2765,7 +2798,7 @@ function renderHistory() {
     }
     container.innerHTML = history.map(h => `
         <div class="history-item">
-            <span>${escapeHtmlValue(h.title || 'Untitled')} — <strong>${escapeHtmlValue(h.team || '?')}</strong></span>
+            <span>${escapeHtmlValue(h.title || 'Untitled')}: <strong>${escapeHtmlValue(h.team || '?')}</strong></span>
             <span>${escapeHtmlValue(h.responses || 0)} ratings</span>
         </div>
     `).join('');

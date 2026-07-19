@@ -60,13 +60,13 @@
     {% if session.get('is_demo') %}
     <div class="demo-banner">
         <span class="demo-banner-text">
-            🎮 <strong>Demo Mode</strong> — You're exploring a sandbox.
-            Data may be modified or reset at any time.
+            🎮 <strong>Private Demo</strong>: this sandbox belongs to its private URL.
         </span>
-        <a href="{{ url_for('demo_reset') }}" class="demo-banner-reset"
-           data-course-slug="{{ session.slug or '' }}" onclick="return confirmDemoReset()">
-            🔄 Reset
-        </a>
+        <form method="post" action="{{ url_for('demo_reset', instance_slug=session.slug) }}"
+              class="demo-banner-reset-form" onsubmit="return confirmDemoReset()">
+            <button type="submit" class="demo-banner-reset"
+                    data-course-slug="{{ session.slug or '' }}">🔄 Reset</button>
+        </form>
         <a href="{{ url_for('demo_exit') }}" class="demo-banner-exit">Exit Demo →</a>
     </div>
     {% endif %}

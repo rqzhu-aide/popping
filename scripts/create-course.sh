@@ -27,7 +27,8 @@ name: "$NAME"
 code: "$CODE"
 semester: "$SEMESTER"
 active: true
-max_teams: 5
+team_pool_size: 20
+max_teams: 6
 max_members_per_team: 10
 teams:
   - color: "#ef4444"

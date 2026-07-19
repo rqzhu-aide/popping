@@ -1499,6 +1499,11 @@ input:focus, textarea:focus {
     margin-top: 12px;
 }
 
+.demo-session-note {
+    color: var(--text-muted);
+    font-size: 0.9rem;
+}
+
 .demo-unavailable {
     padding: 24px;
     color: var(--text-muted);
@@ -1523,6 +1528,10 @@ input:focus, textarea:focus {
     flex: 1;
 }
 
+.demo-banner-reset-form {
+    margin: 0;
+}
+
 .demo-banner-reset,
 .demo-banner-exit {
     color: #78350f;
@@ -1534,9 +1543,28 @@ input:focus, textarea:focus {
     white-space: nowrap;
 }
 
+.demo-banner-reset {
+    border: 0;
+    background: transparent;
+    font: inherit;
+    font-weight: 600;
+    cursor: pointer;
+}
+
 .demo-banner-reset:hover,
 .demo-banner-exit:hover {
     background: rgba(120, 53, 15, 0.12);
+}
+
+@media (max-width: 640px) {
+    .demo-banner {
+        flex-wrap: wrap;
+        gap: 6px;
+    }
+
+    .demo-banner-text {
+        flex-basis: 100%;
+    }
 }
 
 /* ===== Theme Toggle ===== */

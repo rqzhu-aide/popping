@@ -4,6 +4,9 @@ url: https://teazrq.github.io/stat432rpy/
 code: STAT 432
 semester: Fall 2026
 active: true
+team_pool_size: 20
+max_teams: 6
+max_members_per_team: 10
 teams:
 - color: '#ef4444'
 - color: '#3b82f6'

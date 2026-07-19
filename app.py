@@ -1,5 +1,4 @@
 import os
-import sys
 import csv
 import copy
 import gzip
@@ -25,7 +24,28 @@ from werkzeug.exceptions import HTTPException, RequestEntityTooLarge
 from werkzeug.middleware.proxy_fix import ProxyFix
 
 import config
-from database import init_app, query_db, execute_db, get_db, init_db, get_max_teams, get_max_members_per_team, ensure_schema
+from database import (
+    ensure_schema,
+    execute_db,
+    forget_schema,
+    get_db,
+    get_max_members_per_team,
+    get_max_teams,
+    init_app,
+    init_db,
+    query_db,
+)
+from demo_instance import (
+    MAX_DEMO_INSTANCES,
+    canonical_class_slug,
+    cleanup_expired_demo_instances,
+    count_demo_instances,
+    course_class_dir,
+    create_demo_instance,
+    is_demo_instance_slug,
+    reset_demo_instance,
+    touch_demo_instance,
+)
 from question_catalog import validate_question_catalog
 
 app = Flask(__name__)
@@ -35,11 +55,27 @@ if os.environ.get('RENDER'):
 init_app(app)
 
 
+class CourseTemporarilyUnavailable(Exception):
+    """A short-lived storage failure that must not invalidate a login."""
+
+
 @app.errorhandler(RequestEntityTooLarge)
 def request_too_large(_error):
     if request.path.startswith('/api/'):
         return jsonify({'error': 'Request is too large'}), 413
     return 'Request is too large', 413
+
+
+@app.errorhandler(CourseTemporarilyUnavailable)
+def course_temporarily_unavailable(_error):
+    message = 'Course data is temporarily unavailable. Please try again.'
+    if request.path.startswith('/api/'):
+        response = jsonify({'error': message})
+    else:
+        response = make_response(message)
+    response.status_code = 503
+    response.headers['Retry-After'] = '5'
+    return response
 
 
 @app.errorhandler(HTTPException)
@@ -88,6 +124,8 @@ MAX_ROSTER_ROWS = 500
 MAX_EXPORT_ROWS = 100000
 MAX_EXPORT_BYTES = 50 * 1024 * 1024
 COURSE_AVAILABILITY_TTL = 30
+COURSE_UNAVAILABLE_TTL = 5
+DEMO_RESET_COOLDOWN_SECONDS = 10
 REQUIRED_COURSE_SCHEMA = {
     'instructors': {'id', 'username', 'name', 'pin'},
     'courses': {
@@ -107,6 +145,7 @@ REQUIRED_COURSE_TABLES = frozenset(REQUIRED_COURSE_SCHEMA)
 
 _course_availability_cache = {}
 _course_availability_lock = threading.RLock()
+_demo_instance_create_lock = threading.Lock()
 
 
 def is_valid_slug(slug):
@@ -124,6 +163,10 @@ def course_db_path(slug):
     if not is_valid_slug(slug):
         return None
     return os.path.join(config.DATA_DIR, slug, 'popping.db')
+
+
+def _course_class_dir(slug):
+    return course_class_dir(config.CLASSES_DIR, slug)
 
 
 def active_presentation_key(state):
@@ -417,7 +460,7 @@ def _write_text_atomic(path, content):
 
 
 def read_presentation_question_index(slug, week_num):
-    week_dir = os.path.join(config.CLASSES_DIR, slug, f'week{week_num}')
+    week_dir = os.path.join(_course_class_dir(slug), f'week{week_num}')
     index_path = os.path.join(week_dir, 'index.md')
     if not os.path.exists(index_path):
         return None
@@ -650,8 +693,11 @@ def load_question_html(slug, week_num, question_num):
     Returns HTML string or None if file not found.
     Cached results are invalidated when the file changes.
     """
-    cache_key = (slug, week_num, question_num)
-    filepath = os.path.join(config.CLASSES_DIR, slug, f'week{week_num}', f'q{question_num:02d}.html')
+    class_slug = canonical_class_slug(slug)
+    cache_key = (class_slug, week_num, question_num)
+    filepath = os.path.join(
+        _course_class_dir(slug), f'week{week_num}', f'q{question_num:02d}.html'
+    )
     try:
         stat = os.stat(filepath)
         signature = (stat.st_mtime_ns, stat.st_size)
@@ -887,14 +933,24 @@ def _exclusive_session_role():
     return None
 
 
+def _session_course_is_ready(slug):
+    """Validate a signed-in course without discarding transient sessions."""
+    availability = _course_availability(slug)
+    if availability['status'] == 'unavailable':
+        raise CourseTemporarilyUnavailable()
+    if availability['status'] != 'ready':
+        session.clear()
+        return False
+    return True
+
+
 def student_login_required(f):
     @wraps(f)
     def decorated(*args, **kwargs):
         slug = session.get('slug')
         if _exclusive_session_role() != 'student':
             return _auth_failure()
-        if _course_availability(slug)['status'] != 'ready':
-            session.clear()
+        if not _session_course_is_ready(slug):
             return _auth_failure()
         ensure_schema(slug)
         student = query_db(
@@ -920,8 +976,7 @@ def instructor_login_required(f):
         if (_exclusive_session_role() != 'instructor' or
                 (route_slug is not None and route_slug != slug)):
             return _auth_failure()
-        if _course_availability(slug)['status'] != 'ready':
-            session.clear()
+        if not _session_course_is_ready(slug):
             return _auth_failure()
         instructor = query_db(
             slug,
@@ -951,7 +1006,8 @@ def _inspect_course_availability(slug):
     if not is_valid_slug(slug):
         return result
 
-    class_dir = os.path.join(config.CLASSES_DIR, slug)
+    class_slug = canonical_class_slug(slug)
+    class_dir = _course_class_dir(slug)
     yaml_path = os.path.join(class_dir, 'course.yaml')
     if not os.path.isdir(class_dir) or not os.path.isfile(yaml_path):
         return result
@@ -963,14 +1019,20 @@ def _inspect_course_availability(slug):
     try:
         with open(yaml_path, encoding='utf-8') as config_file:
             course_config = yaml.safe_load(config_file)
-    except (OSError, UnicodeError, yaml.YAMLError):
+    except OSError:
+        result.update({
+            'status': 'unavailable',
+            'message': 'Course data is temporarily unavailable.',
+        })
+        return result
+    except (UnicodeError, yaml.YAMLError):
         return result
     if not isinstance(course_config, dict):
         return result
 
     result['config'] = course_config
     result['configured_active'] = course_config.get('active') is True
-    if course_config.get('slug') != slug:
+    if course_config.get('slug') != class_slug:
         return result
     if not result['configured_active']:
         result.update({
@@ -1032,7 +1094,13 @@ def _inspect_course_availability(slug):
             'message': '',
             'course': dict(rows[0]),
         })
-    except (OSError, sqlite3.Error):
+    except (OSError, sqlite3.OperationalError):
+        result.update({
+            'status': 'unavailable',
+            'message': 'Course data is temporarily unavailable.',
+        })
+        return result
+    except sqlite3.Error:
         return result
     finally:
         if connection is not None:
@@ -1061,8 +1129,14 @@ def _course_availability(slug):
     now = time.monotonic()
     with _course_availability_lock:
         cached = _course_availability_cache.get(cache_key)
-        if cached and now - cached['checked_at'] < COURSE_AVAILABILITY_TTL:
-            return copy.deepcopy(cached['result'])
+        if cached:
+            cache_ttl = (
+                COURSE_UNAVAILABLE_TTL
+                if cached['result']['status'] == 'unavailable'
+                else COURSE_AVAILABILITY_TTL
+            )
+            if now - cached['checked_at'] < cache_ttl:
+                return copy.deepcopy(cached['result'])
         result = _inspect_course_availability(slug)
         _course_availability_cache[cache_key] = {
             'checked_at': time.monotonic(),
@@ -1211,112 +1285,171 @@ def instructor_login(slug):
     return render_template('instructor_login.html', course=course, slug=slug)
 
 
-def _ensure_demo_db():
-    """Create the demo database if it doesn't exist yet.
-
-    Existing databases created before the demo course used ``is_active=1``
-    are healed in place — the availability check refuses inactive courses.
-    """
-    db_path = os.path.join(config.DATA_DIR, 'demo', 'popping.db')
-    if os.path.exists(db_path):
-        try:
-            conn = sqlite3.connect(db_path, timeout=5)
-            try:
-                conn.execute(
-                    "UPDATE courses SET is_active = 1 WHERE slug = 'demo' AND is_active != 1"
-                )
-                conn.commit()
-            finally:
-                conn.close()
-        except sqlite3.Error:
-            pass
-        return True
-    try:
-        import subprocess
-        script = os.path.join(os.path.dirname(__file__), 'scripts', 'init-demo-db.py')
-        env = dict(os.environ, DATA_DIR=config.DATA_DIR)
-        subprocess.run(
-            [sys.executable, script, '--ensure'],
-            check=True,
-            capture_output=True,
-            timeout=30,
-            env=env,
-        )
-        return os.path.exists(db_path)
-    except Exception:
-        return False
-
-
 @app.route('/demo')
 def demo():
-    demo_exists = _ensure_demo_db()
-    return render_template('demo.html', demo_exists=demo_exists)
+    return render_template('demo.html', instance_slug=None)
+
+
+@app.route('/demo/start', methods=['POST'])
+def demo_start():
+    """Create one bounded, private demo database without spawning a process."""
+    if not _demo_instance_create_lock.acquire(blocking=False):
+        flash('A demo is being prepared. Please try again in a moment.', 'error')
+        return redirect(url_for('demo'))
+    try:
+        removed = cleanup_expired_demo_instances(config.DATA_DIR)
+        for removed_slug in removed:
+            _clear_course_availability_cache(removed_slug)
+            forget_schema(removed_slug)
+        if count_demo_instances(config.DATA_DIR) >= MAX_DEMO_INSTANCES:
+            flash('All demo spaces are in use. Please try again later.', 'error')
+            return redirect(url_for('demo'))
+        instance_slug = create_demo_instance(
+            config.DATA_DIR,
+            config.CLASSES_DIR,
+            config.DATABASE_SCHEMA,
+        )
+        _clear_course_availability_cache(instance_slug)
+    except Exception:
+        app.logger.exception('Could not create a private demo instance')
+        flash('The demo could not be prepared. Please try again.', 'error')
+        return redirect(url_for('demo'))
+    finally:
+        _demo_instance_create_lock.release()
+
+    session.clear()
+    return redirect(url_for(
+        'demo_instance_home', instance_slug=instance_slug
+    ))
+
+
+def _demo_instance_ready(instance_slug):
+    if not is_demo_instance_slug(instance_slug):
+        return False
+    return _course_availability(instance_slug)['status'] == 'ready'
+
+
+@app.route('/demo/<instance_slug>')
+def demo_instance_home(instance_slug):
+    if not _demo_instance_ready(instance_slug):
+        flash('This private demo is no longer available.', 'error')
+        return redirect(url_for('demo'))
+    touch_demo_instance(config.DATA_DIR, instance_slug)
+    return render_template('demo.html', instance_slug=instance_slug)
+
+
+def _start_demo_session(instance_slug, role, principal):
+    if not _demo_instance_ready(instance_slug):
+        flash('This private demo is no longer available.', 'error')
+        return redirect(url_for('demo'))
+
+    reset_at = session.get('demo_reset_at')
+    session.clear()
+    if reset_at is not None:
+        session['demo_reset_at'] = reset_at
+    session['slug'] = instance_slug
+    session['role'] = role
+    session['is_demo'] = True
+    if role == 'instructor':
+        session['instructor_id'] = principal['id']
+        session['instructor_name'] = principal['name']
+        return redirect(url_for('instructor_course', slug=instance_slug))
+
+    session['student_id'] = principal['student_id']
+    session['name'] = principal['name'] or principal['student_id']
+    execute_db(
+        instance_slug,
+        'UPDATE students SET last_login_at = CURRENT_TIMESTAMP WHERE id = ?',
+        [principal['id']],
+    )
+    return redirect(url_for('dashboard'))
+
+
+@app.route('/demo/<instance_slug>/instructor')
+def demo_instructor(instance_slug):
+    if not _demo_instance_ready(instance_slug):
+        flash('This private demo is no longer available.', 'error')
+        return redirect(url_for('demo'))
+    instructor = query_db(
+        instance_slug, 'SELECT * FROM instructors ORDER BY id LIMIT 1', one=True
+    )
+    return _start_demo_session(instance_slug, 'instructor', instructor)
+
+
+@app.route('/demo/<instance_slug>/student/<int:student_number>')
+def demo_student(instance_slug, student_number):
+    if student_number not in (1, 2) or not _demo_instance_ready(instance_slug):
+        flash('This private demo student is not available.', 'error')
+        return redirect(url_for('demo'))
+    ensure_schema(instance_slug)
+    student = query_db(
+        instance_slug,
+        '''SELECT * FROM students WHERE is_active = 1
+           ORDER BY id LIMIT 1 OFFSET ?''',
+        [student_number - 1],
+        one=True,
+    )
+    if not student:
+        flash('This private demo student is not available.', 'error')
+        return redirect(url_for('demo_instance_home', instance_slug=instance_slug))
+    return _start_demo_session(instance_slug, 'student', student)
 
 
 @app.route('/demo/instructor')
-def demo_instructor():
-    """Log in as the demo instructor — no password needed."""
-    if not _ensure_demo_db():
-        flash('Demo is not available right now. Please try again later.', 'error')
-        return redirect(url_for('demo'))
-    session.clear()
-    instructor = query_db('demo',
-        'SELECT * FROM instructors LIMIT 1', one=True)
-    if not instructor:
-        flash('Demo data not found.', 'error')
-        return redirect(url_for('demo'))
-    session['instructor_id'] = instructor['id']
-    session['role'] = 'instructor'
-    session['instructor_name'] = instructor['name']
-    session['slug'] = 'demo'
-    session['is_demo'] = True
-    return redirect(url_for('instructor_course', slug='demo'))
-
-
 @app.route('/demo/student')
-def demo_student():
-    """Log in as a demo student — no password needed."""
-    if not _ensure_demo_db():
-        flash('Demo is not available right now. Please try again later.', 'error')
-        return redirect(url_for('demo'))
-    ensure_schema('demo')
-    session.clear()
-    # Pick the first student (Alice Chen, Team 1)
-    student = query_db('demo',
-        'SELECT * FROM students WHERE is_active = 1 ORDER BY id LIMIT 1', one=True)
-    if not student:
-        flash('Demo data not found.', 'error')
-        return redirect(url_for('demo'))
-    session['student_id'] = student['student_id']
-    session['role'] = 'student'
-    session['name'] = student['name'] or student['student_id']
-    session['slug'] = 'demo'
-    session['is_demo'] = True
-    return redirect(url_for('dashboard'))
+def legacy_demo_role():
+    flash('Start a private demo first.', 'error')
+    return redirect(url_for('demo'))
 
 
 @app.route('/demo/exit')
 def demo_exit():
-    """Exit demo mode — clear session and return to the main site."""
-    session.clear()
-    return redirect(url_for('index'))
-
-
-@app.route('/demo/reset')
-def demo_reset():
-    """Reset demo data back to initial state."""
-    import subprocess
-    script = os.path.join(os.path.dirname(__file__), 'scripts', 'init-demo-db.py')
-    try:
-        env = dict(os.environ, DATA_DIR=config.DATA_DIR)
-        subprocess.run(
-            [sys.executable, script], check=True, capture_output=True, env=env
-        )
-        flash('Demo has been reset to its initial state.', 'success')
-    except Exception as e:
-        flash(f'Could not reset demo: {e}', 'error')
+    """Exit demo mode, leaving the private instance for its short TTL."""
     session.clear()
     return redirect(url_for('demo'))
+
+
+@app.route('/demo/<instance_slug>/reset', methods=['POST'])
+def demo_reset(instance_slug):
+    """Reset only the authenticated visitor's tiny private demo."""
+    if (not is_demo_instance_slug(instance_slug) or
+            not session.get('is_demo') or
+            session.get('slug') != instance_slug or
+            _exclusive_session_role() not in ('student', 'instructor')):
+        return 'Forbidden', 403
+
+    now = time.time()
+    last_reset = session.get('demo_reset_at')
+    if isinstance(last_reset, (int, float)):
+        retry_after = DEMO_RESET_COOLDOWN_SECONDS - (now - last_reset)
+        if retry_after > 0:
+            response = make_response('Please wait before resetting again.', 429)
+            response.headers['Retry-After'] = str(max(1, math.ceil(retry_after)))
+            return response
+    try:
+        reset_demo_instance(
+            config.DATA_DIR, config.CLASSES_DIR, instance_slug
+        )
+        _clear_course_availability_cache(instance_slug)
+        flash('Demo has been reset to its initial state.', 'success')
+    except (OSError, sqlite3.Error):
+        app.logger.exception('Could not reset demo instance %s', instance_slug)
+        flash('The demo is busy. Please try again.', 'error')
+        return redirect(url_for(
+            'demo_instance_home', instance_slug=instance_slug
+        ))
+
+    session.clear()
+    session['demo_reset_at'] = now
+    return redirect(url_for(
+        'demo_instance_home', instance_slug=instance_slug
+    ))
+
+
+@app.route('/demo/reset', methods=['POST'])
+def legacy_demo_reset():
+    """The former public reset is deliberately inert."""
+    return 'Forbidden', 403
 
 
 @app.route('/logout')
@@ -1404,7 +1537,7 @@ def instructor_course(slug):
     selected_week = state['discussion_week'] if state and state['discussion_week'] else 1
     try:
         catalog_week = validate_question_catalog(
-            os.path.join(config.CLASSES_DIR, slug),
+            _course_class_dir(slug),
             weeks=[selected_week],
         ).get_week(selected_week)
     except (OSError, ValueError):
@@ -1533,8 +1666,7 @@ def _authenticated_role(slug):
     if not slug or session.get('slug') != slug:
         return None
     role = _exclusive_session_role()
-    if role and _course_availability(slug)['status'] != 'ready':
-        session.clear()
+    if role and not _session_course_is_ready(slug):
         return None
     if role:
         ensure_schema(slug)
@@ -1786,8 +1918,10 @@ def _compute_state(slug, include_poll_count=True, known_question_id=None,
         'presentation_time_cap': state['presentation_time_cap'] if state else 300,
         'presentation_remaining': presentation_remaining,
         'teams_locked': bool(state['teams_locked']) if state else False,
-        'max_teams': state.get('max_teams', 8) if state else 8,
-        'max_members': state.get('max_members_per_team', 5) if state else 5,
+        'max_teams': (state.get('max_teams') or 6) if state else 6,
+        'max_members': (
+            state.get('max_members_per_team') or 10
+        ) if state else 10,
         'discussion_week': state.get('discussion_week', 1) if state else 1,
         'poll_active': poll_active_bool,
         'poll_started_at': state['poll_started_at'] if state else None,
@@ -1997,7 +2131,7 @@ def join_team():
 
         visible = db.execute(
             'SELECT id FROM teams WHERE course_id = ? ORDER BY id LIMIT ?',
-            [state['course_id'], state['max_teams'] or 8]
+            [state['course_id'], state['max_teams'] or 6]
         ).fetchall()
         if team_id not in {row['id'] for row in visible}:
             db.rollback()
@@ -2006,7 +2140,7 @@ def join_team():
         member_count = db.execute(
             'SELECT COUNT(*) AS c FROM students WHERE team_id = ? AND is_active = 1', [team_id]
         ).fetchone()['c']
-        if member_count >= (state['max_members_per_team'] or 5):
+        if member_count >= (state['max_members_per_team'] or 10):
             db.rollback()
             return jsonify({'error': 'That team is full'}), 409
 
@@ -2122,6 +2256,8 @@ def api_poll():
             'discussion': 3000,
             'competition': 2000,
         }.get(state_data['phase'], 5000)
+    if is_demo_instance_slug(slug):
+        poll_interval = max(poll_interval, 5000)
 
     return jsonify({
         'state': state_data,
@@ -2421,6 +2557,31 @@ def set_phase():
                 'error': 'This instructor page is stale; reload before changing the course state'
             }), 409
         old_phase = state['phase'] if state else 'setup'
+        entering_interactive_phase = (
+            old_phase in ('setup', 'ended')
+            and phase in ('discussion', 'competition')
+        )
+        if entering_interactive_phase:
+            roster_guard = _expected_roster_state_guard(data, state)
+            if roster_guard:
+                db.rollback()
+                return jsonify({'error': roster_guard[0]}), roster_guard[1]
+            unassigned_count = db.execute(
+                '''SELECT COUNT(*) AS c FROM students
+                   WHERE course_id = ? AND is_active = 1 AND team_id IS NULL''',
+                [course['id']],
+            ).fetchone()['c']
+            if unassigned_count > 0:
+                db.rollback()
+                return jsonify({
+                    'error': (
+                        f'{unassigned_count} active student'
+                        f'{"s are" if unassigned_count != 1 else " is"} '
+                        'not assigned to a team. Assign every student before '
+                        'leaving Setup.'
+                    ),
+                    'unassigned_count': unassigned_count,
+                }), 409
         if (phase == 'ended' and old_phase != 'ended' and
                 data.get('confirm_end_session') is not True):
             db.rollback()
@@ -2626,7 +2787,7 @@ def random_assign():
             return jsonify({'error': 'Random assignment is only available during setup'}), 409
         teams = db.execute(
             'SELECT id FROM teams WHERE course_id = ? ORDER BY id LIMIT ?',
-            [course['id'], state['max_teams'] or 8]
+            [course['id'], state['max_teams'] or 6]
         ).fetchall()
         if not teams:
             db.rollback()
@@ -2655,7 +2816,7 @@ def random_assign():
         for team_id in team_ids:
             counts.setdefault(team_id, 0)
 
-        max_members = state['max_members_per_team'] or 5
+        max_members = state['max_members_per_team'] or 10
         assignments = {}
         for student_id in student_ids:
             candidates = [
@@ -2764,7 +2925,7 @@ def set_discussion_week():
     week = data.get('week')
     if not isinstance(week, int) or week < 1:
         return jsonify({'error': 'Invalid week'}), 400
-    class_dir = os.path.join(config.CLASSES_DIR, slug)
+    class_dir = _course_class_dir(slug)
     try:
         catalog_week = validate_question_catalog(
             class_dir, weeks=[week]
@@ -2907,7 +3068,7 @@ def set_max_members():
             return jsonify({'error': 'Team settings can only change during setup'}), 409
 
         excess_ids = []
-        if new_max < (state['max_members_per_team'] or 5):
+        if new_max < (state['max_members_per_team'] or 10):
             full_teams = db.execute(
                 '''SELECT team_id, COUNT(*) AS cnt FROM students
                    WHERE course_id = ? AND team_id IS NOT NULL AND is_active = 1
@@ -2955,7 +3116,7 @@ def set_max_members():
 def discussion_questions():
     """Load the instructor-only weekly discussion question bank."""
     slug = session['slug']
-    class_dir = os.path.join(config.CLASSES_DIR, slug)
+    class_dir = _course_class_dir(slug)
     try:
         catalog = validate_question_catalog(class_dir)
     except (OSError, ValueError) as exc:
@@ -3081,14 +3242,17 @@ def _appendix_dir(slug):
     """Directory for appendix question files on the persistent data disk."""
     d = os.path.join(config.DATA_DIR, slug, 'appendix')
     os.makedirs(d, exist_ok=True)
-    # One-time migration: move old appendix files from classes/ to data disk
+    # Copy legacy appendix seeds to the data disk without changing source files.
     for week in range(1, 20):
-        old = os.path.join(config.CLASSES_DIR, slug, f'week-{week}-appendix.md')
+        old = os.path.join(_course_class_dir(slug), f'week-{week}-appendix.md')
         if os.path.exists(old):
             new = os.path.join(d, f'week-{week}-appendix.md')
             if not os.path.exists(new):
                 import shutil
-                shutil.move(old, new)
+                if is_demo_instance_slug(slug):
+                    shutil.copyfile(old, new)
+                else:
+                    shutil.move(old, new)
     return d
 
 
@@ -3608,7 +3772,7 @@ def start_presentation():
         if state and (state['active_team_id'] or state['active_question_id']):
             db.rollback()
             return jsonify({'error': 'Finish the active presentation first'}), 409
-        max_teams = state['max_teams'] or 8
+        max_teams = state['max_teams'] or 6
         visible_teams = db.execute(
             '''SELECT t.id, COUNT(s.id) AS member_count
                FROM teams t
@@ -3654,7 +3818,7 @@ def start_presentation():
         else:
             try:
                 catalog_week = validate_question_catalog(
-                    os.path.join(config.CLASSES_DIR, slug),
+                    _course_class_dir(slug),
                     weeks=[selected_week],
                 ).get_week(selected_week)
             except (OSError, ValueError):
@@ -4251,7 +4415,7 @@ def assign_student():
         if team_id is not None:
             visible = db.execute(
                 'SELECT id FROM teams WHERE course_id = ? ORDER BY id LIMIT ?',
-                [course['id'], state['max_teams'] or 8]
+                [course['id'], state['max_teams'] or 6]
             ).fetchall()
             if team_id not in {team['id'] for team in visible}:
                 db.rollback()
@@ -4261,7 +4425,7 @@ def assign_student():
                    WHERE course_id = ? AND team_id = ? AND is_active = 1''',
                 [course['id'], team_id]
             ).fetchone()['c']
-            if member_count >= (state['max_members_per_team'] or 5):
+            if member_count >= (state['max_members_per_team'] or 10):
                 db.rollback()
                 return jsonify({'error': 'That team is full'}), 409
 
@@ -4453,7 +4617,7 @@ def export_data(slug):
         current_week = (
             state_row['discussion_week'] if state_row else None
         ) or 1
-        max_teams = (state_row['max_teams'] if state_row else None) or 8
+        max_teams = (state_row['max_teams'] if state_row else None) or 6
 
         asset_files = []
         asset_bytes = 0
@@ -4465,7 +4629,7 @@ def export_data(slug):
             asset_files.append((fpath, archive_name))
             asset_bytes += os.path.getsize(fpath)
 
-        class_dir = os.path.join(config.CLASSES_DIR, slug)
+        class_dir = _course_class_dir(slug)
         if os.path.isdir(class_dir):
             discussion_path = os.path.join(
                 class_dir, f'week-{current_week}-questions.md'

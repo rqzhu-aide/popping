@@ -189,6 +189,28 @@ def _setup_payload(roster_version=0, **extra):
     }
 
 
+def _assign_all_active_students(env):
+    """Assign active unassigned students and return the new roster version."""
+    with _connect(env) as db:
+        db.execute(
+            '''UPDATE students SET team_id = ?
+               WHERE course_id = ? AND is_active = 1 AND team_id IS NULL''',
+            [env["teams"]["Team 2"], env["course_id"]],
+        )
+        db.execute(
+            '''UPDATE course_state
+               SET roster_version = COALESCE(roster_version, 0) + 1
+               WHERE course_id = ?''',
+            [env["course_id"]],
+        )
+        version = db.execute(
+            "SELECT roster_version FROM course_state WHERE course_id = ?",
+            [env["course_id"]],
+        ).fetchone()["roster_version"]
+        db.commit()
+    return version
+
+
 def _set_state(env, **fields):
     allowed = {
         "phase",
@@ -383,6 +405,7 @@ def test_stale_presentation_token_blocks_phase_exit(course_env):
 
 def test_phase_navigation_does_not_split_current_session(course_env):
     client = _instructor_client(course_env)
+    roster_version = _assign_all_active_students(course_env)
     transitions = (
         ("setup", "discussion"),
         ("discussion", "setup"),
@@ -399,6 +422,7 @@ def test_phase_navigation_does_not_split_current_session(course_env):
                 "phase": next_phase,
                 "expected_phase": current_phase,
                 "expected_session_key": SESSION_KEY,
+                "expected_roster_version": roster_version,
                 "confirm_end_session": next_phase == "ended",
             },
         )
@@ -425,6 +449,81 @@ def test_end_session_requires_explicit_confirmation(course_env):
     assert response.status_code == 409
     assert response.get_json()["requires_confirmation"] is True
     assert _state_row(course_env) == before
+
+
+def test_setup_phase_exit_blocks_unassigned_students_without_mutation(
+    course_env,
+):
+    before = _state_row(course_env)
+
+    response = _instructor_client(course_env).post(
+        "/api/set_phase",
+        json=_setup_payload(phase="discussion"),
+    )
+
+    assert response.status_code == 409
+    data = response.get_json()
+    assert "not assigned to a team" in data["error"].lower()
+    assert data["unassigned_count"] == 1
+    assert _state_row(course_env) == before
+
+
+def test_unassigned_phase_block_cannot_be_bypassed_by_confirmation(course_env):
+    before = _state_row(course_env)
+
+    response = _instructor_client(course_env).post(
+        "/api/set_phase",
+        json=_setup_payload(
+            phase="discussion",
+            confirm_unassigned_students=True,
+        ),
+    )
+
+    assert response.status_code == 409
+    data = response.get_json()
+    assert "not assigned to a team" in data["error"].lower()
+    assert data["unassigned_count"] == 1
+    assert _state_row(course_env) == before
+
+
+def test_setup_phase_exit_needs_no_confirmation_when_everyone_is_assigned(
+    course_env,
+):
+    roster_version = _assign_all_active_students(course_env)
+
+    response = _instructor_client(course_env).post(
+        "/api/set_phase",
+        json=_setup_payload(
+            roster_version=roster_version,
+            phase="competition",
+        ),
+    )
+
+    assert response.status_code == 200
+    assert response.get_json()["phase"] == "competition"
+    assert _state_row(course_env)["phase"] == "competition"
+
+
+def test_unassigned_phase_exit_rejects_a_stale_roster(course_env):
+    instructor = _instructor_client(course_env)
+    payload = _setup_payload(phase="discussion")
+    blocked = instructor.post("/api/set_phase", json=payload)
+    assert blocked.status_code == 409
+    assert blocked.get_json()["unassigned_count"] == 1
+
+    roster_change = _student_client(course_env).post(
+        "/api/join_team",
+        json={"team_id": 0},
+    )
+    assert roster_change.status_code == 200
+
+    retried = instructor.post("/api/set_phase", json=payload)
+
+    assert retried.status_code == 409
+    assert "roster changed" in retried.get_json()["error"].lower()
+    state = _state_row(course_env)
+    assert state["phase"] == "setup"
+    assert state["roster_version"] == 1
 
 
 def test_next_presentation_waits_for_open_poll(course_env):
@@ -458,6 +557,7 @@ def test_next_presentation_waits_for_open_poll(course_env):
 def test_leaving_ended_starts_exactly_one_new_session(course_env):
     _set_state(course_env, phase="ended")
     client = _instructor_client(course_env)
+    roster_version = _assign_all_active_students(course_env)
 
     first = client.post(
         "/api/set_phase",
@@ -476,6 +576,7 @@ def test_leaving_ended_starts_exactly_one_new_session(course_env):
             "phase": "discussion",
             "expected_phase": "setup",
             "expected_session_key": SESSION_KEY + 1,
+            "expected_roster_version": roster_version,
         },
     )
     assert second.status_code == 200
@@ -2022,6 +2123,7 @@ def test_week_selector_allows_discussion_only_week(course_env):
 
 def test_appendix_delete_uses_stable_id_and_unposts_current_question(course_env):
     client = _instructor_client(course_env)
+    roster_version = _assign_all_active_students(course_env)
     first_add = client.post(
         "/api/questions",
         json={
@@ -2051,6 +2153,7 @@ def test_appendix_delete_uses_stable_id_and_unposts_current_question(course_env)
             "phase": "discussion",
             "expected_phase": "setup",
             "expected_session_key": SESSION_KEY,
+            "expected_roster_version": roster_version,
         },
     )
     assert phase.status_code == 200

@@ -2,8 +2,8 @@
 """Initialize or reset the demo course database.
 
 Creates a self-contained 'demo' course with:
-  - 1 instructor (no real password needed — demo bypasses login)
-  - 20 pre-assigned students across 4 teams
+  - 1 instructor (the web demo bypasses login)
+  - 2 unassigned students and 2 teams
   - Sample questions read from classes/demo/week1/index.md
   - Course state in 'setup' phase
 
@@ -14,6 +14,7 @@ Usage:
 """
 import sys
 import os
+import shutil
 import sqlite3
 import tempfile
 from contextlib import contextmanager
@@ -36,6 +37,7 @@ DATA_DIR = resolve_data_dir()
 DB_DIR = os.path.join(DATA_DIR, 'demo')
 DB_PATH = os.path.join(DB_DIR, 'popping.db')
 LOCK_PATH = os.path.join(DB_DIR, '.demo-init-lock.sqlite3')
+DEMO_SEED_VERSION = 2
 
 _RESET_TABLES = (
     'discussion_responses',
@@ -61,6 +63,11 @@ def _validate_demo_connection(conn, require_seeded_shape=False):
     fk_errors = conn.execute('PRAGMA foreign_key_check').fetchall()
     if fk_errors:
         raise RuntimeError(f'foreign_key_check found {len(fk_errors)} violation(s)')
+    seed_version = conn.execute('PRAGMA user_version').fetchone()[0]
+    if seed_version != DEMO_SEED_VERSION:
+        raise RuntimeError(
+            f'Demo seed version {seed_version} is not {DEMO_SEED_VERSION}'
+        )
 
     required_tables = (
         'instructors', 'courses', 'teams', 'students', 'questions', 'course_state'
@@ -82,7 +89,8 @@ def _validate_demo_connection(conn, require_seeded_shape=False):
 
     course_id = course_rows[0]['id']
     state = conn.execute(
-        "SELECT phase FROM course_state WHERE course_id = ?", (course_id,)
+        """SELECT phase, max_teams, max_members_per_team
+           FROM course_state WHERE course_id = ?""", (course_id,)
     ).fetchone()
     if not state:
         raise RuntimeError('Demo course state is missing')
@@ -96,6 +104,8 @@ def _validate_demo_connection(conn, require_seeded_shape=False):
     ).fetchone()
     if not instructor or instructor['username'] != 'demo_instructor':
         raise RuntimeError('Demo instructor is missing or invalid')
+    if state['max_teams'] != 2 or state['max_members_per_team'] != 2:
+        raise RuntimeError('Demo team limits must be 2 teams with 2 seats each')
 
     team_rows = conn.execute(
         '''SELECT t.id, count(s.id) AS student_count
@@ -106,8 +116,15 @@ def _validate_demo_connection(conn, require_seeded_shape=False):
            ORDER BY t.id''',
         (course_id,)
     ).fetchall()
-    if len(team_rows) != 4 or any(row['student_count'] != 5 for row in team_rows):
-        raise RuntimeError('Demo must have 4 teams with 5 active students each')
+    unassigned_count = conn.execute(
+        '''SELECT count(*) FROM students
+           WHERE course_id = ? AND team_id IS NULL AND is_active = 1''',
+        (course_id,)
+    ).fetchone()[0]
+    if (len(team_rows) != 2 or
+            any(row['student_count'] != 0 for row in team_rows) or
+            unassigned_count != 2):
+        raise RuntimeError('Demo must have 2 teams and 2 unassigned students')
 
     question_count = conn.execute(
         "SELECT count(*) FROM questions WHERE course_id = ?", (course_id,)
@@ -128,6 +145,16 @@ def _validate_demo_db(path, require_seeded_shape=False):
                JOIN courses c ON c.id = q.course_id
                WHERE c.slug = 'demo' '''
         ).fetchone()[0]
+    finally:
+        conn.close()
+
+
+def _read_demo_seed_version(path):
+    """Read the lightweight seed version without changing the database."""
+    uri = f'file:{path}?mode=ro'
+    conn = sqlite3.connect(uri, uri=True)
+    try:
+        return conn.execute('PRAGMA user_version').fetchone()[0]
     finally:
         conn.close()
 
@@ -154,12 +181,10 @@ def _populate(conn):
         "SELECT id FROM courses WHERE slug = 'demo'"
     ).fetchone()['id']
 
-    # Teams (4 teams) — colors only, names default to "Team 1", "Team 2", ...
+    # Two small teams are enough for the private demo.
     teams_data = [
         ('Team 1', '#ef4444'),
         ('Team 2', '#3b82f6'),
-        ('Team 3', '#10b981'),
-        ('Team 4', '#f59e0b'),
     ]
     for name, color in teams_data:
         conn.execute(
@@ -167,39 +192,16 @@ def _populate(conn):
             (course_id, name, color)
         )
 
-    # 20 students, 5 per team
+    # Both students start unassigned so the visitor can choose the interaction.
     students_data = [
-        # (student_id, name, team_index)
-        ('demo001', 'Alice Chen',     0),
-        ('demo002', 'Bob Garcia',     0),
-        ('demo003', 'Cara Singh',     0),
-        ('demo004', 'Derek Wright',   0),
-        ('demo005', 'Eva Müller',     0),
-        ('demo006', "Finn O'Brien",   1),
-        ('demo007', 'Gina Rossi',     1),
-        ('demo008', 'Hiro Tanaka',    1),
-        ('demo009', 'Iris Novak',     1),
-        ('demo010', 'Jasper Lee',     1),
-        ('demo011', 'Kira Patel',     2),
-        ('demo012', 'Leo Silva',      2),
-        ('demo013', 'Mara Cohen',     2),
-        ('demo014', 'Nico Bauer',     2),
-        ('demo015', 'Omar Haddad',    2),
-        ('demo016', 'Priya Nair',     3),
-        ('demo017', 'Quinn Foster',   3),
-        ('demo018', 'Rosa Mendez',    3),
-        ('demo019', 'Sven Eriksson',  3),
-        ('demo020', 'Tara Brooks',    3),
+        ('demo001', 'Demo Student 1'),
+        ('demo002', 'Demo Student 2'),
     ]
-    for sid, name, team_idx in students_data:
-        team = conn.execute(
-            "SELECT id FROM teams WHERE course_id = ? ORDER BY id LIMIT 1 OFFSET ?",
-            (course_id, team_idx)
-        ).fetchone()
+    for sid, name in students_data:
         conn.execute(
             "INSERT INTO students (course_id, student_id, name, pin, team_id) "
             "VALUES (?, ?, ?, ?, ?)",
-            (course_id, sid, name, 'demo', team['id'])
+            (course_id, sid, name, 'demo', None)
         )
 
     # Read questions from classes/demo/week1/index.md
@@ -236,9 +238,10 @@ def _populate(conn):
     # Course state — start in setup
     conn.execute(
         "INSERT INTO course_state (course_id, phase, max_teams, max_members_per_team) "
-        "VALUES (?, 'setup', 4, 5)",
+        "VALUES (?, 'setup', 2, 2)",
         (course_id,)
     )
+    conn.execute(f'PRAGMA user_version = {DEMO_SEED_VERSION}')
 
     return len(questions)
 
@@ -304,6 +307,11 @@ def _reset_demo_db():
         conn.execute('PRAGMA busy_timeout = 30000')
         conn.execute('PRAGMA foreign_keys = ON')
         conn.execute('BEGIN IMMEDIATE')
+        if conn.execute('PRAGMA user_version').fetchone()[0] < DEMO_SEED_VERSION:
+            if BASE_DIR not in sys.path:
+                sys.path.insert(0, BASE_DIR)
+            from database import _ensure_schema_locked
+            _ensure_schema_locked(conn)
 
         existing_tables = {
             row[0] for row in conn.execute(
@@ -327,26 +335,51 @@ def _reset_demo_db():
         conn.close()
 
 
+def _reset_demo_appendix():
+    """Restore the demo appendix files shipped with this version."""
+    appendix_dir = os.path.join(DB_DIR, 'appendix')
+    os.makedirs(appendix_dir, exist_ok=True)
+    for week in range(1, 20):
+        target = os.path.join(appendix_dir, f'week-{week}-appendix.md')
+        try:
+            os.remove(target)
+        except FileNotFoundError:
+            pass
+        source = os.path.join(
+            BASE_DIR, 'classes', 'demo', f'week-{week}-appendix.md'
+        )
+        if os.path.isfile(source):
+            shutil.copyfile(source, target)
+
+
 def init_demo_db(ensure_only=False):
-    """Create the demo if absent, or transactionally reset it when requested."""
+    """Create, upgrade, or explicitly reset the demo database."""
     os.makedirs(DB_DIR, exist_ok=True)
 
     with _initialization_lock():
         if os.path.exists(DB_PATH):
             if ensure_only:
-                q_count = _validate_demo_db(DB_PATH, require_seeded_shape=True)
-                action = 'ready'
+                if _read_demo_seed_version(DB_PATH) < DEMO_SEED_VERSION:
+                    q_count = _reset_demo_db()
+                    action = 'upgraded'
+                else:
+                    q_count = _validate_demo_db(
+                        DB_PATH, require_seeded_shape=False
+                    )
+                    action = 'ready'
             else:
                 q_count = _reset_demo_db()
                 action = 'reset'
         else:
             q_count = _create_demo_db()
             action = 'created'
+        if action != 'ready':
+            _reset_demo_appendix()
 
     print(f"Demo database {action} at {DB_PATH}")
     print(f"  Instructor: demo_instructor")
-    print(f"  Students:   20 (demo001-demo020, PIN='demo')")
-    print(f"  Teams:      4 (Team 1–4)")
+    print(f"  Students:   2 (demo001-demo002, PIN='demo')")
+    print(f"  Teams:      2 (Team 1-2)")
     print(f"  Questions:  {q_count}")
     return q_count
 

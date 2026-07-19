@@ -145,8 +145,7 @@ def resolve_data_dir():
 
 
 def course_defaults(config, team_rows):
-    configured_teams = config.get('teams') or []
-    fallback_max = min(len(configured_teams) or 5, len(team_rows))
+    fallback_max = min(6, len(team_rows))
     try:
         max_teams = int(config.get('max_teams', fallback_max))
         max_members = int(config.get('max_members_per_team', 10))
