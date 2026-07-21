@@ -782,7 +782,11 @@ if (dashboard) {
                     ratingPrompt.textContent = 'Please rate ';
                     const teamName = document.createElement('strong');
                     teamName.textContent = state.active_team.name || '';
-                    teamName.style.color = state.active_team.color || '';
+                    teamName.className = 'team-name-marked';
+                    teamName.style.setProperty(
+                        '--team-color',
+                        state.active_team.color || 'var(--border)'
+                    );
                     ratingPrompt.appendChild(teamName);
                 } else {
                     ratingPrompt.textContent = '';
@@ -823,6 +827,8 @@ if (dashboard) {
                 if (!hasActivePresentation) {
                     if (banner) {
                         banner.textContent = 'Waiting for next presentation...';
+                        banner.classList.remove('has-team-color');
+                        banner.style.removeProperty('--team-color');
                         banner.style.color = 'var(--text-muted)';
                     }
                     if (qDisplay) qDisplay.style.display = 'none';
@@ -839,7 +845,12 @@ if (dashboard) {
 
                 if (banner) {
                     banner.textContent = state.active_team.name;
-                    banner.style.color = state.active_team.color;
+                    banner.classList.add('has-team-color');
+                    banner.style.setProperty(
+                        '--team-color',
+                        state.active_team.color || 'var(--border)'
+                    );
+                    banner.style.color = 'var(--text)';
                 }
                 // Show active question — only re-render when question changes
                 const qText = document.getElementById('active-question-text');
@@ -1309,14 +1320,20 @@ if (instructor) {
         const maxMembers = Number(state.max_members) || Number(instructor.dataset.maxMembers) || 0;
         const capacity = maxTeams * maxMembers;
         const unassigned = Number(state.unassigned_count) || 0;
-        el.classList.toggle('capacity-danger', total > capacity);
-        if (total > capacity) {
-            el.textContent = `Capacity warning: ${total} students, but only ${capacity} team places. At least ${total - capacity} cannot be assigned.`;
+        const overCapacity = total > capacity;
+        const hasUnassigned = unassigned > 0;
+        el.classList.toggle('capacity-danger', overCapacity);
+        el.classList.toggle('capacity-warning', !overCapacity && hasUnassigned);
+        el.classList.toggle('capacity-success', !overCapacity && !hasUnassigned);
+        let message;
+        if (overCapacity) {
+            message = `\u26A0 Capacity warning: ${total} students, but only ${capacity} team places. At least ${total - capacity} cannot be assigned.`;
         } else if (unassigned > 0) {
-            el.textContent = `${unassigned} student${unassigned === 1 ? '' : 's'} still unassigned (${capacity - total} spare team places).`;
+            message = `\u26A0 ${unassigned} student${unassigned === 1 ? '' : 's'} still unassigned (${capacity - total} spare team places).`;
         } else {
-            el.textContent = `All ${total} students are assigned. Capacity: ${capacity}.`;
+            message = `\u2713 All ${total} students are assigned. Capacity: ${capacity}.`;
         }
+        if (el.textContent.trim() !== message) el.textContent = message;
     }
 
     async function instructorPollOnce() {
@@ -1834,7 +1851,7 @@ window.loadStudentTable = async function() {
 
     data.students.forEach(s => {
         const teamHtml = s.team_name
-            ? `<span class="team-tag clickable" style="background:${escapeAttrValue(s.team_color || '#ccc')}" onclick="toggleTeamPicker(event, ${s.id})" data-student="${s.id}">${escapeHtmlValue(s.team_name)}</span>`
+            ? `<span class="team-tag clickable" style="--team-color:${escapeAttrValue(s.team_color || '#94a3b8')}" onclick="toggleTeamPicker(event, ${s.id})" data-student="${s.id}">${escapeHtmlValue(s.team_name)}</span>`
             : `<span class="team-tag unassigned-tag clickable" onclick="toggleTeamPicker(event, ${s.id})" data-student="${s.id}">Unassigned</span>`;
         const statusHtml = s.is_online
             ? '<span class="online-dot"></span> Online'
@@ -2404,7 +2421,7 @@ function showRatingDraftStatus() {
     const status = document.getElementById('rating-status');
     if (!status) return;
     status.textContent = 'Changes not submitted.';
-    status.style.color = 'var(--warning)';
+    status.style.color = 'var(--warning-text)';
     status.style.display = 'block';
 }
 
@@ -2412,7 +2429,7 @@ function showRatingNotSaved() {
     const status = document.getElementById('rating-status');
     if (!status) return;
     status.textContent = 'Rating not saved. Rechecking the saved response...';
-    status.style.color = 'var(--danger)';
+    status.style.color = 'var(--error-text)';
     status.style.display = 'block';
 }
 

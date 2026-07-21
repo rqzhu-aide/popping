@@ -1727,6 +1727,21 @@ def test_discussion_instructor_shows_timer_control_and_connection_status(course_
     assert 'id="instructor-connection-status"' in html
 
 
+def test_setup_capacity_status_highlights_unassigned_students(course_env):
+    client = _instructor_client(course_env)
+
+    html = client.get(f"/instructor/{course_env['slug']}").get_data(as_text=True)
+    assert 'class="capacity-summary capacity-warning"' in html
+    assert 'id="setup-capacity-warning" role="status"' in html
+
+    _assign_all_active_students(course_env)
+    assigned_html = client.get(
+        f"/instructor/{course_env['slug']}"
+    ).get_data(as_text=True)
+    assert 'class="capacity-summary capacity-success"' in assigned_html
+    assert 'class="capacity-summary capacity-warning"' not in assigned_html
+
+
 def test_empty_team_cannot_start_presentation(course_env):
     _set_state(course_env, phase="competition")
     response = _instructor_client(course_env).post(

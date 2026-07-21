@@ -10,9 +10,10 @@
     <script defer src="{{ url_for('static', filename='vendor/purify.min.js') }}"></script>
     <script defer src="{{ url_for('static', filename='vendor/highlight.min.js') }}"></script>
     <script>
-        // Theme restore — must run before paint to avoid FOUC flash
+        // Theme restore must run before paint to avoid a FOUC flash.
         (function() {
-            if (localStorage.getItem('popping-theme') === 'light') {
+            const storedTheme = localStorage.getItem('popping-theme');
+            if (storedTheme === null || storedTheme === 'light') {
                 document.documentElement.classList.add('light');
             }
         })();

@@ -119,14 +119,14 @@
         </div>
         {% set unassigned = students | selectattr('team_id', 'none') | list %}
         {% set team_capacity = max_teams * max_members %}
-        <p class="capacity-summary{% if students|length > team_capacity %} capacity-danger{% endif %}"
-           id="setup-capacity-warning">
+        <p class="capacity-summary{% if students|length > team_capacity %} capacity-danger{% elif unassigned %} capacity-warning{% else %} capacity-success{% endif %}"
+           id="setup-capacity-warning" role="status" aria-live="polite">
             {% if students|length > team_capacity %}
-            Capacity warning: {{ students|length }} students, but only {{ team_capacity }} team places. At least {{ students|length - team_capacity }} cannot be assigned.
+            &#9888; Capacity warning: {{ students|length }} students, but only {{ team_capacity }} team places. At least {{ students|length - team_capacity }} cannot be assigned.
             {% elif unassigned %}
-            {{ unassigned|length }} student{{ 's' if unassigned|length != 1 else '' }} still unassigned ({{ team_capacity - students|length }} spare team places).
+            &#9888; {{ unassigned|length }} student{{ 's' if unassigned|length != 1 else '' }} still unassigned ({{ team_capacity - students|length }} spare team places).
             {% else %}
-            All {{ students|length }} students are assigned. Capacity: {{ team_capacity }}.
+            &#10003; All {{ students|length }} students are assigned. Capacity: {{ team_capacity }}.
             {% endif %}
         </p>
     </section>
@@ -217,7 +217,7 @@
     <section class="card">
         <h2>🎯 Group Presentation</h2>
         {% if not state.presentation_catalog_ready %}
-        <p class="hint" style="color:var(--warning);">
+        <p class="hint text-warning">
             Week {{ state.discussion_week or 1 }} has no validated presentation question set. Appendix questions remain available.
         </p>
         {% endif %}
