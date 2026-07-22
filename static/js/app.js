@@ -341,6 +341,7 @@ let lastRenderedQuestionKey = null; // track active question to avoid re-renderi
 let lastRenderedDiscussionKey = null;
 let lastKnownQuestionId = null;    // lets the server omit unchanged question bodies
 let lastKnownQuestionRevision = null;
+let lastKnownStateVersion = null;  // lets the server skip _compute_state when unchanged
 let activePollOpen = false;
 let ratingSubmissionInProgress = false;
 let ratingDraftDirty = false;
@@ -415,6 +416,9 @@ if (dashboard) {
         let interval = 3000;
         try {
             const pollParams = new URLSearchParams();
+            if (lastKnownStateVersion != null) {
+                pollParams.set('since', lastKnownStateVersion);
+            }
             if (lastKnownQuestionId != null) {
                 pollParams.set('known_question_id', lastKnownQuestionId);
             }
@@ -436,17 +440,26 @@ if (dashboard) {
             if (!res.ok) throw new Error('poll failed');
             if (_connectionInterrupted) showConnectionStatus('Live updates restored.', true);
             _pollFailures = 0;
-            // State is frequent; the roster is fetched only when its version changes.
-            const pageReloading = await loadState(data.state);
-            if (!pageReloading) {
-                try {
-                    await syncRoster(data.state?.roster_version);
-                } catch (e) {
-                    // Keep state polling healthy; retry the roster on the next cycle.
+            // Remember the version we just saw so the next poll can take the
+            // server's cheap "nothing changed" short-circuit.
+            if (data.state_version != null) lastKnownStateVersion = data.state_version;
+            if (data.changed === false) {
+                // Nothing in course_state changed since the version we sent:
+                // skip rendering and keep polling fast. The student's local
+                // timers (presentation countdown, poll pulse) keep ticking.
+            } else {
+                // State is frequent; the roster is fetched only when its version changes.
+                const pageReloading = await loadState(data.state);
+                if (!pageReloading) {
+                    try {
+                        await syncRoster(data.state?.roster_version);
+                    } catch (e) {
+                        // Keep state polling healthy; retry the roster on the next cycle.
+                    }
                 }
-            }
-            if (data.top_teams) {
-                renderTopTeams(data.top_teams);
+                if (data.top_teams) {
+                    renderTopTeams(data.top_teams);
+                }
             }
             // The server keeps Ended pages on a low-frequency recovery poll.
             if (data.poll_interval) interval = data.poll_interval;
@@ -887,7 +900,9 @@ if (dashboard) {
                     // Paused — show the frozen remaining value
                     stopTimer();
                     const tv = document.getElementById('student-timer-value');
-                    if (tv) tv.textContent = formatDuration(parseInt(state.presentation_remaining, 10));
+                    const pausedRemaining = parseInt(state.presentation_remaining, 10);
+                    if (tv) tv.textContent = formatDuration(pausedRemaining);
+                    setTimerExpired(pausedRemaining <= 0);
                 } else {
                     stopTimer();
                 }
@@ -1426,6 +1441,18 @@ if (instructor) {
                     const online = Number(state.poll_online_eligible_count) || 0;
                     pollCount.textContent = `Recorded ratings: ${count}. Eligible now: ${eligible}; online now: ${online}.`;
                 }
+                // Outstanding raters — helps the instructor decide whether to
+                // extend the window. Names only.
+                const nonRaters = document.getElementById('poll-non-raters');
+                if (nonRaters) {
+                    const names = Array.isArray(state.poll_non_raters) ? state.poll_non_raters : [];
+                    if (names.length && state.active_team && state.active_question) {
+                        nonRaters.innerHTML = `<strong>Still to rate:</strong> ${names.map(escapeHtmlValue).join(', ')}`;
+                        nonRaters.style.display = '';
+                    } else {
+                        nonRaters.style.display = 'none';
+                    }
+                }
                 const presentationIndex = document.getElementById('presentation-index');
                 if (presentationIndex) {
                     presentationIndex.textContent = state.presentation_number
@@ -1469,11 +1496,13 @@ if (instructor) {
                 } else if (state.presentation_started_at) {
                     stopCountdownTimer();
                     if (timerValue) timerValue.textContent = '00:00';
+                    setTimerExpired(true);
                     if (pauseButton) pauseButton.style.display = 'none';
                     if (resumeButton) resumeButton.style.display = 'none';
                 } else if (state.presentation_remaining != null) {
                     stopCountdownTimer();
                     if (timerValue) timerValue.textContent = formatDuration(Math.max(0, remaining));
+                    setTimerExpired(Math.max(0, remaining) <= 0);
                     if (pauseButton) pauseButton.style.display = 'none';
                     if (resumeButton) resumeButton.style.display = remaining > 0 ? '' : 'none';
                 }
@@ -2145,6 +2174,7 @@ window.stopPresentation = async function() {
         stopCountdownTimer();
         const tv = document.getElementById('timer-value');
         if (tv && data.remaining != null) tv.textContent = formatDuration(data.remaining);
+        setTimerExpired(Number(data.remaining) <= 0);
     } else {
         showInstructorMutationError(data, 'Failed to pause presentation');
     }
@@ -2175,6 +2205,7 @@ window.resetTimer = async function() {
         stopCountdownTimer();
         const tv = document.getElementById('timer-value');
         if (tv) tv.textContent = formatDuration(data.cap);
+        setTimerExpired(false);
     } else {
         showInstructorMutationError(data, 'Failed to reset timer');
     }
@@ -2295,6 +2326,9 @@ function stopPollGlide() {
  */
 let pollPulseInterval = null;
 let pollPulseAnchor = null;
+// In the final seconds of the rating window, escalate urgency so an unsaved
+// rating isn't silently lost.
+const POLL_URGENT_THRESHOLD = 8;
 
 function startPollPulse(remainingSec) {
     const pulse = document.getElementById('poll-pulse');
@@ -2311,13 +2345,24 @@ function startPollPulse(remainingSec) {
         if (!pollPulseAnchor) return;
         const elapsed = (performance.now() - pollPulseAnchor.at) / 1000;
         const remaining = Math.max(0, pollPulseAnchor.remaining - elapsed);
-        if (pulseText) pulseText.textContent = `⏱ ${Math.ceil(remaining)}s left to rate!`;
+        const urgent = remaining > 0 && remaining <= POLL_URGENT_THRESHOLD;
+        pulse.classList.toggle('urgent', urgent);
+        if (pulseText) {
+            pulseText.textContent = urgent
+                ? `⏱ ${Math.ceil(remaining)}s — submit now!`
+                : `⏱ ${Math.ceil(remaining)}s left to rate!`;
+        }
+        // Nudge the Submit button when an unsaved rating is at risk.
+        const submitBtn = document.getElementById('btn-submit-rating');
+        if (submitBtn) submitBtn.classList.toggle('attention', urgent && ratingDraftDirty);
 
         if (remaining <= 0) {
             clearInterval(pollPulseInterval);
             pollPulseInterval = null;
             pollPulseAnchor = null;
             pulse.style.display = 'none';
+            pulse.classList.remove('urgent');
+            if (submitBtn) submitBtn.classList.remove('attention');
         }
     }
     tick();
@@ -2328,9 +2373,14 @@ function startPollPulse(remainingSec) {
 
 function stopPollPulse() {
     const pulse = document.getElementById('poll-pulse');
-    if (pulse) pulse.style.display = 'none';
+    if (pulse) {
+        pulse.style.display = 'none';
+        pulse.classList.remove('urgent');
+    }
     if (pollPulseInterval) { clearInterval(pollPulseInterval); pollPulseInterval = null; }
     pollPulseAnchor = null;
+    const submitBtn = document.getElementById('btn-submit-rating');
+    if (submitBtn) submitBtn.classList.remove('attention');
 }
 
 // ===== POLL API =====
@@ -2648,6 +2698,7 @@ function startCountdownTimer(remainingSeconds) {
         document.querySelectorAll('.timer-value').forEach(el => {
             el.textContent = formatDuration(remaining);
         });
+        setTimerExpired(remaining <= 0);
         if (remaining <= 0) {
             clearInterval(countdownTimerInterval);
             countdownTimerInterval = null;
@@ -2668,11 +2719,22 @@ function stopCountdownTimer() {
     countdownTimerAnchor = null;
 }
 
+function setTimerExpired(expired) {
+    document.querySelectorAll('.timer-value').forEach(el => {
+        el.classList.toggle('timer-expired', expired);
+    });
+    const timerBox = document.getElementById('timer-box');
+    if (timerBox) timerBox.classList.toggle('timer-expired', expired);
+    const studentTimer = document.getElementById('student-timer');
+    if (studentTimer) studentTimer.classList.toggle('timer-expired', expired);
+}
+
 function stopTimer() {
     stopCountdownTimer();
     document.querySelectorAll('.timer-value').forEach(el => {
         el.textContent = '--:--';
     });
+    setTimerExpired(false);
 }
 
 // Check for active timers on page load
@@ -2690,6 +2752,7 @@ if (instructorEl) {
     } else if (presRemaining !== '') {
         const remaining = parseInt(presRemaining, 10);
         document.getElementById('timer-value').textContent = formatDuration(remaining);
+        setTimerExpired(remaining <= 0);
         const btnStop = document.getElementById('btn-pause');
         const btnResume = document.getElementById('btn-resume');
         if (btnStop) btnStop.style.display = 'none';

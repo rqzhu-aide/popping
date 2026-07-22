@@ -108,6 +108,8 @@ CREATE TABLE course_state (
     presentation_history TEXT DEFAULT '[]',
     roster_version INTEGER DEFAULT 0,
     session_key INTEGER DEFAULT 0,
+    state_version INTEGER DEFAULT 0,
+    discussion_questions_version INTEGER DEFAULT 0,
     current_discussion_key TEXT,
     current_discussion_source_key TEXT,
     current_discussion_title TEXT,
@@ -190,3 +192,28 @@ CREATE INDEX idx_thumbs_export_week
 
 CREATE INDEX idx_ratings_export_week
     ON presentation_ratings(course_id, week_num);
+
+-- Per-question visibility for the discussion phase. A row here means the
+-- instructor has hidden that question from students. Absence = visible
+-- (the default). Bank questions come from week-N-questions.md; appendix
+-- questions are instructor-added. Both are addressed by their stable key.
+CREATE TABLE hidden_discussion_questions (
+    course_id INTEGER NOT NULL,
+    week_num INTEGER NOT NULL,
+    question_key TEXT NOT NULL,
+    FOREIGN KEY (course_id) REFERENCES courses (id) ON DELETE CASCADE,
+    PRIMARY KEY (course_id, week_num, question_key)
+);
+
+-- Auto-increment state_version on every UPDATE of course_state so that no
+-- mutation can forget to signal students. The WHEN guard prevents a loop if a
+-- statement ever sets state_version explicitly (and also keeps this safe if
+-- recursive_triggers is ever turned on).
+CREATE TRIGGER course_state_bump_version
+    AFTER UPDATE ON course_state
+    WHEN NEW.state_version = OLD.state_version
+BEGIN
+    UPDATE course_state
+        SET state_version = OLD.state_version + 1
+        WHERE id = NEW.id;
+END;

@@ -95,7 +95,7 @@ Then `cd classes/{new-slug} && bash init-db.sh`
 1. Push this repo to GitHub.
 2. In Render, create a new **Web Service** and connect this repo.
 3. Set build command: `pip install -r requirements.txt`
-4. Set start command: `gunicorn app:app`
+4. Set start command: `gunicorn app:app --workers 3 --threads 8 --timeout 120`
 5. Add environment variable: `SECRET_KEY` = (any random string)
 6. Add a **Disk** (Settings → Disks):
    - **Name:** `data`
@@ -189,6 +189,16 @@ Follow the prompts. Then `cd classes/{slug}` and `bash init-db.sh`.
 
 Edit the `teams` array in `classes/{slug}/course.yaml`, then run `bash init-db.sh` to recreate the database.
 
+### Tuning the Rating Window
+
+By default each presentation rating poll stays open for **30 seconds**. Add an optional `poll_duration` field to `course.yaml` to change it for a course (clamped to 5–300 seconds):
+
+```yaml
+poll_duration: 45
+```
+
+This is read live (no `init-db.sh` needed), so you can lengthen it for a harder question or a larger class mid-session.
+
 ### Adding Students
 
 Use the instructor panel, or insert directly into the course database:
@@ -210,4 +220,4 @@ INSERT INTO students (course_id, student_id, name, pin) VALUES (1, 'netid123', '
 
 ## License
 
-MIT
+AGPLv3 — see [LICENSE](LICENSE) (GNU Affero General Public License v3.0).

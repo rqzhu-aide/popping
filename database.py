@@ -131,6 +131,32 @@ def _ensure_schema_locked(db):
         db.execute('ALTER TABLE course_state ADD COLUMN current_discussion_title TEXT')
     if 'current_discussion_content' not in cs_cols:
         db.execute('ALTER TABLE course_state ADD COLUMN current_discussion_content TEXT')
+    if 'state_version' not in cs_cols:
+        db.execute('ALTER TABLE course_state ADD COLUMN state_version INTEGER DEFAULT 0')
+    if 'discussion_questions_version' not in cs_cols:
+        db.execute('ALTER TABLE course_state ADD COLUMN discussion_questions_version INTEGER DEFAULT 0')
+    # Auto-bump state_version on every course_state UPDATE so students polling
+    # with ?since=<version> learn about any mutation within one poll. The WHEN
+    # guard keeps it loop-free even if recursive_triggers is enabled.
+    db.execute(
+        '''CREATE TRIGGER IF NOT EXISTS course_state_bump_version
+             AFTER UPDATE ON course_state
+             WHEN NEW.state_version = OLD.state_version
+           BEGIN
+               UPDATE course_state
+                   SET state_version = OLD.state_version + 1
+                   WHERE id = NEW.id;
+           END'''
+    )
+
+    # Discussion-phase question visibility overlay (hide/show per question).
+    db.execute('''CREATE TABLE IF NOT EXISTS hidden_discussion_questions (
+        course_id INTEGER NOT NULL,
+        week_num INTEGER NOT NULL,
+        question_key TEXT NOT NULL,
+        FOREIGN KEY (course_id) REFERENCES courses (id) ON DELETE CASCADE,
+        PRIMARY KEY (course_id, week_num, question_key)
+    )''')
 
     # questions columns
     q_cols = [row['name'] for row in db.execute('PRAGMA table_info(questions)').fetchall()]

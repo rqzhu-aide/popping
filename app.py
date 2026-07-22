@@ -106,6 +106,41 @@ PHASE_LABELS = {
 # Duration (seconds) of the presentation rating window.
 POLL_DURATION = 30
 
+# mtime-keyed cache of per-course poll_duration, so the ~1s poll loop doesn't
+# re-parse course.yaml on every request.
+_poll_duration_cache = {}
+
+
+def get_poll_duration(slug):
+    """Rating-window length (seconds) for this course.
+
+    Reads the optional ``poll_duration`` field from course.yaml (clamped to
+    5-300s; anything missing or invalid falls back to POLL_DURATION). Cached by
+    the file's mtime so frequent polls don't re-parse YAML.
+    """
+    yaml_path = os.path.join(_course_class_dir(slug), 'course.yaml')
+    try:
+        mtime = os.path.getmtime(yaml_path)
+    except OSError:
+        return POLL_DURATION
+    cached = _poll_duration_cache.get(slug)
+    if cached and cached[0] == mtime:
+        return cached[1]
+    value = POLL_DURATION
+    try:
+        import yaml
+        with open(yaml_path, encoding='utf-8') as config_file:
+            cfg = yaml.safe_load(config_file) or {}
+        raw = cfg.get('poll_duration')
+        if raw is not None:
+            value = int(raw)
+    except Exception:
+        value = POLL_DURATION
+    if not (5 <= value <= 300):
+        value = POLL_DURATION
+    _poll_duration_cache[slug] = (mtime, value)
+    return value
+
 # Throttle window for the last_active_at DB write. Students poll /api/poll
 # frequently, but the "online" indicator uses a three-minute window, so one
 # write per minute is sufficient (last write time is tracked in the session
@@ -295,18 +330,19 @@ def _create_reset_backup(slug):
     return os.path.basename(backup_path)
 
 
-def _poll_is_open(state, now=None):
+def _poll_is_open(state, now=None, poll_duration=None):
     """Return whether the persisted poll window is currently accepting ratings."""
     if not state or not state['poll_active'] or not state['poll_started_at']:
         return False
     try:
         started = _parse_db_datetime(state['poll_started_at'])
-        return (now or datetime.utcnow()) < started + timedelta(seconds=POLL_DURATION)
+        return (now or datetime.utcnow()) < started + timedelta(
+            seconds=poll_duration or POLL_DURATION)
     except (TypeError, ValueError):
         return False
 
 
-def _derive_timing_state(state, now=None):
+def _derive_timing_state(state, now=None, poll_duration=None):
     """Return server-authoritative timer values for one shared UTC instant."""
     if not state:
         return {
@@ -330,7 +366,8 @@ def _derive_timing_state(state, now=None):
     if state['poll_active'] and state['poll_started_at']:
         try:
             started = _parse_db_datetime(state['poll_started_at'])
-            remaining = POLL_DURATION - (now - started).total_seconds()
+            remaining = (poll_duration or POLL_DURATION) - (
+                now - started).total_seconds()
             poll_remaining = max(0, math.ceil(remaining))
         except (TypeError, ValueError):
             pass
@@ -347,6 +384,42 @@ def _derive_timing_state(state, now=None):
         'poll_remaining': poll_remaining,
         'session_elapsed': session_elapsed,
     }
+
+
+# Students poll about once a second (cheap state-version path). Refresh
+# presence at most this often so last_active_at stays truthful without a write
+# on every poll. The is_online cutoff used elsewhere is 3 minutes, so a 30s
+# cadence keeps that readout accurate.
+STUDENT_ACTIVITY_SYNC_INTERVAL = timedelta(seconds=30)
+
+
+def _sync_student_activity(slug, session_key):
+    """Refresh the logged-in student's last_active_at, throttled.
+
+    Writes when the course session changed or when the previous write is older
+    than STUDENT_ACTIVITY_SYNC_INTERVAL. Bounding writes this way means 1s
+    student polling cannot cause a write storm, yet the instructor's "online
+    now" counts stay correct.
+    """
+    session_changed = session.get('activity_session_key') != session_key
+    stale = True
+    last_synced = session.get('last_active_synced_at')
+    if last_synced:
+        try:
+            stale = datetime.utcnow() - _parse_db_datetime(last_synced) \
+                >= STUDENT_ACTIVITY_SYNC_INTERVAL
+        except (TypeError, ValueError):
+            stale = True
+    if not session_changed and not stale:
+        return
+    execute_db(
+        slug,
+        '''UPDATE students SET last_active_at = CURRENT_TIMESTAMP
+           WHERE student_id = ? AND is_active = 1''',
+        [session['student_id']]
+    )
+    session['activity_session_key'] = session_key
+    session['last_active_synced_at'] = datetime.utcnow().isoformat()
 
 
 class QuestionParseError(ValueError):
@@ -1524,7 +1597,8 @@ def instructor_course(slug):
     if state:
         state = dict(state)
         now = datetime.utcnow()
-        state['poll_active'] = _poll_is_open(state, now=now)
+        state['poll_active'] = _poll_is_open(
+            state, now=now, poll_duration=get_poll_duration(slug))
         state.update(_derive_timing_state(state, now=now))
         try:
             full_history = json.loads(state.get('presentation_history') or '[]')
@@ -1647,7 +1721,7 @@ def instructor_course(slug):
         session_started_at=state['session_started_at'] if state and 'session_started_at' in state.keys() else None,
         end_stats=end_stats,
         presented_question_ids=list(presented_question_ids),
-        POLL_DURATION=POLL_DURATION
+        POLL_DURATION=get_poll_duration(slug)
     )
 
 
@@ -1707,6 +1781,24 @@ def _bump_roster_version(slug, course_id, db=None):
         execute_db(slug, sql, [course_id])
     else:
         db.execute(sql, [course_id])
+
+
+# Thumbs-up during discussion recognizes a teammate for the whole discussion
+# phase (one per teammate per session), not per question.
+_DISCUSSION_THUMB_KEY = 'discussion'
+
+
+def _bump_discussion_questions_version(db, course_id):
+    """Signal that the visible discussion-question set changed (hide/show,
+    add, delete, or week change). Also trips the state_version trigger, so
+    polling students refetch the list within ~1s."""
+    db.execute(
+        'UPDATE course_state '
+        'SET discussion_questions_version = '
+        '    COALESCE(discussion_questions_version, 0) + 1 '
+        'WHERE course_id = ?',
+        [course_id]
+    )
 
 
 def _archive_students(slug, db_ids, bump_roster=True, db=None, commit=True):
@@ -1860,12 +1952,13 @@ def _compute_state(slug, include_poll_count=True, known_question_id=None,
                 active_question = full_question
 
     now = datetime.utcnow()
-    timing = _derive_timing_state(state, now=now)
+    poll_duration = get_poll_duration(slug)
+    timing = _derive_timing_state(state, now=now, poll_duration=poll_duration)
     presentation_remaining = timing['presentation_remaining']
 
     # Expiry is derived, not written by every polling client.  The instructor's
     # next start/stop action persists the next transition without a write storm.
-    poll_active_bool = _poll_is_open(state, now=now)
+    poll_active_bool = _poll_is_open(state, now=now, poll_duration=poll_duration)
 
     # Poll count — use course_id from the already-fetched state row
     # (no separate SELECT needed)
@@ -1894,25 +1987,14 @@ def _compute_state(slug, include_poll_count=True, known_question_id=None,
         if item.get('session_key', 0) == current_session_key
     ]
 
-    discussion_question = None
-    if state and state.get('current_discussion_key'):
-        discussion_question = {
-            'key': state['current_discussion_key'],
-            'source_key': active_discussion_source_key(state),
-            'title': state.get('current_discussion_title') or '',
-        }
-        if known_discussion_key == state['current_discussion_key']:
-            discussion_question['content_unchanged'] = True
-        else:
-            discussion_question['content'] = state.get('current_discussion_content') or ''
-
     result = {
         'phase': state['phase'] if state else 'setup',
         'active_team': dict(active_team) if active_team else None,
         'active_question': active_question,
         'my_team': dict(my_team) if my_team else None,
         'current_question': state['current_question'] if state else None,
-        'discussion_question': discussion_question,
+        'discussion_questions_version': (
+            state.get('discussion_questions_version') or 0) if state else 0,
         'presentation_started_at': state['presentation_started_at'] if state else None,
         'session_started_at': state['session_started_at'] if state else None,
         'presentation_time_cap': state['presentation_time_cap'] if state else 300,
@@ -1925,11 +2007,12 @@ def _compute_state(slug, include_poll_count=True, known_question_id=None,
         'discussion_week': state.get('discussion_week', 1) if state else 1,
         'poll_active': poll_active_bool,
         'poll_started_at': state['poll_started_at'] if state else None,
-        'poll_duration': POLL_DURATION,
+        'poll_duration': poll_duration,
         'poll_remaining': timing['poll_remaining'],
         'poll_question_key': state['poll_question_key'] if state else None,
         'roster_version': state.get('roster_version', 0) if state else 0,
         'session_key': state.get('session_key', 0) if state else 0,
+        'state_version': state.get('state_version', 0) if state else 0,
         'session_elapsed': timing['session_elapsed'],
         'presentation_history': history,
         # Internal metadata used by api_poll for ended-phase ranking.
@@ -1968,7 +2051,7 @@ def _compute_state(slug, include_poll_count=True, known_question_id=None,
             thumb_participants = 0
             thumb_eligible = 0
             thumb_online_eligible = 0
-            if state.get('current_discussion_key'):
+            if state.get('phase') == 'discussion':
                 participants = query_db(
                     slug,
                     '''SELECT COUNT(DISTINCT thumb.grader_id) AS c
@@ -1976,7 +2059,7 @@ def _compute_state(slug, include_poll_count=True, known_question_id=None,
                        WHERE thumb.course_id = ? AND thumb.session_key = ?
                          AND thumb.question_key = ?''',
                     [cid, state.get('session_key', 0),
-                     state['current_discussion_key']], one=True
+                     _DISCUSSION_THUMB_KEY], one=True
                 )
                 thumb_participants = participants['c'] if participants else 0
                 eligible = query_db(
@@ -1998,12 +2081,32 @@ def _compute_state(slug, include_poll_count=True, known_question_id=None,
             result['thumb_participant_count'] = thumb_participants
             result['thumb_eligible_count'] = thumb_eligible
             result['thumb_online_eligible_count'] = thumb_online_eligible or 0
+            # Instructors only: which eligible raters haven't submitted yet, so
+            # they can decide whether to extend the window. Names only.
+            if pres_key and state.get('active_team_id'):
+                non_rater_rows = query_db(
+                    slug,
+                    '''SELECT name, student_id FROM students
+                       WHERE course_id = ? AND team_id IS NOT NULL
+                         AND team_id != ? AND is_active = 1
+                         AND id NOT IN (
+                             SELECT student_id FROM presentation_ratings
+                             WHERE course_id = ? AND question_key = ?
+                         )
+                       ORDER BY name, student_id''',
+                    [cid, state['active_team_id'], cid, pres_key])
+                result['poll_non_raters'] = [
+                    row['name'] or row['student_id'] for row in non_rater_rows
+                ]
+            else:
+                result['poll_non_raters'] = []
         else:
             result.update({
                 'unassigned_count': 0, 'poll_eligible_count': 0,
                 'poll_online_eligible_count': 0,
                 'thumb_participant_count': 0, 'thumb_eligible_count': 0,
                 'thumb_online_eligible_count': 0,
+                'poll_non_raters': [],
             })
         result['completed_presentation_count'] = len(history)
         result['presentation_number'] = len(history) + 1 \
@@ -2201,6 +2304,55 @@ def api_poll():
 
     is_instructor = role == 'instructor'
 
+    # --- Cheap "nothing changed" path (students only) ---
+    # A student that already has a full snapshot may send ``since=<version>``.
+    # When course_state hasn't been written since, we skip the expensive
+    # ``_compute_state`` work and return a tiny ``changed: false`` response.
+    # This makes ~1s student polling affordable, so instructor actions (phase
+    # changes, posted questions, started polls, team selections) reach students
+    # within about a second instead of the old 2-5s per-phase interval.
+    #
+    # Instructors always use the full path: their participation counts change
+    # as students act, without any course_state write.
+    known_version = request.args.get('since', type=int)
+    if known_version is not None and not is_instructor:
+        version_row = query_db(
+            slug,
+            '''SELECT state_version, phase, session_key,
+                      poll_active, poll_started_at
+               FROM course_state LIMIT 1''',
+            one=True,
+        )
+        current_version = (
+            version_row['state_version'] or 0
+        ) if version_row else 0
+        current_phase = (
+            version_row['phase'] or 'setup'
+        ) if version_row else 'setup'
+        # An open rating window's expiry is *derived* from time, so it can flip
+        # without a course_state write. Stay on the full path while it could
+        # matter so students see the window close promptly.
+        poll_window_live = bool(
+            version_row and version_row['poll_active']
+            and version_row['poll_started_at']
+        )
+        if (version_row is not None
+                and current_version == known_version
+                and current_phase != 'ended'
+                and not poll_window_live):
+            # Keep presence fresh. This is throttled to ~30s and only touches
+            # the students table (no course_state write), so the state-version
+            # short-circuit above stays valid.
+            _sync_student_activity(slug, version_row['session_key'] or 0)
+            cheap_interval = 1000
+            if is_demo_instance_slug(slug):
+                cheap_interval = max(cheap_interval, 5000)
+            return jsonify({
+                'changed': False,
+                'state_version': current_version,
+                'poll_interval': cheap_interval,
+            })
+
     # --- State ---
     state_data = _compute_state(
         slug,
@@ -2209,16 +2361,8 @@ def api_poll():
         known_question_revision=request.args.get('known_question_revision'),
         known_discussion_key=request.args.get('known_discussion_key'),
     )
-    if (role == 'student' and
-            session.get('activity_session_key') != state_data.get('session_key')):
-        execute_db(
-            slug,
-            '''UPDATE students SET last_active_at = CURRENT_TIMESTAMP
-               WHERE student_id = ? AND is_active = 1''',
-            [session['student_id']]
-        )
-        session['activity_session_key'] = state_data.get('session_key')
-        session['last_active_synced_at'] = datetime.utcnow().isoformat()
+    if role == 'student':
+        _sync_student_activity(slug, state_data.get('session_key'))
     course_id = state_data.pop('_course_id')
 
     # Strip grading metadata from student responses — students never see
@@ -2251,16 +2395,16 @@ def api_poll():
     elif role == 'instructor':
         poll_interval = 1000
     else:
-        poll_interval = {
-            'setup': 5000,
-            'discussion': 3000,
-            'competition': 2000,
-        }.get(state_data['phase'], 5000)
+        # The cheap path above makes ~1s student polling affordable, so phase
+        # transitions and posted questions reach students within ~1 second.
+        poll_interval = 1000
     if is_demo_instance_slug(slug):
         poll_interval = max(poll_interval, 5000)
 
     return jsonify({
+        'changed': True,
         'state': state_data,
+        'state_version': state_data.get('state_version', 0),
         'top_teams': top_teams,
         'poll_interval': poll_interval,
         'stop_polling': stop_polling,
@@ -2274,7 +2418,6 @@ def grade_peer():
     data = request.get_json(silent=True) or {}
     recipient_sid = data.get('recipient_id')
     selected = data.get('selected')
-    question_key = str(data.get('question_key') or '').strip()
     if recipient_sid is None:
         return jsonify({'error': 'Recipient is required'}), 400
     if not isinstance(selected, bool):
@@ -2309,18 +2452,13 @@ def grade_peer():
         if not state or state['phase'] != 'discussion':
             db.rollback()
             return jsonify({'error': 'Teammate thumbs are only open during discussion'}), 403
-        if not question_key or question_key != state['current_discussion_key']:
-            db.rollback()
-            return jsonify({
-                'error': 'The discussion question changed; refresh before saving'
-            }), 409
         if not grader['team_id'] or recipient['team_id'] != grader['team_id']:
             db.rollback()
             return jsonify({'error': 'You can only grade teammates'}), 403
 
         identity_params = [
             grader['course_id'], state['session_key'] or 0,
-            state['current_discussion_key'], grader['id'], recipient['id'],
+            _DISCUSSION_THUMB_KEY, grader['id'], recipient['id'],
         ]
         if selected:
             team_rows = db.execute(
@@ -2370,9 +2508,9 @@ def grade_peer():
                 [
                     grader['course_id'], state['session_key'] or 0,
                     state['discussion_week'] or 1,
-                    state['current_discussion_key'],
-                    active_discussion_source_key(state),
-                    state['current_discussion_title'] or '',
+                    _DISCUSSION_THUMB_KEY,
+                    _DISCUSSION_THUMB_KEY,
+                    '',
                     grader['id'], recipient['id'],
                     grader['team_id'], team_names.get(grader['team_id'], ''),
                     recipient['team_id'], team_names.get(recipient['team_id'], ''),
@@ -2406,9 +2544,8 @@ def my_responses():
         slug, 'SELECT * FROM course_state WHERE course_id = ?',
         [student['course_id']], one=True
     )
-    discussion_key = state['current_discussion_key'] if state else None
     thumb_recipient_ids = []
-    if discussion_key:
+    if state and state['phase'] == 'discussion':
         rows = query_db(
             slug,
             '''SELECT recipient.student_id FROM teammate_thumbs thumb
@@ -2417,7 +2554,7 @@ def my_responses():
                  AND thumb.question_key = ? AND thumb.grader_id = ?
                ORDER BY recipient.student_id''',
             [student['course_id'], state['session_key'] or 0,
-             discussion_key, student['id']]
+             _DISCUSSION_THUMB_KEY, student['id']]
         )
         thumb_recipient_ids = [row['student_id'] for row in rows]
 
@@ -2437,7 +2574,6 @@ def my_responses():
             }
     return jsonify({
         'phase': state['phase'] if state else 'setup',
-        'discussion_question_key': discussion_key,
         'thumb_recipient_ids': thumb_recipient_ids,
         'presentation_key': presentation_key,
         'rating': rating,
@@ -2595,7 +2731,7 @@ def set_phase():
                 if guard:
                     db.rollback()
                     return jsonify({'error': guard[0]}), guard[1]
-                if _poll_is_open(state):
+                if _poll_is_open(state, poll_duration=get_poll_duration(slug)):
                     db.rollback()
                     return jsonify({
                         'error': 'Stop the active rating poll before leaving this phase'
@@ -2989,6 +3125,7 @@ def set_discussion_week():
                WHERE course_id = ?''',
             [week, course['id']]
         )
+        _bump_discussion_questions_version(db, course['id'])
         total = db.execute(
             '''SELECT COUNT(*) AS c FROM questions
                WHERE course_id = ? AND COALESCE(week_num, 1) = ?
@@ -3112,10 +3249,17 @@ def set_max_members():
 # ---------------------------------------------------------------------------
 
 @app.route('/api/discussion_questions', methods=['GET'])
-@instructor_login_required
 def discussion_questions():
-    """Load the instructor-only weekly discussion question bank."""
-    slug = session['slug']
+    """Weekly discussion questions for the current week.
+
+    Instructors see every question (with a ``hidden`` flag) plus the week list
+    for the selector. Students see only the visible questions. Both receive
+    ``version`` so clients refetch only when the visible set changes.
+    """
+    slug = session.get('slug')
+    role = _authenticated_role(slug)
+    if not slug or role is None:
+        return jsonify({'error': 'Not logged in'}), 401
     class_dir = _course_class_dir(slug)
     try:
         catalog = validate_question_catalog(class_dir)
@@ -3127,14 +3271,12 @@ def discussion_questions():
     ensure_schema(slug)
     state = query_db(
         slug,
-        '''SELECT discussion_week, current_discussion_key,
-                  current_discussion_source_key,
-                  current_discussion_title, current_discussion_content
+        '''SELECT discussion_week, discussion_questions_version
            FROM course_state WHERE course_id = ?''',
-        [course['id']],
-        one=True,
+        [course['id']], one=True,
     )
     saved_week = state['discussion_week'] if state and state['discussion_week'] else 1
+    version = (state['discussion_questions_version'] or 0) if state else 0
 
     questions_list = []
     weeks = [
@@ -3153,7 +3295,7 @@ def discussion_questions():
         for week in catalog.weeks
     ]
 
-    if week_param and weeks:
+    if role == 'instructor' and week_param and weeks:
         target = next((w for w in weeks if str(w['num']) == str(week_param)), weeks[0])
     elif weeks:
         target = next((w for w in weeks if w['num'] == saved_week), weeks[0])
@@ -3225,17 +3367,68 @@ def discussion_questions():
     except QuestionParseError as exc:
         return jsonify({'error': str(exc)}), 422
 
+    hidden_keys = {
+        row['question_key'] for row in query_db(
+            slug,
+            '''SELECT question_key FROM hidden_discussion_questions
+               WHERE course_id = ? AND week_num = ?''',
+            [course['id'], appendix_week])
+    }
+    for q in questions_list:
+        q['hidden'] = q['key'] in hidden_keys
+        q['source'] = 'appendix' if 'appendix_id' in q else 'bank'
+    if role == 'student':
+        questions_list = [q for q in questions_list if not q['hidden']]
+        weeks = []
+
     return jsonify({
         'weeks': weeks,
         'current_week': appendix_week,
-        'current_question': ({
-            'key': state['current_discussion_key'],
-            'source_key': active_discussion_source_key(state),
-            'title': state['current_discussion_title'] or '',
-            'content': state['current_discussion_content'] or '',
-        } if state and state['current_discussion_key'] else None),
-        'questions': questions_list
+        'version': version,
+        'questions': questions_list,
     })
+
+
+@app.route('/api/toggle_discussion_question', methods=['POST'])
+@instructor_login_required
+def toggle_discussion_question():
+    """Show or hide one discussion question for students."""
+    slug = session['slug']
+    data = request.get_json(silent=True) or {}
+    question_key = str(data.get('question_key') or '').strip()
+    visible = bool(data.get('visible'))
+    if not question_key:
+        return jsonify({'error': 'question_key is required'}), 400
+    ensure_schema(slug)
+    db = get_db(slug)
+    db.execute('BEGIN IMMEDIATE')
+    try:
+        course = db.execute('SELECT id FROM courses LIMIT 1').fetchone()
+        state = db.execute(
+            'SELECT phase, session_key, discussion_week FROM course_state '
+            'WHERE course_id = ?', [course['id']]
+        ).fetchone()
+        guard = _expected_state_guard(data, state)
+        if guard:
+            db.rollback()
+            return jsonify({'error': guard[0]}), guard[1]
+        week = state['discussion_week'] if state and state['discussion_week'] else 1
+        if visible:
+            db.execute(
+                '''DELETE FROM hidden_discussion_questions
+                   WHERE course_id = ? AND week_num = ? AND question_key = ?''',
+                [course['id'], week, question_key])
+        else:
+            db.execute(
+                '''INSERT OR IGNORE INTO hidden_discussion_questions
+                   (course_id, week_num, question_key) VALUES (?, ?, ?)''',
+                [course['id'], week, question_key])
+        _bump_discussion_questions_version(db, course['id'])
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    return jsonify({'success': True})
 
 
 def _appendix_dir(slug):
@@ -3329,6 +3522,7 @@ def add_question():
         sync_appendix_questions(
             slug, course['id'], week, db=db, commit=False
         )
+        _bump_discussion_questions_version(db, course['id'])
         db.commit()
         return jsonify({
             'success': True,
@@ -3435,6 +3629,7 @@ def delete_appendix_question():
                    WHERE course_id = ?''',
                 [course['id']]
             )
+        _bump_discussion_questions_version(db, course['id'])
         db.commit()
         return jsonify({'success': True, 'unposted': unposted})
     except QuestionParseError as exc:
@@ -3985,7 +4180,7 @@ def next_presentation():
         if guard:
             db.rollback()
             return jsonify({'error': guard[0]}), guard[1]
-        if _poll_is_open(state):
+        if _poll_is_open(state, poll_duration=get_poll_duration(slug)):
             db.rollback()
             return jsonify({
                 'error': 'Stop the active rating poll before finishing this presentation'
@@ -4013,15 +4208,17 @@ def start_poll():
         if guard:
             db.rollback()
             return jsonify({'error': guard[0]}), guard[1]
-        if _poll_is_open(state):
+        poll_duration = get_poll_duration(slug)
+        if _poll_is_open(state, poll_duration=poll_duration):
             started_at = state['poll_started_at']
             db.rollback()
             return jsonify({
                 'success': True,
                 'already_active': True,
                 'poll_started_at': started_at,
-                'poll_duration': POLL_DURATION,
-                'poll_remaining': _derive_timing_state(state)['poll_remaining'],
+                'poll_duration': poll_duration,
+                'poll_remaining': _derive_timing_state(
+                    state, poll_duration=poll_duration)['poll_remaining'],
             })
         # Derive the rating key from server state — never trust client input.
         question_key = active_presentation_key(state)
@@ -4041,11 +4238,11 @@ def start_poll():
         # Build the response before committing so that a failure during
         # response construction rolls back the poll-start rather than
         # leaving a committed poll with no response to the instructor.
-        timing = _derive_timing_state(fresh)
+        timing = _derive_timing_state(fresh, poll_duration=poll_duration)
         response = jsonify({
             'success': True,
             'poll_started_at': fresh['poll_started_at'] if fresh else None,
-            'poll_duration': POLL_DURATION,
+            'poll_duration': poll_duration,
             'poll_remaining': timing['poll_remaining'],
         })
         db.commit()
@@ -4179,7 +4376,7 @@ def submit_rating():
         if expected_key != question_key:
             db.rollback()
             return jsonify({'error': 'The presentation has changed; refresh and try again'}), 409
-        if not _poll_is_open(state):
+        if not _poll_is_open(state, poll_duration=get_poll_duration(slug)):
             db.rollback()
             return jsonify({'error': 'The rating poll is closed'}), 403
         if not student['team_id']:

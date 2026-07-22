@@ -861,49 +861,34 @@ def test_unassigned_student_sees_posted_discussion_prompt(course_env):
     assert "Discuss this exact classroom prompt." in html
 
 
-def test_student_thumb_requires_the_displayed_discussion_question(course_env):
-    _set_state(
-        course_env,
-        phase="discussion",
-        discussion_week=2,
-        current_discussion_key="discussion-current",
-        current_discussion_title="Current question",
-        current_discussion_content="Discuss the current question.",
-    )
+def test_student_thumb_is_session_scoped_and_phase_gated(course_env):
+    """Thumbs recognize a teammate for the whole discussion phase: one per
+    teammate per session, recorded only during discussion, with no question key."""
     client = _student_client(course_env, "s1")
 
-    stale = client.post(
-        "/api/grade_peer",
-        json={
-            "recipient_id": "s2",
-            "selected": True,
-            "question_key": "discussion-stale",
-        },
+    _set_state(course_env, phase="setup")
+    rejected = client.post(
+        "/api/grade_peer", json={"recipient_id": "s2", "selected": True}
     )
-    missing = client.post(
-        "/api/grade_peer",
-        json={"recipient_id": "s2", "selected": True},
-    )
-
-    assert stale.status_code == 409
-    assert missing.status_code == 409
+    assert rejected.status_code == 403
     assert _history_counts(course_env)["thumbs"] == 0
 
+    _set_state(course_env, phase="discussion")
     saved = client.post(
-        "/api/grade_peer",
-        json={
-            "recipient_id": "s2",
-            "selected": True,
-            "question_key": "discussion-current",
-        },
+        "/api/grade_peer", json={"recipient_id": "s2", "selected": True}
     )
     assert saved.status_code == 200
     assert _history_counts(course_env)["thumbs"] == 1
     with _connect(course_env) as db:
-        saved_week = db.execute(
-            "SELECT week_num FROM teammate_thumbs"
-        ).fetchone()[0]
-    assert saved_week == 2
+        key = db.execute("SELECT question_key FROM teammate_thumbs").fetchone()[0]
+    assert key == "discussion"
+
+    # Session-scoped: repeating the same thumb is idempotent (no duplicate).
+    again = client.post(
+        "/api/grade_peer", json={"recipient_id": "s2", "selected": True}
+    )
+    assert again.status_code == 200
+    assert _history_counts(course_env)["thumbs"] == 1
 
 
 def test_student_rating_records_selected_week(course_env):
@@ -1012,77 +997,52 @@ def test_set_question_rejects_stale_post_and_unpost(course_env):
     assert state["current_discussion_source_key"] is None
 
 
-def test_reposting_same_discussion_question_starts_fresh_thumb_context(course_env):
+def test_discussion_question_visibility_and_version(course_env):
+    """Hiding a question removes it from the student list and bumps the
+    version students use to refetch; showing it restores it."""
     _set_state(course_env, phase="discussion")
     instructor = _instructor_client(course_env)
     student = _student_client(course_env, "s1")
-    payload = {
-        "key": "week-1-shared-question",
-        "title": "Shared question",
-        "content": "Discuss this question carefully.",
-        "expected_phase": "discussion",
-        "expected_session_key": SESSION_KEY,
-        "expected_discussion_key": "",
-    }
 
-    first = instructor.post("/api/set_question", json=payload)
-    first_key = first.get_json()["discussion_question"]["key"]
-    saved_first = student.post(
-        "/api/grade_peer",
+    added = instructor.post(
+        "/api/questions",
         json={
-            "recipient_id": "s2",
-            "selected": True,
-            "question_key": first_key,
+            "title": "Visibility check", "content": "discuss", "week": 1,
+            "expected_phase": "discussion",
+            "expected_session_key": SESSION_KEY,
         },
     )
-    assert saved_first.status_code == 200
+    assert added.status_code == 200
+    target = instructor.get("/api/discussion_questions").get_json()["questions"][0]
+    before_version = instructor.get(
+        "/api/discussion_questions"
+    ).get_json()["version"]
 
-    second_payload = {**payload, "expected_discussion_key": first_key}
-    second = instructor.post("/api/set_question", json=second_payload)
-    second_question = second.get_json()["discussion_question"]
-    assert second_question["source_key"] == payload["key"]
-    assert second_question["key"] != first_key
+    # Visible to the student by default.
+    assert any(
+        q["key"] == target["key"]
+        for q in student.get("/api/discussion_questions").get_json()["questions"]
+    )
 
-    responses = student.get("/api/my_responses").get_json()
-    assert responses["discussion_question_key"] == second_question["key"]
-    assert responses["thumb_recipient_ids"] == []
-
-    stale = student.post(
-        "/api/grade_peer",
+    hide = instructor.post(
+        "/api/toggle_discussion_question",
         json={
-            "recipient_id": "s2",
-            "selected": True,
-            "question_key": first_key,
+            "question_key": target["key"], "visible": False,
+            "expected_phase": "discussion",
+            "expected_session_key": SESSION_KEY,
         },
     )
-    assert stale.status_code == 409
-    saved_second = student.post(
-        "/api/grade_peer",
-        json={
-            "recipient_id": "s2",
-            "selected": True,
-            "question_key": second_question["key"],
-        },
-    )
-    assert saved_second.status_code == 200
+    assert hide.status_code == 200
 
-    with _connect(course_env) as db:
-        rows = db.execute(
-            """SELECT question_key, source_question_key, question_title,
-                      grader_team_id, grader_team_name, recipient_team_id,
-                      recipient_team_name
-               FROM teammate_thumbs ORDER BY id"""
-        ).fetchall()
-    assert [row["question_key"] for row in rows] == [
-        first_key,
-        second_question["key"],
-    ]
-    assert {row["source_question_key"] for row in rows} == {payload["key"]}
-    assert {row["question_title"] for row in rows} == {payload["title"]}
-    assert all(row["grader_team_id"] == course_env["teams"]["Team 1"] for row in rows)
-    assert all(row["recipient_team_id"] == course_env["teams"]["Team 1"] for row in rows)
-    assert all(row["grader_team_name"] == "Team 1" for row in rows)
-    assert all(row["recipient_team_name"] == "Team 1" for row in rows)
+    after = instructor.get("/api/discussion_questions").get_json()
+    assert after["version"] > before_version
+    assert next(
+        q for q in after["questions"] if q["key"] == target["key"]
+    )["hidden"] is True
+    assert not any(
+        q["key"] == target["key"]
+        for q in student.get("/api/discussion_questions").get_json()["questions"]
+    )
 
 
 def test_delayed_discussion_post_cannot_overwrite_newer_post(course_env):
@@ -2327,3 +2287,196 @@ def test_instructor_templates_render_new_controls_in_each_phase(course_env):
     ).get_data(as_text=True)
     assert 'id="btn-cancel-presentation"' in competition_html
     assert 'id="competition-appendix-form"' in competition_html
+
+
+# ---------------------------------------------------------------------------
+# state_version fast-polling signal (cheap /api/poll short-circuit)
+# ---------------------------------------------------------------------------
+
+def test_state_version_auto_bumps_on_course_state_write(course_env):
+    """The schema trigger bumps state_version exactly once per UPDATE, so no
+    instructor route can ever forget to signal students."""
+    with _connect(course_env) as db:
+        before = db.execute(
+            "SELECT state_version FROM course_state WHERE course_id = ?",
+            (course_env["course_id"],),
+        ).fetchone()[0]
+        db.execute(
+            "UPDATE course_state SET teams_locked = 1 WHERE course_id = ?",
+            (course_env["course_id"],),
+        )
+        db.commit()
+        after = db.execute(
+            "SELECT state_version FROM course_state WHERE course_id = ?",
+            (course_env["course_id"],),
+        ).fetchone()[0]
+    assert after == before + 1
+
+
+def test_student_poll_short_circuits_when_state_unchanged(course_env):
+    """A student sending since=<current version> gets a tiny changed:false
+    response with no full state, so ~1s polling stays cheap."""
+    client = _student_client(course_env, "s1")
+
+    first = client.get("/api/poll").get_json()
+    assert first["changed"] is True
+    assert "state" in first
+    version = first["state_version"]
+
+    same = client.get(f"/api/poll?since={version}").get_json()
+    assert same["changed"] is False
+    assert "state" not in same
+    assert same["state_version"] == version
+    assert same["poll_interval"] == 1000
+
+
+def test_student_poll_returns_full_state_after_a_state_change(course_env):
+    """After any course_state write bumps the version, a student's next poll
+    with the stale version falls back to the full state."""
+    client = _student_client(course_env, "s1")
+    stale_version = client.get("/api/poll").get_json()["state_version"]
+
+    # Any write to course_state bumps the version (here, picking a week).
+    _set_state(course_env, discussion_week=2)
+
+    after = client.get(f"/api/poll?since={stale_version}").get_json()
+    assert after["changed"] is True
+    assert "state" in after
+    assert after["state_version"] > stale_version
+    assert after["state"]["discussion_week"] == 2
+
+
+def test_student_poll_uses_full_path_while_rating_window_open(course_env):
+    """An open rating window expires by time without a course_state write, so
+    students must keep getting the full state until it closes."""
+    _activate_presentation(course_env)
+    _set_state(
+        course_env,
+        poll_active=1,
+        poll_started_at=datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+    )
+    # s4 is on Team 2; Team 1 is presenting, so s4 is an eligible rater.
+    client = _student_client(course_env, "s4")
+    version = client.get("/api/poll").get_json()["state_version"]
+
+    same = client.get(f"/api/poll?since={version}").get_json()
+    assert same["changed"] is True
+    assert "state" in same
+
+
+def test_instructor_poll_always_uses_full_path(course_env):
+    """Instructors need live participation counts (which change without a
+    course_state write), so ?since must never short-circuit for them."""
+    instructor = _instructor_client(course_env)
+    version = instructor.get("/api/poll").get_json()["state_version"]
+
+    again = instructor.get(f"/api/poll?since={version}").get_json()
+    assert again["changed"] is True
+    assert "state" in again
+
+
+def test_student_activity_write_is_throttled(course_env):
+    """last_active_at is written on the first poll and at most every ~30s
+    after, so 1s polling can't cause a write storm but 'online' stays accurate."""
+    client = _student_client(course_env, "s1")
+    old = "2000-01-01 00:00:00"
+
+    def set_last_active(value):
+        with _connect(course_env) as db:
+            db.execute(
+                "UPDATE students SET last_active_at = ? WHERE student_id = ?",
+                (value, "s1"),
+            )
+            db.commit()
+
+    def get_last_active():
+        with _connect(course_env) as db:
+            return db.execute(
+                "SELECT last_active_at FROM students WHERE student_id = ?",
+                ("s1",),
+            ).fetchone()[0]
+
+    # First poll: session not yet acked -> writes, moving last_active_at up.
+    set_last_active(old)
+    client.get("/api/poll").get_json()
+    assert get_last_active() > old
+
+    # Immediate second poll is throttled (session acked, sync stamp fresh)
+    # -> last_active_at must NOT move.
+    set_last_active(old)
+    client.get("/api/poll").get_json()
+    assert get_last_active() == old
+
+    # Force the sync stamp into the past; the next poll writes again.
+    set_last_active(old)
+    with client.session_transaction() as flask_session:
+        flask_session["last_active_synced_at"] = (
+            datetime.utcnow() - timedelta(seconds=90)
+        ).isoformat()
+    client.get("/api/poll").get_json()
+    assert get_last_active() > old
+
+
+def test_poll_duration_reads_from_course_yaml(course_env):
+    """poll_duration is configurable via course.yaml (clamped 5-300s, default
+    30) and flows through to the poll state the client sees."""
+    app_module._poll_duration_cache.clear()
+    slug = course_env["slug"]
+    class_dir = Path(config.CLASSES_DIR) / slug
+
+    assert app_module.get_poll_duration(slug) == 30
+
+    (class_dir / "course.yaml").write_text(
+        f"slug: {slug}\nactive: true\npoll_duration: 45\n", encoding="utf-8"
+    )
+    app_module._poll_duration_cache.clear()
+    assert app_module.get_poll_duration(slug) == 45
+
+    # Out-of-range falls back to the default.
+    (class_dir / "course.yaml").write_text(
+        f"slug: {slug}\nactive: true\npoll_duration: 3\n", encoding="utf-8"
+    )
+    app_module._poll_duration_cache.clear()
+    assert app_module.get_poll_duration(slug) == 30
+
+    # The configured value reaches the client through /api/poll.
+    (class_dir / "course.yaml").write_text(
+        f"slug: {slug}\nactive: true\npoll_duration: 45\n", encoding="utf-8"
+    )
+    app_module._poll_duration_cache.clear()
+    _activate_presentation(course_env)
+    _set_state(
+        course_env,
+        poll_active=1,
+        poll_started_at=datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+    )
+    state = _instructor_client(course_env).get("/api/poll").get_json()["state"]
+    assert state["poll_duration"] == 45
+
+
+def test_instructor_sees_outstanding_raters(course_env):
+    """During a presentation the instructor sees the eligible raters who
+    haven't submitted yet, and the list clears as they rate."""
+    # Team 1 presents; s4 (Dana, Team 2) is the only eligible rater (s3 is
+    # unassigned, s1/s2 are on the presenting team).
+    _activate_presentation(course_env)
+    state = _instructor_client(course_env).get("/api/poll").get_json()["state"]
+    assert state["poll_non_raters"] == ["Dana"]
+
+    # Students never see this list.
+    student_state = _student_client(course_env, "s4").get("/api/poll").get_json()["state"]
+    assert "poll_non_raters" not in student_state
+
+    # Open the window and have s4 rate; the list should clear.
+    _set_state(
+        course_env,
+        poll_active=1,
+        poll_started_at=datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+    )
+    resp = _student_client(course_env, "s4").post(
+        "/api/submit_rating",
+        json={"q1_developed": 4, "q2_easy": 5, "presentation_key": "pres-current"},
+    )
+    assert resp.status_code == 200
+    state = _instructor_client(course_env).get("/api/poll").get_json()["state"]
+    assert state["poll_non_raters"] == []
