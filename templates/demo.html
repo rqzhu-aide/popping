@@ -18,21 +18,27 @@
 
         {% if instance_slug %}
         <div class="demo-role-picker">
-            <a href="{{ url_for('demo_instructor', instance_slug=instance_slug) }}" class="demo-role-card demo-role-instructor">
+            <form method="post" action="{{ url_for('demo_instructor', instance_slug=instance_slug) }}" class="demo-role-form">
+                <button type="submit" class="demo-role-card demo-role-instructor">
                 <span class="demo-role-icon">👩‍🏫</span>
                 <span class="demo-role-label">Enter as Instructor</span>
                 <span class="demo-role-desc">Control phases, manage teams, start grading</span>
-            </a>
-            <a href="{{ url_for('demo_student', instance_slug=instance_slug, student_number=1) }}" class="demo-role-card demo-role-student">
+            </button>
+            </form>
+            <form method="post" action="{{ url_for('demo_student', instance_slug=instance_slug, student_number=1) }}" class="demo-role-form">
+                <button type="submit" class="demo-role-card demo-role-student">
                 <span class="demo-role-icon">🧑‍🎓</span>
                 <span class="demo-role-label">Enter as Student 1</span>
                 <span class="demo-role-desc">Join a team, give teammate thumbs-up, rate presentations</span>
-            </a>
-            <a href="{{ url_for('demo_student', instance_slug=instance_slug, student_number=2) }}" class="demo-role-card demo-role-student">
-                <span class="demo-role-icon">2</span>
+            </button>
+            </form>
+            <form method="post" action="{{ url_for('demo_student', instance_slug=instance_slug, student_number=2) }}" class="demo-role-form">
+                <button type="submit" class="demo-role-card demo-role-student">
+                <span class="demo-role-icon">👩‍🎓</span>
                 <span class="demo-role-label">Enter as Student 2</span>
                 <span class="demo-role-desc">Use a separate browser profile to interact with Student 1</span>
-            </a>
+            </button>
+            </form>
         </div>
 
         <p class="demo-session-note">
@@ -86,7 +92,7 @@
                 <div class="demo-step-num">3</div>
                 <div class="demo-step-body">
                     <h3>Discussion Phase</h3>
-                    <p>The instructor posts a question. Students discuss it within their teams and give thumbs-up to significant contributors.</p>
+                    <p>All of the week's questions are visible at once. Students discuss them within their teams and give thumbs-up to significant contributors.</p>
                 </div>
             </div>
 

@@ -8,8 +8,7 @@
      data-team-id="{{ team.id if team else '' }}"
      data-teams-locked="{{ 1 if teams_locked else 0 }}"
      data-max-teams="{{ max_teams if max_teams is defined else teams|length }}"
-     data-max-members="{{ max_members if max_members is defined else '' }}"
-     data-discussion-key="{{ state.current_discussion_key or '' }}">
+     data-max-members="{{ max_members if max_members is defined else '' }}">
     <header class="dash-header">
         <div>
             <h1>Hello, {{ student | display_name }}</h1>
@@ -28,15 +27,8 @@
     <section class="card discussion" id="discussion-section"
              style="{% if state.phase != 'discussion' %}display:none{% endif %}">
         <h2>Discussion</h2>
-        <div class="question-box">
-            <div class="current-question markdown-content" id="current-question">
-                {% if state.current_discussion_key %}
-                <h3>{{ state.current_discussion_title or 'Discussion question' }}</h3>
-                <div class="initial-question-content">{{ state.current_discussion_content or '' }}</div>
-                {% else %}
-                Waiting for the instructor to post a question...
-                {% endif %}
-            </div>
+        <div class="disc-questions-list" id="student-disc-questions-list">
+            <p class="loading">Loading questions...</p>
         </div>
     </section>
 
@@ -168,8 +160,6 @@
                             <button class="thumb-btn thumb-up"
                                     aria-label="Thumbs up to {{ m.name or m.student_id }}"
                                     aria-pressed="false"
-                                    data-question-available="{{ 1 if state.current_discussion_key else 0 }}"
-                                    {% if not state.current_discussion_key %}disabled title="Wait for the instructor to post a question"{% endif %}
                                     onclick="gradeTeammate(this, this.closest('.teammate-card').dataset.studentId)">👍</button>
                         </div>
                     </div>

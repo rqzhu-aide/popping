@@ -2,6 +2,8 @@
 
 {% block title %}Login - {{ course.name }}{% endblock %}
 
+{% block mathjax %}{% endblock %}
+
 {% block content %}
 <div class="login-container">
     <div class="login-card">
@@ -23,7 +25,7 @@
             <div class="form-group">
                 <label for="pin">PIN</label>
                 <input type="password" id="pin" name="pin" required
-                       placeholder="Enter your PIN">
+                       placeholder="Enter your PIN" inputmode="numeric" pattern="[0-9]*" maxlength="4" autocomplete="off" enterkeyhint="go">
             </div>
             <button type="submit" class="btn btn-primary btn-full">Join Class</button>
         </form>

@@ -5,6 +5,7 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import time
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -19,7 +20,12 @@ if str(PROJECT_ROOT) not in sys.path:
 import app as app_module  # noqa: E402
 import config  # noqa: E402
 import database  # noqa: E402
-from demo_instance import is_demo_instance_slug  # noqa: E402
+from demo_instance import (  # noqa: E402
+    DEMO_INSTANCE_TTL_SECONDS,
+    cleanup_expired_demo_instances,
+    is_demo_instance_slug,
+    touch_demo_instance,
+)
 
 
 @pytest.fixture
@@ -59,14 +65,14 @@ def _start_demo(client, env):
 
 
 def _enter_student(client, slug, number):
-    response = client.get(f'/demo/{slug}/student/{number}')
+    response = client.post(f'/demo/{slug}/student/{number}')
     assert response.status_code == 302
     assert response.headers['Location'].endswith('/dashboard')
     assert client.get('/dashboard').status_code == 200
 
 
 def _enter_instructor(client, slug):
-    response = client.get(f'/demo/{slug}/instructor')
+    response = client.post(f'/demo/{slug}/instructor')
     assert response.status_code == 302
     assert response.headers['Location'].endswith(f'/instructor/{slug}')
     assert client.get(f'/instructor/{slug}').status_code == 200
@@ -222,8 +228,25 @@ class TestPrivateDemoEntry:
         client = app_module.app.test_client()
         assert client.get('/demo/instructor').status_code == 302
         assert client.get('/demo/student').status_code == 302
-        assert client.get('/demo/demo_not_valid/student/1').status_code == 302
+        assert client.post('/demo/demo_not_valid/student/1').status_code == 302
         assert list(demo_env['data_dir'].iterdir()) == []
+
+    def test_role_entry_logout_and_exit_are_post_only(self, demo_env):
+        client = app_module.app.test_client()
+        slug, _db_path = _start_demo(client, demo_env)
+        assert client.get(f'/demo/{slug}/instructor').status_code == 405
+        assert client.get(f'/demo/{slug}/student/1').status_code == 405
+        assert client.get('/logout').status_code == 405
+
+        # GET /demo/exit falls through to the read-only instance page route;
+        # it must not clear the demo session.
+        _enter_student(client, slug, 1)
+        assert client.get('/demo/exit').status_code == 302
+        with client.session_transaction() as session_data:
+            assert session_data.get('is_demo') is True
+        assert client.post('/demo/exit').status_code == 302
+        with client.session_transaction() as session_data:
+            assert not session_data
 
     def test_demo_courses_are_hidden_from_normal_landing(self, demo_env):
         client = app_module.app.test_client()
@@ -281,6 +304,44 @@ class TestDemoReset:
         assert int(response.headers['Retry-After']) >= 1
 
 
+class TestDemoTimeToLive:
+    def test_poll_activity_keeps_instance_alive_past_stale_marker(
+            self, demo_env):
+        slug, _db_path = _start_demo(app_module.app.test_client(), demo_env)
+        instructor = app_module.app.test_client()
+        _enter_instructor(instructor, slug)
+
+        data_dir = str(demo_env['data_dir'])
+        marker = demo_env['data_dir'] / slug / '.last-used'
+        stale = time.time() - DEMO_INSTANCE_TTL_SECONDS - 60
+        touch_demo_instance(data_dir, slug, now=stale)
+
+        assert instructor.get('/api/poll').status_code == 200
+        assert os.path.getmtime(marker) > stale
+
+        removed = cleanup_expired_demo_instances(data_dir, now=time.time())
+        assert slug not in removed
+        assert (demo_env['data_dir'] / slug).is_dir()
+
+    def test_poll_touch_is_throttled_per_instance(self, demo_env):
+        slug, _db_path = _start_demo(app_module.app.test_client(), demo_env)
+        instructor = app_module.app.test_client()
+        _enter_instructor(instructor, slug)
+
+        data_dir = str(demo_env['data_dir'])
+        marker = demo_env['data_dir'] / slug / '.last-used'
+        stale = time.time() - DEMO_INSTANCE_TTL_SECONDS - 60
+        touch_demo_instance(data_dir, slug, now=stale)
+
+        assert instructor.get('/api/poll').status_code == 200
+        assert os.path.getmtime(marker) > stale
+
+        # A second poll within the throttle window must not hit disk again.
+        touch_demo_instance(data_dir, slug, now=stale)
+        assert instructor.get('/api/poll').status_code == 200
+        assert os.path.getmtime(marker) <= stale + 1
+
+
 class TestTwoStudentWorkflow:
     def test_same_team_students_can_record_a_discussion_thumb(self, demo_env):
         slug, db_path = _start_demo(app_module.app.test_client(), demo_env)
@@ -295,22 +356,10 @@ class TestTwoStudentWorkflow:
         _enter_instructor(instructor, slug)
         _change_phase(instructor, 'discussion')
 
-        question = instructor.get('/api/discussion_questions').get_json()['questions'][0]
-        state = _state(instructor)
-        posted = instructor.post('/api/set_question', json={
-            'key': question['key'],
-            'title': question['title'],
-            'content': question['content'],
-            'expected_phase': state['phase'],
-            'expected_session_key': state['session_key'],
-            'expected_discussion_key': '',
-        })
-        assert posted.status_code == 200
-        discussion_key = posted.get_json()['discussion_question']['key']
+        # Thumbs are phase-scoped: no question needs to be posted first.
         thumb = student_one.post('/api/grade_peer', json={
             'recipient_id': 'demo002',
             'selected': True,
-            'question_key': discussion_key,
         })
         assert thumb.status_code == 200
         assert _database_value(path=db_path, query='SELECT COUNT(*) FROM teammate_thumbs') == 1

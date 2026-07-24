@@ -172,6 +172,16 @@ a:visited:hover { color: var(--primary-hover); }
     cursor: pointer;
     font-family: inherit;
 }
+.nav-logout-form {
+    margin: 0;
+}
+.nav-link-btn {
+    background: none;
+    border: none;
+    cursor: pointer;
+    font-family: inherit;
+    padding: 0;
+}
 .nav-dropdown-menu {
     display: none;
     position: absolute;
@@ -668,21 +678,12 @@ input:focus, textarea:focus {
     width: 0.65em;
 }
 
-.question-box {
-    background: var(--accent-bg);
-    border-radius: 8px;
-    padding: 14px;
-    margin-bottom: 12px;
-    font-weight: 600;
-}
 .team-card:disabled {
     cursor: not-allowed;
     opacity: 0.55;
     transform: none;
 }
 .team-capacity { color: var(--text-muted); font-size: 0.78rem; }
-.current-question h3 { margin: 0 0 10px; }
-.initial-question-content { white-space: pre-wrap; }
 
 .phase-buttons, .team-buttons {
     display: flex;
@@ -1223,35 +1224,6 @@ input:focus, textarea:focus {
 }
 
 /* Discussion question cards */
-.discussion-post-status {
-    display: flex;
-    align-items: center;
-    gap: 9px;
-    margin: 0 0 14px;
-    padding: 10px 12px;
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    color: var(--text-muted);
-    background: var(--bg);
-    font-size: 0.9rem;
-    font-weight: 600;
-}
-.discussion-status-dot {
-    width: 9px;
-    height: 9px;
-    border-radius: 50%;
-    background: var(--text-muted);
-    flex: 0 0 auto;
-}
-.discussion-post-status.has-posted-question {
-    color: var(--success-text);
-    background: var(--success-soft);
-    border-color: var(--success-border);
-}
-.discussion-post-status.has-posted-question .discussion-status-dot {
-    background: var(--success);
-    box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.16);
-}
 .disc-questions-list {
     display: flex;
     flex-direction: column;
@@ -1262,22 +1234,18 @@ input:focus, textarea:focus {
     border-radius: 8px;
     overflow: hidden;
 }
-.disc-question-card.is-posted {
-    border-color: var(--success-border);
-    box-shadow: 0 0 0 2px rgba(16, 185, 129, 0.12);
+.disc-question-card.is-hidden {
+    opacity: 0.6;
 }
-.posted-question-badge {
-    color: var(--success-text);
-    background: var(--success-soft);
+.hidden-question-badge {
+    color: var(--text-muted);
+    background: var(--bg);
+    border: 1px solid var(--border);
     border-radius: 999px;
     padding: 3px 8px;
     font-size: 0.75rem;
     font-weight: 700;
     white-space: nowrap;
-}
-.post-question-btn:disabled {
-    opacity: 0.75;
-    cursor: default;
 }
 .disc-question-header {
     display: flex;
@@ -1290,6 +1258,10 @@ input:focus, textarea:focus {
 }
 .disc-question-header:hover {
     background: var(--accent-bg);
+}
+.disc-question-header:focus-visible {
+    outline: 3px solid var(--primary);
+    outline-offset: -3px;
 }
 .disc-question-num {
     font-weight: 700;
@@ -1405,6 +1377,7 @@ input:focus, textarea:focus {
     gap: 3px;
     cursor: grab;
     user-select: none;
+    touch-action: none;
     padding: 6px;
     border-radius: 8px;
     background: var(--surface);
@@ -1567,6 +1540,11 @@ input:focus, textarea:focus {
     font-size: 2.5rem;
 }
 
+button.demo-role-card {
+    font: inherit;
+    cursor: pointer;
+}
+
 .demo-role-label {
     font-size: 1.15rem;
     font-weight: 700;
@@ -1611,7 +1589,8 @@ input:focus, textarea:focus {
     flex: 1;
 }
 
-.demo-banner-reset-form {
+.demo-banner-reset-form,
+.demo-banner-exit-form {
     margin: 0;
 }
 
@@ -1626,7 +1605,8 @@ input:focus, textarea:focus {
     white-space: nowrap;
 }
 
-.demo-banner-reset {
+.demo-banner-reset,
+.demo-banner-exit {
     border: 0;
     background: transparent;
     font: inherit;
@@ -1686,11 +1666,19 @@ input:focus, textarea:focus {
     cursor: pointer;
     font: inherit;
     line-height: 1;
-    padding: 3px;
+    padding: 8px;
+    min-width: 44px;
+    min-height: 44px;
     transition: color 0.15s, transform 0.15s;
 }
 .star:hover, .star.active { color: var(--rating-active); }
 .star:hover { transform: scale(1.08); }
+.star:disabled,
+.star:disabled:hover {
+    color: var(--rating-idle);
+    transform: none;
+    cursor: default;
+}
 .star:focus-visible {
     outline: 3px solid var(--primary);
     outline-offset: 1px;
@@ -1991,6 +1979,24 @@ html.light .student-timer {
 @keyframes timer-expired-pulse {
     from { opacity: 0.55; }
     to   { opacity: 1; }
+}
+
+/* Time is up but a rating poll is still open: informational, not an alarm. */
+.timer-value.timer-time-up {
+    color: var(--warning-text);
+}
+.timer-box.timer-time-up,
+.student-timer.timer-time-up {
+    border-color: var(--warning-border);
+    background: var(--warning-soft);
+}
+.timer-box.timer-time-up::after,
+.student-timer.timer-time-up::after {
+    content: "Time's up — rating open";
+    flex-basis: 100%;
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: var(--warning-text);
 }
 
 /* ===== Rating window: final-seconds urgency (student) ===== */

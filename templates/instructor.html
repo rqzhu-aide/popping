@@ -182,20 +182,7 @@
 
     <section class="card">
         <h2>Discussion Questions</h2>
-        <div class="discussion-post-status{% if state.current_discussion_key %} has-posted-question{% endif %}"
-             id="discussion-post-status" aria-live="polite">
-            <span class="discussion-status-dot" aria-hidden="true"></span>
-            <span id="posted-discussion-question">
-                {% if state.current_discussion_key %}
-                Currently posted: {{ state.current_discussion_title or state.current_question }}
-                {% else %}
-                No question is currently posted to the class.
-                {% endif %}
-            </span>
-            <button class="btn btn-sm btn-secondary" id="btn-unpost-question"
-                    onclick="unpostDiscussionQuestion()"
-                    {% if not state.current_discussion_key %}hidden{% endif %}>Unpost</button>
-        </div>
+        <p class="hint">All questions below are visible to students. Hide a question to remove it from student screens.</p>
         <p class="participation-count" id="thumb-participation" aria-live="polite">Loading participation...</p>
         <div class="disc-questions-list" id="disc-questions-list">
             <p class="loading">Loading questions...</p>
@@ -208,6 +195,7 @@
             <input type="text" id="appendix-title" placeholder="Question title" style="width:100%">
             <textarea id="appendix-content" placeholder="Question content (supports Markdown)..." rows="4" style="width:100%"></textarea>
             <button class="btn btn-primary appendix-add-btn" onclick="addAppendixQuestion(this)">Add to Appendix</button>
+            <button class="btn btn-secondary appendix-cancel-edit-btn" style="display:none" onclick="cancelAppendixEdit()">Cancel Edit</button>
         </div>
     </section>
 
@@ -222,7 +210,11 @@
         </p>
         {% endif %}
         <div class="competition-control">
-            {% if state.active_team_id and state.active_question_id %}
+            {# Both presentation blocks render server-side and the poll loop
+               toggles which one is visible, so start/next/cancel can switch
+               in place without a page reload. #}
+            {% set presentation_active = state.active_team_id and state.active_question_id %}
+            <div id="presentation-active"{% if not presentation_active %} style="display:none"{% endif %}>
             {# --- Active presentation with unified timer --- #}
             <div class="timer-box" id="timer-box">
                 <div class="timer-display" id="instructor-timer">
@@ -275,7 +267,8 @@
                 <span class="poll-badge">⭐ Poll active</span>
                 <button class="btn btn-sm btn-secondary" onclick="stopPoll()">Stop Poll</button>
             </div>
-            {% else %}
+            </div>
+            <div id="presentation-idle"{% if presentation_active %} style="display:none"{% endif %}>
             {# --- No active presentation --- #}
             <div class="form-row">
                 <div class="form-group">
@@ -309,7 +302,7 @@
             <div class="comp-actions">
                 <button class="btn btn-primary btn-full" id="btn-start" onclick="startPresentation()">▶ Start Presentation</button>
             </div>
-            {% endif %}
+            </div>
 
             {# History panel — always visible in competition phase #}
             <div class="history-panel" id="history-panel" style="margin-top:20px;">
@@ -330,6 +323,7 @@
             <input type="text" id="appendix-title" placeholder="Question title" style="width:100%">
             <textarea id="appendix-content" placeholder="Question content (supports Markdown)..." rows="4" style="width:100%"></textarea>
             <button class="btn btn-primary appendix-add-btn" onclick="addAppendixQuestion(this)">Add to Appendix</button>
+            <button class="btn btn-secondary appendix-cancel-edit-btn" style="display:none" onclick="cancelAppendixEdit()">Cancel Edit</button>
         </div>
     </section>
 

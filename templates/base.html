@@ -18,6 +18,7 @@
             }
         })();
     </script>
+    {% block mathjax %}
     <script>
         MathJax = {
             tex: { inlineMath: [['$', '$'], ['\\(', '\\)']], displayMath: [['$$', '$$'], ['\\[', '\\]']] },
@@ -25,7 +26,8 @@
             chtml: { displayAlign: 'left' }
         };
     </script>
-    <script id="MathJax-script" async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+    <script id="MathJax-script" async src="https://cdn.jsdelivr.net/npm/mathjax@3.2.2/es5/tex-mml-chtml.js" integrity="sha384-Wuix6BuhrWbjDBs24bXrjf4ZQ5aFeFWBuKkFekO2t8xFU0iNaLQfp2K6/1Nxveei" crossorigin="anonymous"></script>
+    {% endblock %}
 </head>
 <body>
     <nav class="navbar">
@@ -42,18 +44,27 @@
             </button>
             {% if session.student_id %}
                 <a href="{{ url_for('dashboard') }}" class="nav-link">Dashboard</a>
-                <a href="{{ url_for('logout') }}" class="nav-link logout">Logout <span class="nav-user-name">({{ session.name }})</span></a>
+                <form method="post" action="{{ url_for('logout') }}" class="nav-logout-form">
+                    <button type="submit" class="nav-link nav-link-btn logout">Logout <span class="nav-user-name">({{ session.name }})</span></button>
+                </form>
             {% elif session.instructor_id and session.slug %}
                 <div class="nav-dropdown" id="tools-dropdown">
                     <button class="nav-link nav-dropdown-btn" onclick="toggleToolsDropdown()">Tools ▾</button>
                     <div class="nav-dropdown-menu" id="tools-menu">
-                        <a href="{{ url_for('export_data', slug=session.slug) }}" class="nav-dropdown-item">⬇ Download Course Results</a>
+                        <a href="{{ url_for('export_data', slug=session.slug) }}" class="nav-dropdown-item">⬇ Download Week Results</a>
+                        <a href="{{ url_for('export_data', slug=session.slug, weeks='all') }}" class="nav-dropdown-item">⬇ Download All Results</a>
+                        {% if state is defined and state and state.phase != 'setup' %}
+                        <span class="nav-dropdown-item disabled" title="The roster can only be replaced during setup">📋 Upload Student Roster (setup only)</span>
+                        {% else %}
                         <a href="#" class="nav-dropdown-item" onclick="uploadRoster(event)">📋 Upload Student Roster</a>
+                        {% endif %}
                         <a href="/roster_template.csv" class="nav-dropdown-item">📄 Download Roster Template</a>
                         <input type="file" id="roster-file-input" accept=".csv" style="display:none" onchange="handleRosterFile(event)">
                     </div>
                 </div>
-                <a href="{{ url_for('logout') }}" class="nav-link logout">Logout <span class="nav-user-name">({{ session.instructor_name }})</span></a>
+                <form method="post" action="{{ url_for('logout') }}" class="nav-logout-form">
+                    <button type="submit" class="nav-link nav-link-btn logout">Logout <span class="nav-user-name">({{ session.instructor_name }})</span></button>
+                </form>
             {% endif %}
         </div>
     </nav>
@@ -68,7 +79,9 @@
             <button type="submit" class="demo-banner-reset"
                     data-course-slug="{{ session.slug or '' }}">🔄 Reset</button>
         </form>
-        <a href="{{ url_for('demo_exit') }}" class="demo-banner-exit">Exit Demo →</a>
+        <form method="post" action="{{ url_for('demo_exit') }}" class="demo-banner-exit-form">
+            <button type="submit" class="demo-banner-exit">Exit Demo →</button>
+        </form>
     </div>
     {% endif %}
 
@@ -101,7 +114,7 @@
     </main>
 
     <footer class="site-footer">
-        <a href="https://github.com/rqzhu-aide/popping" target="_blank">Source Code</a>
+        <a href="https://github.com/rqzhu-aide/popping" target="_blank" rel="noopener">Source Code</a>
         <span>by Ruoqing Zhu</span>
         <span>·</span>
         <span>AGPLv3</span>

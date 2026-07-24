@@ -172,6 +172,126 @@ def _looks_like_frontmatter(text):
     return bool(re.match(r"^(title|id|author)\s*:", first_line, re.IGNORECASE))
 
 
+def _looks_like_title_frontmatter(text):
+    first_line = text.split("\n", 1)[0] if text else ""
+    return bool(re.match(r"^\s*title\s*:", first_line))
+
+
+def _pair_question_headers(lines, delimiters, require_title, on_invalid=None):
+    """Pair ``---`` delimiters into (opening, closing, frontmatter) headers.
+
+    With ``require_title`` only blocks whose YAML mapping carries a non-empty
+    title count as headers; otherwise any mapping does.  ``on_invalid`` is
+    called with (opening, frontmatter, exception) for blocks whose YAML does
+    not parse, and the opening delimiter is marked malformed when it returns
+    a true value.
+    """
+    headers = []
+    malformed = set()
+    position = 0
+    while position + 1 < len(delimiters):
+        opening = delimiters[position]
+        closing = delimiters[position + 1]
+        frontmatter = "\n".join(lines[opening + 1:closing]).strip()
+        try:
+            metadata = yaml.safe_load(frontmatter) if frontmatter else None
+        except yaml.YAMLError as exc:
+            if on_invalid is not None and on_invalid(opening, frontmatter, exc):
+                malformed.add(opening)
+            position += 1
+            continue
+
+        if isinstance(metadata, dict) and (
+                not require_title
+                or str(metadata.get("title") or "").strip()):
+            headers.append((opening, closing, frontmatter))
+            position += 2
+        else:
+            position += 1
+    return headers, malformed
+
+
+def _stray_frontmatter_delimiters(
+        lines, delimiters, headers, looks_stray, malformed=()):
+    """Unused delimiters whose following content looks like frontmatter.
+
+    Returns (delimiter, unclosed) pairs, where ``unclosed`` marks a delimiter
+    with no later delimiter to close it.
+    """
+    used = {
+        delimiter
+        for opening, closing, _frontmatter in headers
+        for delimiter in (opening, closing)
+    }
+    strays = []
+    for index, delimiter in enumerate(delimiters):
+        if delimiter in used or delimiter in malformed:
+            continue
+        next_delimiter = delimiters[index + 1] \
+            if index + 1 < len(delimiters) else len(lines)
+        candidate = "\n".join(lines[delimiter + 1:next_delimiter]).strip()
+        if looks_stray(candidate):
+            strays.append((delimiter, next_delimiter == len(lines)))
+    return strays
+
+
+def _question_blocks(lines, headers):
+    """Split paired headers into (opening, closing, frontmatter, body)."""
+    blocks = []
+    for index, (opening, closing, frontmatter) in enumerate(headers):
+        body_end = headers[index + 1][0] if index + 1 < len(headers) else len(lines)
+        body = "\n".join(lines[closing + 1:body_end]).strip()
+        blocks.append((opening, closing, frontmatter, body))
+    return blocks
+
+
+class QuestionParseError(ValueError):
+    pass
+
+
+def parse_question_blocks(text):
+    """Parse repeated YAML-frontmatter blocks without splitting body Markdown.
+
+    Strict variant used by the web app: raises QuestionParseError on the
+    first structural problem and returns (frontmatter, body) pairs.
+    """
+    normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+    if not normalized.strip():
+        return []
+    lines = normalized.split("\n")
+    delimiters, unclosed_fence_line = _frontmatter_delimiters(lines)
+
+    if unclosed_fence_line is not None:
+        raise QuestionParseError(
+            f"Unclosed fenced code block near line {unclosed_fence_line + 1}"
+        )
+
+    headers, _malformed = _pair_question_headers(
+        lines, delimiters, require_title=True
+    )
+    if not headers:
+        raise QuestionParseError("No valid question frontmatter found")
+
+    for delimiter, unclosed in _stray_frontmatter_delimiters(
+            lines, delimiters, headers, _looks_like_title_frontmatter):
+        if unclosed:
+            raise QuestionParseError(
+                f"Unclosed question frontmatter near line {delimiter + 1}"
+            )
+        raise QuestionParseError(
+            f"Invalid question frontmatter near line {delimiter + 1}"
+        )
+
+    if any(line.strip() for line in lines[:headers[0][0]]):
+        raise QuestionParseError("Unexpected content before the first question")
+
+    return [
+        (frontmatter, body)
+        for _opening, _closing, frontmatter, body
+        in _question_blocks(lines, headers)
+    ]
+
+
 def _parse_discussion_blocks(text, path):
     """Return recognized question blocks plus structural issues."""
     normalized = text.replace("\r\n", "\n").replace("\r", "\n")
@@ -187,33 +307,22 @@ def _parse_discussion_blocks(text, path):
             unclosed_fence_line + 1,
         ))
 
-    headers = []
-    malformed_lines = set()
-    position = 0
-    while position + 1 < len(delimiters):
-        opening = delimiters[position]
-        closing = delimiters[position + 1]
-        frontmatter = "\n".join(lines[opening + 1:closing]).strip()
-        try:
-            metadata = yaml.safe_load(frontmatter) if frontmatter else None
-        except yaml.YAMLError as exc:
-            if _looks_like_frontmatter(frontmatter):
-                malformed_lines.add(opening)
-                issues.append(_issue(
-                    "discussion_frontmatter_invalid",
-                    "Question frontmatter is invalid YAML: "
-                    f"{getattr(exc, 'problem', None) or 'parse error'}",
-                    path,
-                    opening + 1,
-                ))
-            position += 1
-            continue
+    def _on_invalid_frontmatter(opening, frontmatter, exc):
+        if not _looks_like_frontmatter(frontmatter):
+            return False
+        issues.append(_issue(
+            "discussion_frontmatter_invalid",
+            "Question frontmatter is invalid YAML: "
+            f"{getattr(exc, 'problem', None) or 'parse error'}",
+            path,
+            opening + 1,
+        ))
+        return True
 
-        if isinstance(metadata, dict):
-            headers.append((opening, closing, metadata))
-            position += 2
-        else:
-            position += 1
+    headers, malformed = _pair_question_headers(
+        lines, delimiters, require_title=False,
+        on_invalid=_on_invalid_frontmatter,
+    )
 
     if not headers:
         issues.append(_issue(
@@ -232,33 +341,24 @@ def _parse_discussion_blocks(text, path):
             1,
         ))
 
-    used_delimiters = {
-        delimiter
-        for opening, closing, _metadata in headers
-        for delimiter in (opening, closing)
-    }
-    for index, delimiter in enumerate(delimiters):
-        if delimiter in used_delimiters or delimiter in malformed_lines:
-            continue
-        next_delimiter = delimiters[index + 1] \
-            if index + 1 < len(delimiters) else len(lines)
-        candidate = "\n".join(lines[delimiter + 1:next_delimiter]).strip()
-        if _looks_like_frontmatter(candidate):
-            code = "discussion_frontmatter_unclosed" \
-                if next_delimiter == len(lines) \
-                else "discussion_frontmatter_invalid"
-            issues.append(_issue(
-                code,
-                "Question frontmatter is not a complete YAML block",
-                path,
-                delimiter + 1,
-            ))
+    for delimiter, unclosed in _stray_frontmatter_delimiters(
+            lines, delimiters, headers, _looks_like_frontmatter,
+            malformed=malformed):
+        code = "discussion_frontmatter_unclosed" \
+            if unclosed \
+            else "discussion_frontmatter_invalid"
+        issues.append(_issue(
+            code,
+            "Question frontmatter is not a complete YAML block",
+            path,
+            delimiter + 1,
+        ))
 
-    blocks = []
-    for index, (opening, closing, metadata) in enumerate(headers):
-        body_end = headers[index + 1][0] if index + 1 < len(headers) else len(lines)
-        body = "\n".join(lines[closing + 1:body_end]).strip()
-        blocks.append((opening + 1, metadata, body))
+    blocks = [
+        (opening + 1, yaml.safe_load(frontmatter), body)
+        for opening, _closing, frontmatter, body
+        in _question_blocks(lines, headers)
+    ]
     return blocks, issues
 
 
@@ -341,6 +441,30 @@ def validate_discussion_week(course_dir, week_num):
         path=str(path),
         issues=tuple(issues),
     )
+
+
+def parse_presentation_index(text):
+    """Parse 'N. Question title' entries from a presentation index.md."""
+    questions = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        match = PRESENTATION_ENTRY_PATTERN.fullmatch(line)
+        if match:
+            questions.append({
+                "num": int(match.group(1)),
+                "title": match.group(2).strip(),
+            })
+    return questions
+
+
+def read_presentation_index(index_path):
+    """Read a presentation index.md, or None when it does not exist."""
+    path = Path(index_path)
+    if not path.exists():
+        return None
+    return parse_presentation_index(path.read_text(encoding="utf-8-sig"))
 
 
 def validate_presentation_week(course_dir, week_num):

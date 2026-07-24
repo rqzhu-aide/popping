@@ -843,22 +843,36 @@ def test_reset_holds_write_lock_while_creating_backup(course_env, monkeypatch):
     assert lock_observed == [True]
 
 
-def test_unassigned_student_sees_posted_discussion_prompt(course_env):
-    _set_state(
-        course_env,
-        phase="discussion",
-        current_discussion_key="discussion-visible",
-        current_discussion_title="Visible to Everyone",
-        current_discussion_content="Discuss this exact classroom prompt.",
+def test_reset_restores_hidden_discussion_questions(course_env):
+    with _connect(course_env) as db:
+        db.execute(
+            """INSERT INTO hidden_discussion_questions
+               (course_id, week_num, question_key)
+               VALUES (?, 1, 'discussion-1')""",
+            (course_env["course_id"],),
+        )
+        db.commit()
+    _set_state(course_env, phase="ended")
+
+    response = _instructor_client(course_env).post(
+        "/api/reset_data", json=_reset_payload(course_env, "ended")
     )
+
+    assert response.status_code == 200
+    with _connect(course_env) as db:
+        assert db.execute(
+            "SELECT COUNT(*) FROM hidden_discussion_questions"
+        ).fetchone()[0] == 0
+
+
+def test_unassigned_student_sees_discussion_questions_container(course_env):
+    _set_state(course_env, phase="discussion")
 
     response = _student_client(course_env, "s3").get("/dashboard")
 
     assert response.status_code == 200
     html = response.get_data(as_text=True)
-    assert 'id="current-question"' in html
-    assert "Visible to Everyone" in html
-    assert "Discuss this exact classroom prompt." in html
+    assert 'id="student-disc-questions-list"' in html
 
 
 def test_student_thumb_is_session_scoped_and_phase_gated(course_env):
@@ -874,6 +888,9 @@ def test_student_thumb_is_session_scoped_and_phase_gated(course_env):
     assert _history_counts(course_env)["thumbs"] == 0
 
     _set_state(course_env, phase="discussion")
+    # No question is ever posted in the new model: all week questions are
+    # visible at once and thumbs are phase-scoped.
+    assert _state_row(course_env)["current_discussion_key"] is None
     saved = client.post(
         "/api/grade_peer", json={"recipient_id": "s2", "selected": True}
     )
@@ -929,74 +946,6 @@ def test_student_rating_records_selected_week(course_env):
     assert saved_week == 2
 
 
-def test_set_question_rejects_stale_post_and_unpost(course_env):
-    _set_state(course_env, phase="discussion")
-    client = _instructor_client(course_env)
-
-    stale_post = client.post(
-        "/api/set_question",
-        json={
-            "key": "discussion-new",
-            "title": "New question",
-            "content": "Discuss this.",
-            "expected_phase": "setup",
-            "expected_session_key": SESSION_KEY,
-            "expected_discussion_key": "",
-        },
-    )
-    assert stale_post.status_code == 409
-    assert _state_row(course_env)["current_discussion_key"] is None
-
-    posted = client.post(
-        "/api/set_question",
-        json={
-            "key": "discussion-new",
-            "title": "New question",
-            "content": "Discuss this.",
-            "expected_phase": "discussion",
-            "expected_session_key": SESSION_KEY,
-            "expected_discussion_key": "",
-        },
-    )
-    assert posted.status_code == 200
-    posted_question = posted.get_json()["discussion_question"]
-    assert posted_question["source_key"] == "discussion-new"
-    assert posted_question["key"].startswith("disc-")
-    posted_instance_key = posted_question["key"]
-
-    stale_unpost = client.post(
-        "/api/set_question",
-        json={
-            "key": "",
-            "title": "",
-            "content": "",
-            "expected_phase": "discussion",
-            "expected_session_key": SESSION_KEY - 1,
-            "expected_discussion_key": posted_instance_key,
-        },
-    )
-    assert stale_unpost.status_code == 409
-    state = _state_row(course_env)
-    assert state["current_discussion_key"] == posted_instance_key
-    assert state["current_discussion_source_key"] == "discussion-new"
-
-    unposted = client.post(
-        "/api/set_question",
-        json={
-            "key": "",
-            "title": "",
-            "content": "",
-            "expected_phase": "discussion",
-            "expected_session_key": SESSION_KEY,
-            "expected_discussion_key": posted_instance_key,
-        },
-    )
-    assert unposted.status_code == 200
-    state = _state_row(course_env)
-    assert state["current_discussion_key"] is None
-    assert state["current_discussion_source_key"] is None
-
-
 def test_discussion_question_visibility_and_version(course_env):
     """Hiding a question removes it from the student list and bumps the
     version students use to refetch; showing it restores it."""
@@ -1045,50 +994,52 @@ def test_discussion_question_visibility_and_version(course_env):
     )
 
 
-def test_delayed_discussion_post_cannot_overwrite_newer_post(course_env):
+def test_student_discussion_list_excludes_hidden_and_includes_appendix(course_env):
+    """5 bank questions + new appendix A1 with Q2 hidden gives students
+    exactly Q1, Q3, Q4, Q5, A1 — the full-week visibility model."""
+    class_dir = Path(config.CLASSES_DIR) / course_env["slug"]
+    blocks = [
+        f"---\ntitle: Q{num}\nid: q{num}\n---\n\nBank body {num}.\n"
+        for num in range(1, 6)
+    ]
+    (class_dir / "week-1-questions.md").write_text(
+        "\n".join(blocks), encoding="utf-8"
+    )
     _set_state(course_env, phase="discussion")
-    client = _instructor_client(course_env)
-    first = client.post(
-        "/api/set_question",
-        json={
-            "key": "first",
-            "title": "First",
-            "content": "First content",
-            "expected_phase": "discussion",
-            "expected_session_key": SESSION_KEY,
-            "expected_discussion_key": "",
-        },
-    )
-    first_key = first.get_json()["discussion_question"]["key"]
-    newer = client.post(
-        "/api/set_question",
-        json={
-            "key": "newer",
-            "title": "Newer",
-            "content": "Newer content",
-            "expected_phase": "discussion",
-            "expected_session_key": SESSION_KEY,
-            "expected_discussion_key": first_key,
-        },
-    )
-    newer_key = newer.get_json()["discussion_question"]["key"]
+    instructor = _instructor_client(course_env)
+    student = _student_client(course_env, "s1")
 
-    delayed = client.post(
-        "/api/set_question",
+    added = instructor.post(
+        "/api/questions",
         json={
-            "key": "delayed",
-            "title": "Delayed",
-            "content": "Delayed content",
+            "title": "Extra", "content": "Appendix body.", "week": 1,
             "expected_phase": "discussion",
             "expected_session_key": SESSION_KEY,
-            "expected_discussion_key": first_key,
         },
     )
+    assert added.status_code == 200
+    assert added.get_json()["appendix_id"] == "A1"
 
-    assert delayed.status_code == 409
-    state = _state_row(course_env)
-    assert state["current_discussion_key"] == newer_key
-    assert state["current_discussion_source_key"] == "newer"
+    instructor_list = instructor.get("/api/discussion_questions").get_json()
+    assert [q["title"] for q in instructor_list["questions"]] == [
+        "Q1", "Q2", "Q3", "Q4", "Q5", "A1: Extra",
+    ]
+    q2_key = instructor_list["questions"][1]["key"]
+    hide = instructor.post(
+        "/api/toggle_discussion_question",
+        json={
+            "question_key": q2_key, "visible": False,
+            "expected_phase": "discussion",
+            "expected_session_key": SESSION_KEY,
+        },
+    )
+    assert hide.status_code == 200
+
+    student_list = student.get("/api/discussion_questions").get_json()
+    assert [q["title"] for q in student_list["questions"]] == [
+        "Q1", "Q3", "Q4", "Q5", "A1: Extra",
+    ]
+    assert all(not q["hidden"] for q in student_list["questions"])
 
 
 def _seed_tied_team_ratings(env):
@@ -1544,6 +1495,157 @@ def test_export_workbook_activity_is_scoped_to_selected_week(course_env):
     assert teams["Team 2"]["combined_avg"] == 4.5
 
 
+def test_export_all_weeks_includes_prior_week_activity(course_env):
+    from openpyxl import load_workbook
+
+    _write_catalog_week(course_env, 1)
+    _write_catalog_week(course_env, 2)
+    with _connect(course_env) as db:
+        week_2_question_id = db.execute(
+            """INSERT INTO questions
+               (course_id, question_num, question_text, title, week_num,
+                source_key)
+               VALUES (?, 1, 'Week 2 question', 'Week 2 question', 2,
+                       'presentation:2:1')""",
+            (course_env["course_id"],),
+        ).lastrowid
+        for week, question_key in (
+            (1, "week-1-thumb"),
+            (2, "week-2-thumb-a"),
+            (2, "week-2-thumb-b"),
+        ):
+            db.execute(
+                """INSERT INTO teammate_thumbs
+                   (course_id, session_key, week_num, question_key,
+                    source_question_key, question_title, grader_id,
+                    recipient_id)
+                   VALUES (?, ?, ?, ?, ?, 'Question', ?, ?)""",
+                (
+                    course_env["course_id"], SESSION_KEY, week, question_key,
+                    question_key, course_env["students"]["s1"],
+                    course_env["students"]["s2"],
+                ),
+            )
+        for week, question_key, question_id in (
+            (1, "pres-week-1", course_env["question_id"]),
+            (2, "pres-week-2-a", week_2_question_id),
+            (2, "pres-week-2-b", week_2_question_id),
+        ):
+            db.execute(
+                """INSERT INTO presentation_ratings
+                   (course_id, student_id, question_key, session_key, week_num,
+                    presenting_team_id, presenting_team_name, question_id,
+                    question_title, q1_developed, q2_easy)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'Question', ?, ?)""",
+                (
+                    course_env["course_id"], course_env["students"]["s1"],
+                    question_key, SESSION_KEY, week,
+                    course_env["teams"]["Team 2"], "Team 2", question_id,
+                    4, 5,
+                ),
+            )
+        history = [
+            {
+                "presentation_key": "pres-week-1",
+                "week_num": 1,
+                "team": "Team 2",
+                "question_id": course_env["question_id"],
+            },
+            {
+                "presentation_key": "pres-week-2-a",
+                "team": "Team 2",
+                "question_id": week_2_question_id,
+            },
+            {
+                "presentation_key": "pres-week-2-b",
+                "team": "Team 2",
+                "question_id": None,
+            },
+        ]
+        db.execute(
+            """UPDATE course_state
+               SET discussion_week = 2, presentation_history = ?""",
+            (json.dumps(history),),
+        )
+        db.commit()
+
+    response = _instructor_client(course_env).get(
+        f"/export/{course_env['slug']}?weeks=all"
+    )
+    assert response.status_code == 200
+    assert (
+        "filename=popping_SAFE101_all_weeks_export.zip"
+        in response.headers["Content-Disposition"]
+    )
+    with zipfile.ZipFile(io.BytesIO(response.data)) as archive:
+        names = set(archive.namelist())
+        workbook = load_workbook(
+            io.BytesIO(archive.read("course_data.xlsx")), read_only=True
+        )
+
+    assert {
+        "questions/week-1-questions.md",
+        "questions/week1/index.md",
+        "questions/week-2-questions.md",
+        "questions/week2/index.md",
+    }.issubset(names)
+
+    summary = {
+        row[0]: row[1]
+        for row in workbook["Summary"].iter_rows(values_only=True)
+        if row[0]
+    }
+    assert summary["Lecture Week"] == 2
+    assert summary["Export Scope"] == "All weeks"
+    assert summary["All-Week Peer Reviews (thumbs)"] == 3
+    assert summary["All-Week Presentation Ratings"] == 3
+
+    def sheet_rows(name):
+        values = list(workbook[name].iter_rows(values_only=True))
+        return [dict(zip(values[0], row)) for row in values[1:]]
+
+    peer_rows = sheet_rows("Peer Reviews")
+    assert {row["week"] for row in peer_rows} == {1, 2}
+    assert {row["discussion_post_key"] for row in peer_rows} == {
+        "week-1-thumb", "week-2-thumb-a", "week-2-thumb-b",
+    }
+
+    presentation_rows = sheet_rows("Presentation Ratings")
+    assert {row["week"] for row in presentation_rows} == {1, 2}
+    assert {row["presentation_key"] for row in presentation_rows} == {
+        "pres-week-1", "pres-week-2-a", "pres-week-2-b",
+    }
+
+
+def test_export_unknown_weeks_param_keeps_current_week_scope(course_env):
+    response = _instructor_client(course_env).get(
+        f"/export/{course_env['slug']}?weeks=bogus"
+    )
+
+    assert response.status_code == 200
+    assert (
+        "filename=popping_SAFE101_week_1_export.zip"
+        in response.headers["Content-Disposition"]
+    )
+
+
+def test_tools_menu_marks_roster_upload_setup_only_outside_setup(course_env):
+    client = _instructor_client(course_env)
+    page = client.get(
+        f"/instructor/{course_env['slug']}"
+    ).get_data(as_text=True)
+    assert "Upload Student Roster (setup only)" not in page
+    assert 'onclick="uploadRoster(event)"' in page
+    assert f"/export/{course_env['slug']}?weeks=all" in page
+
+    _set_state(course_env, phase="competition")
+    page = client.get(
+        f"/instructor/{course_env['slug']}"
+    ).get_data(as_text=True)
+    assert "Upload Student Roster (setup only)" in page
+    assert 'onclick="uploadRoster(event)"' not in page
+
+
 def test_export_reports_question_asset_failure(course_env, monkeypatch):
     class_dir = Path(config.CLASSES_DIR) / course_env["slug"]
     (class_dir / "week-1-questions.md").write_text(
@@ -1561,7 +1663,8 @@ def test_export_reports_question_asset_failure(course_env, monkeypatch):
     assert f"/instructor/{course_env['slug']}" in response.headers["Location"]
     with client.session_transaction() as browser_session:
         messages = [message for _level, message in browser_session["_flashes"]]
-    assert any("asset read failed" in message for message in messages)
+    assert any("Export failed" in message for message in messages)
+    assert not any("asset read failed" in message for message in messages)
 
 
 def test_export_limits_normal_team_views_but_keeps_historical_ratings(course_env):
@@ -1880,13 +1983,16 @@ def test_login_throttle_blocks_after_eight_failures_then_expires(course_env):
         response = client.post(
             route, data={"student_id": "s1", "pin": "0000"}
         )
-        assert response.status_code == 200
+        assert response.status_code == 302
 
     blocked = client.post(
         route, data={"student_id": "s1", "pin": "1111"}
     )
     assert blocked.status_code == 429
     assert int(blocked.headers["Retry-After"]) > 0
+    assert b"Too many failed login attempts" in blocked.data
+    assert b"try again in" in blocked.data
+    assert b"minute" in blocked.data
 
     with _connect(course_env) as db:
         db.execute(
@@ -1899,6 +2005,56 @@ def test_login_throttle_blocks_after_eight_failures_then_expires(course_env):
         route, data={"student_id": "s1", "pin": "1111"}
     )
     assert success.status_code == 302
+
+
+def test_student_login_matches_id_case_insensitively(course_env):
+    client = app_module.app.test_client()
+
+    response = client.post(
+        f"/login/{course_env['slug']}",
+        data={"student_id": "S1", "pin": "1111"},
+    )
+
+    assert response.status_code == 302
+    assert response.headers["Location"].endswith("/dashboard")
+    with client.session_transaction() as flask_session:
+        # The stored ID is kept verbatim, only the lookup ignores case.
+        assert flask_session["student_id"] == "s1"
+    assert client.get("/dashboard").status_code == 200
+
+
+def test_failed_student_login_redirects_back_with_flash(course_env):
+    client = app_module.app.test_client()
+    route = f"/login/{course_env['slug']}"
+
+    response = client.post(route, data={"student_id": "s1", "pin": "0000"})
+
+    assert response.status_code == 302
+    assert response.headers["Location"].endswith(route)
+    page = client.get(route)
+    assert b"Invalid login for this course." in page.data
+
+    missing = client.post(route, data={"student_id": "s1", "pin": ""})
+    assert missing.status_code == 302
+    assert missing.headers["Location"].endswith(route)
+
+
+def test_failed_instructor_login_redirects_back_with_flash(course_env):
+    client = app_module.app.test_client()
+    route = f"/instructor_login/{course_env['slug']}"
+
+    response = client.post(
+        route, data={"username": "instructor", "pin": "0000"}
+    )
+
+    assert response.status_code == 302
+    assert response.headers["Location"].endswith(route)
+    page = client.get(route)
+    assert b"Invalid login for this course." in page.data
+
+    missing = client.post(route, data={"username": "", "pin": "0000"})
+    assert missing.status_code == 302
+    assert missing.headers["Location"].endswith(route)
 
 
 def test_question_revision_refreshes_same_question_id(course_env):
@@ -2138,21 +2294,16 @@ def test_appendix_delete_uses_stable_id_and_unposts_current_question(course_env)
     assert set(by_id) == {"A1", "A2"}
 
     current = by_id["A2"]
-    posted = client.post(
-        "/api/set_question",
-        json={
-            "key": current["key"],
-            "title": current["title"],
-            "content": current["content"],
-            "expected_phase": "discussion",
-            "expected_session_key": SESSION_KEY,
-            "expected_discussion_key": "",
-        },
+    # Simulate the legacy single-question post directly in the DB; the delete
+    # route still clears those columns when the deleted question was posted.
+    posted_instance_key = "disc-legacy-post"
+    _set_state(
+        course_env,
+        current_discussion_key=posted_instance_key,
+        current_discussion_source_key=current["key"],
+        current_discussion_title=current["title"],
+        current_discussion_content=current["content"],
     )
-    assert posted.status_code == 200
-    posted_question = posted.get_json()["discussion_question"]
-    posted_instance_key = posted_question["key"]
-    assert posted_question["source_key"] == current["key"]
     with _connect(course_env) as db:
         db.execute(
             """INSERT INTO teammate_thumbs
@@ -2216,6 +2367,227 @@ def test_appendix_delete_uses_stable_id_and_unposts_current_question(course_env)
         ).fetchone()[0] == 1
 
 
+def test_appendix_edit_updates_body_and_preserves_label(course_env):
+    client = _instructor_client(course_env)
+    first_add = client.post(
+        "/api/questions",
+        json={
+            "title": "First",
+            "content": "First appendix body.",
+            "week": 1,
+            "expected_phase": "setup",
+            "expected_session_key": SESSION_KEY,
+        },
+    )
+    second_add = client.post(
+        "/api/questions",
+        json={
+            "title": "Second",
+            "content": "Second appendix body.",
+            "week": 1,
+            "expected_phase": "setup",
+            "expected_session_key": SESSION_KEY,
+        },
+    )
+    assert first_add.get_json()["appendix_id"] == "A1"
+    assert second_add.get_json()["appendix_id"] == "A2"
+
+    edited = client.post(
+        "/api/edit_appendix_question",
+        json={
+            "appendix_id": "a1",
+            "title": "First (revised)",
+            "content": "Revised appendix body.",
+            "week": 1,
+            "expected_phase": "setup",
+            "expected_session_key": SESSION_KEY,
+        },
+    )
+    assert edited.status_code == 200
+    payload = edited.get_json()
+    assert payload["success"] is True
+    assert payload["appendix_id"] == "A1"
+
+    questions = client.get("/api/discussion_questions").get_json()["questions"]
+    by_id = {question.get("appendix_id"): question for question in questions}
+    assert set(by_id) == {"A1", "A2"}
+    assert by_id["A1"]["title"] == "A1: First (revised)"
+    assert by_id["A1"]["content"] == "Revised appendix body."
+    assert by_id["A2"]["title"] == "A2: Second"
+
+    # The next add continues the label sequence after the preserved labels.
+    third_add = client.post(
+        "/api/questions",
+        json={
+            "title": "Third",
+            "content": "Third appendix body.",
+            "week": 1,
+            "expected_phase": "setup",
+            "expected_session_key": SESSION_KEY,
+        },
+    )
+    assert third_add.get_json()["appendix_id"] == "A3"
+
+    appendix_path = (
+        Path(config.DATA_DIR) / course_env["slug"] / "appendix"
+        / "week-1-appendix.md"
+    )
+    source = appendix_path.read_text(encoding="utf-8")
+    assert "A1: First (revised)" in source
+    assert "Revised appendix body." in source
+
+
+def test_appendix_edit_validation_and_missing_question(course_env):
+    client = _instructor_client(course_env)
+    added = client.post(
+        "/api/questions",
+        json={
+            "title": "Original",
+            "content": "Original body.",
+            "week": 1,
+            "expected_phase": "setup",
+            "expected_session_key": SESSION_KEY,
+        },
+    )
+    assert added.status_code == 200
+    base = {
+        "week": 1,
+        "expected_phase": "setup",
+        "expected_session_key": SESSION_KEY,
+    }
+
+    missing_fields = client.post(
+        "/api/edit_appendix_question",
+        json={**base, "appendix_id": "A1", "title": "", "content": "Body."},
+    )
+    assert missing_fields.status_code == 400
+    assert missing_fields.get_json()["error"] == "Title and content required"
+
+    too_long = client.post(
+        "/api/edit_appendix_question",
+        json={
+            **base,
+            "appendix_id": "A1",
+            "title": "Original",
+            "content": "x" * 50001,
+        },
+    )
+    assert too_long.status_code == 400
+    assert too_long.get_json()["error"] == "Title or content is too long"
+
+    # Bank questions have no A-number label, so their keys never match.
+    bank_key = client.post(
+        "/api/edit_appendix_question",
+        json={
+            **base,
+            "appendix_id": "week-1-question-1",
+            "title": "Original",
+            "content": "Body.",
+        },
+    )
+    assert bank_key.status_code == 400
+    assert bank_key.get_json()["error"] == "Appendix question ID required"
+
+    unknown = client.post(
+        "/api/edit_appendix_question",
+        json={**base, "appendix_id": "A9", "title": "Original", "content": "Body."},
+    )
+    assert unknown.status_code == 404
+    assert unknown.get_json()["error"] == "Appendix question not found"
+
+    # The rejected edits left the stored question untouched.
+    questions = client.get("/api/discussion_questions").get_json()["questions"]
+    assert [question["title"] for question in questions] == ["A1: Original"]
+    assert questions[0]["content"] == "Original body."
+
+
+def test_appendix_edit_rejected_during_presentations(course_env):
+    client = _instructor_client(course_env)
+    added = client.post(
+        "/api/questions",
+        json={
+            "title": "Original",
+            "content": "Original body.",
+            "week": 1,
+            "expected_phase": "setup",
+            "expected_session_key": SESSION_KEY,
+        },
+    )
+    assert added.status_code == 200
+    _set_state(course_env, phase="competition")
+
+    edited = client.post(
+        "/api/edit_appendix_question",
+        json={
+            "appendix_id": "A1",
+            "title": "Original",
+            "content": "Changed body.",
+            "week": 1,
+            "expected_phase": "competition",
+            "expected_session_key": SESSION_KEY,
+        },
+    )
+    assert edited.status_code == 409
+    assert "cannot be edited during presentations" in edited.get_json()["error"]
+
+
+def test_start_presentation_reports_clamped_time_cap(course_env):
+    _write_catalog_week(course_env, 1)
+    client = _instructor_client(course_env)
+    selected = client.post(
+        "/api/set_discussion_week",
+        json={
+            "week": 1,
+            "expected_phase": "setup",
+            "expected_session_key": SESSION_KEY,
+        },
+    )
+    assert selected.status_code == 200
+    _set_state(course_env, phase="competition")
+
+    clamped = client.post(
+        "/api/start_presentation",
+        json={
+            "expected_phase": "competition",
+            "expected_session_key": SESSION_KEY,
+            "team_id": course_env["teams"]["Team 1"],
+            "question_id": course_env["question_id"],
+            "time_cap": 9999,
+        },
+    )
+    assert clamped.status_code == 200
+    payload = clamped.get_json()
+    assert payload["time_cap"] == 300
+    assert payload["notice"] == (
+        "Time cap adjusted to 300s (allowed range 10–3600s)"
+    )
+    assert _state_row(course_env)["presentation_time_cap"] == 300
+
+    _set_state(
+        course_env,
+        active_team_id=None,
+        active_question_id=None,
+        presentation_started_at=None,
+        presentation_created_at=None,
+        poll_question_key=None,
+    )
+    in_range = client.post(
+        "/api/start_presentation",
+        json={
+            "expected_phase": "competition",
+            "expected_session_key": SESSION_KEY,
+            "team_id": course_env["teams"]["Team 1"],
+            "question_id": course_env["question_id"],
+            "time_cap": 120,
+        },
+    )
+    assert in_range.status_code == 200
+    payload = in_range.get_json()
+    assert payload["time_cap"] == 120
+    assert "notice" not in payload
+    assert _state_row(course_env)["presentation_time_cap"] == 120
+
+
 def test_eighty_student_poll_burst_stays_compact_and_lock_free(course_env):
     with _connect(course_env) as db:
         for index in range(5, 81):
@@ -2246,10 +2618,7 @@ def test_eighty_student_poll_burst_stays_compact_and_lock_free(course_env):
     ]
 
     def poll(client):
-        response = client.get(
-            "/api/poll",
-            query_string={"known_discussion_key": "traffic-q"},
-        )
+        response = client.get("/api/poll")
         return response.status_code, len(response.data)
 
     with ThreadPoolExecutor(max_workers=40) as pool:
@@ -2268,18 +2637,12 @@ def test_instructor_templates_render_new_controls_in_each_phase(course_env):
     assert f'data-session-key="{SESSION_KEY}"' in setup_html
     assert 'id="btn-session-timer"' in setup_html
 
-    _set_state(
-        course_env,
-        phase="discussion",
-        current_discussion_key="discussion-control",
-        current_discussion_title="Posted question",
-        current_discussion_content="Posted body",
-    )
+    _set_state(course_env, phase="discussion")
     discussion_html = client.get(
         f"/instructor/{course_env['slug']}"
     ).get_data(as_text=True)
-    assert 'id="btn-unpost-question"' in discussion_html
-    assert "Currently posted: Posted question" in discussion_html
+    assert 'id="disc-questions-list"' in discussion_html
+    assert 'id="thumb-participation"' in discussion_html
 
     _activate_presentation(course_env)
     competition_html = client.get(
@@ -2480,3 +2843,152 @@ def test_instructor_sees_outstanding_raters(course_env):
     assert resp.status_code == 200
     state = _instructor_client(course_env).get("/api/poll").get_json()["state"]
     assert state["poll_non_raters"] == []
+
+
+def test_ended_phase_poll_interval_keeps_students_responsive(course_env):
+    """After End Session students poll at ~5s (not 30s) so a newly started
+    session reaches their stale results screen promptly."""
+    _set_state(course_env, phase="ended")
+
+    ended = _student_client(course_env).get("/api/poll").get_json()
+    assert ended["poll_interval"] == 5000
+
+    _set_state(course_env, phase="discussion")
+    active = _student_client(course_env).get("/api/poll").get_json()
+    assert active["poll_interval"] == 1000
+
+
+def test_session_ended_notice_renders_on_landing(course_env):
+    """Unauthenticated redirects to /?session=ended show a non-alarming
+    explanation via the normal flash mechanism."""
+    client = app_module.app.test_client()
+
+    plain = client.get("/")
+    assert plain.status_code == 200
+    assert "session ended" not in plain.get_data(as_text=True).lower()
+
+    noticed = client.get("/?session=ended")
+    assert noticed.status_code == 200
+    html = noticed.get_data(as_text=True)
+    assert "your session ended" in html.lower()
+    assert "flash-success" in html
+
+
+def test_mathjax_loads_only_on_pages_with_question_math(course_env):
+    """MathJax is heavy; login/landing pages render no math and must not load
+    it, while the student dashboard (question math) still does."""
+    client = app_module.app.test_client()
+
+    login_page = client.get(f"/login/{course_env['slug']}")
+    assert login_page.status_code == 200
+    assert "MathJax-script" not in login_page.get_data(as_text=True)
+
+    landing = client.get("/")
+    assert landing.status_code == 200
+    assert "MathJax-script" not in landing.get_data(as_text=True)
+
+    dashboard = _student_client(course_env).get("/dashboard")
+    assert dashboard.status_code == 200
+    assert "MathJax-script" in dashboard.get_data(as_text=True)
+
+
+def test_student_search_escapes_like_wildcards(course_env):
+    """A literal % or _ in the search box must not act as a LIKE wildcard."""
+    with _connect(course_env) as db:
+        db.execute(
+            """INSERT INTO students (course_id, student_id, name, pin)
+               VALUES (?, ?, ?, ?)""",
+            (course_env["course_id"], "50%_off", "Wildcard", "5555"),
+        )
+        db.commit()
+    client = _instructor_client(course_env)
+
+    for term in ("%", "_", "50%_off"):
+        response = client.get("/api/students", query_string={"search": term})
+        assert response.status_code == 200
+        payload = response.get_json()
+        ids = [s["student_id"] for s in payload["students"]]
+        assert ids == ["50%_off"], term
+        assert payload["total"] == 1
+
+
+def test_appendix_add_and_edit_return_question_id_for_select_rebuild(
+        course_env):
+    """The competition question select is keyed by the numeric question id,
+    so the add/edit responses carry it (plus the option title) for the
+    client to rebuild options in place without a page reload."""
+    client = _instructor_client(course_env)
+    added = client.post(
+        "/api/questions",
+        json={
+            "title": "First",
+            "content": "First appendix body.",
+            "week": 1,
+            "expected_phase": "setup",
+            "expected_session_key": SESSION_KEY,
+        },
+    )
+    assert added.status_code == 200
+    payload = added.get_json()
+    with _connect(course_env) as db:
+        row = db.execute(
+            """SELECT id, title FROM questions
+               WHERE course_id = ? AND source_key = 'appendix:1:A1'""",
+            [course_env["course_id"]],
+        ).fetchone()
+    assert payload["question_id"] == row["id"]
+    assert payload["title"] == row["title"] == "A1: First"
+
+    edited = client.post(
+        "/api/edit_appendix_question",
+        json={
+            "appendix_id": "A1",
+            "title": "First (revised)",
+            "content": "Revised appendix body.",
+            "week": 1,
+            "expected_phase": "setup",
+            "expected_session_key": SESSION_KEY,
+        },
+    )
+    assert edited.status_code == 200
+    edit_payload = edited.get_json()
+    # Editing keeps the same questions-table row, so the id is stable.
+    assert edit_payload["question_id"] == payload["question_id"]
+    assert edit_payload["title"] == "A1: First (revised)"
+
+    # The server-rendered competition select uses the same id and title.
+    _set_state(course_env, phase="competition")
+    html = client.get(
+        f"/instructor/{course_env['slug']}"
+    ).get_data(as_text=True)
+    assert (
+        f'<option value="{row["id"]}">'
+        'Appendix — A1: First (revised)</option>'
+    ) in html
+
+
+def test_competition_page_renders_both_presentation_blocks(course_env):
+    """Idle and active competition blocks both render server-side with the
+    inactive one hidden, so the poll loop can swap them in place (and the
+    no-JS initial render still shows the right block)."""
+    client = _instructor_client(course_env)
+    _set_state(course_env, phase="competition")
+    idle_html = client.get(
+        f"/instructor/{course_env['slug']}"
+    ).get_data(as_text=True)
+    assert '<div id="presentation-active" style="display:none">' in idle_html
+    assert '<div id="presentation-idle">' in idle_html
+    assert 'id="comp-team"' in idle_html
+
+    _set_state(
+        course_env,
+        active_team_id=course_env["teams"]["Team 1"],
+        active_question_id=course_env["question_id"],
+        current_question="Question One",
+    )
+    active_html = client.get(
+        f"/instructor/{course_env['slug']}"
+    ).get_data(as_text=True)
+    assert '<div id="presentation-active">' in active_html
+    assert '<div id="presentation-idle" style="display:none">' in active_html
+    assert 'id="timer-box"' in active_html

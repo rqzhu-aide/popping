@@ -309,12 +309,6 @@ def _ensure_schema_locked(db):
                   ON presentation_ratings(course_id, question_key)''')
     db.execute('''CREATE INDEX IF NOT EXISTS idx_ratings_export_week
                   ON presentation_ratings(course_id, week_num)''')
-    db.execute('''INSERT OR IGNORE INTO teammate_thumbs
-                  (course_id, session_key, question_key, source_question_key,
-                   grader_id, recipient_id, created_at, updated_at)
-                  SELECT course_id, 0, 'legacy', 'legacy', grader_id, recipient_id,
-                         created_at, created_at
-                  FROM peer_reviews WHERE score > 0''')
 
     # One-time, data-preserving cleanup for databases created before numbered
     # default team names were introduced.  Custom team names are untouched.

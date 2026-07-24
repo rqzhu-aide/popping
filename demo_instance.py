@@ -13,6 +13,8 @@ import time
 import uuid
 from pathlib import Path
 
+from question_catalog import read_presentation_index
+
 
 DEMO_INSTANCE_RE = re.compile(r'^demo_[0-9a-f]{32}$')
 DEMO_SEED_VERSION = 2
@@ -45,13 +47,10 @@ def demo_database_path(data_dir, slug):
 
 def _read_presentation_questions(classes_dir):
     index_path = os.path.join(classes_dir, 'demo', 'week1', 'index.md')
-    questions = []
-    if os.path.isfile(index_path):
-        with open(index_path, 'r', encoding='utf-8-sig') as handle:
-            for line in handle:
-                match = re.match(r'^(\d+)\.\s+(.+)$', line.strip())
-                if match:
-                    questions.append((int(match.group(1)), match.group(2).strip()))
+    questions = [
+        (question['num'], question['title'])
+        for question in read_presentation_index(index_path) or []
+    ]
     if not questions:
         questions = [(1, 'Demo Presentation Question')]
     return questions

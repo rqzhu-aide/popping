@@ -50,7 +50,7 @@ SCHEMA_PATH = os.path.join(PROJECT_ROOT, 'popping.sql')
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-from question_catalog import validate_question_catalog
+from question_catalog import read_presentation_index, validate_question_catalog
 
 
 def build_team_rows(config):
@@ -95,22 +95,7 @@ def build_team_rows(config):
 
 def read_presentation_question_index(config_dir, week_num):
     index_path = os.path.join(config_dir, f'week{week_num}', 'index.md')
-    if not os.path.exists(index_path):
-        return []
-
-    questions = []
-    with open(index_path, 'r', encoding='utf-8-sig') as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            match = re.match(r'^(\d+)\.\s+(.+)$', line)
-            if match:
-                questions.append({
-                    'num': int(match.group(1)),
-                    'title': match.group(2).strip()
-                })
-    return questions
+    return read_presentation_index(index_path) or []
 
 
 def load_course_config(config_dir):

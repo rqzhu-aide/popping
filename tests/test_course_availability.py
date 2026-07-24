@@ -491,3 +491,33 @@ def test_existing_instructor_session_is_revoked_when_course_is_deactivated(
     assert client.get("/api/poll").status_code == 401
     with client.session_transaction() as browser_session:
         assert not browser_session
+
+
+def test_course_availability_cache_is_bounded(catalog_env):
+    slug = "bounded_course"
+    _write_config(catalog_env, slug)
+    _write_database(catalog_env, slug)
+    cache = app_module._course_availability_cache
+    for index in range(app_module.COURSE_AVAILABILITY_CACHE_LIMIT):
+        cache[("classes", "data", f"bogus-{index}")] = {
+            "checked_at": 0,
+            "result": {"status": "missing"},
+        }
+
+    assert app_module._course_availability(slug)["status"] == "ready"
+    assert len(cache) <= app_module.COURSE_AVAILABILITY_CACHE_LIMIT
+
+
+def test_poll_duration_cache_is_bounded(catalog_env):
+    slug = "bounded_poll"
+    _write_config(catalog_env, slug)
+    cache = app_module._poll_duration_cache
+    cache.clear()
+    try:
+        for index in range(app_module.POLL_DURATION_CACHE_LIMIT):
+            cache[f"bogus-{index}"] = (0, app_module.POLL_DURATION)
+
+        assert app_module.get_poll_duration(slug) == app_module.POLL_DURATION
+        assert len(cache) <= app_module.POLL_DURATION_CACHE_LIMIT
+    finally:
+        cache.clear()

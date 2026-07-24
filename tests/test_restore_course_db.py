@@ -2,6 +2,7 @@
 
 import builtins
 import importlib.util
+import os
 from pathlib import Path
 import sqlite3
 
@@ -381,7 +382,10 @@ def test_restore_backup_retention_keeps_only_newest_three(
     for index, name in enumerate(names):
         path = backup_dir / name
         path.write_bytes(str(index).encode("ascii"))
-        path.touch()
+        # Explicit increasing mtimes: rapid touch() calls can land in the
+        # same mtime tick, which made the retention order nondeterministic.
+        mtime = 1_700_000_000 + index
+        os.utime(path, (mtime, mtime))
         path.with_name(path.name + "-wal").write_bytes(b"wal")
 
     restore_course_db_module.prune_backups(str(backup_dir))

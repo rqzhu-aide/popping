@@ -11,7 +11,7 @@ import sqlite3
 import threading
 import time
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from functools import wraps
 from fractions import Fraction
 from pathlib import Path
@@ -22,6 +22,7 @@ from flask import (
 )
 from werkzeug.exceptions import HTTPException, RequestEntityTooLarge
 from werkzeug.middleware.proxy_fix import ProxyFix
+import yaml
 
 import config
 from database import (
@@ -46,7 +47,12 @@ from demo_instance import (
     reset_demo_instance,
     touch_demo_instance,
 )
-from question_catalog import validate_question_catalog
+from question_catalog import (
+    QuestionParseError,
+    parse_question_blocks,
+    read_presentation_index,
+    validate_question_catalog,
+)
 
 app = Flask(__name__)
 app.config.from_object(config)
@@ -128,7 +134,6 @@ def get_poll_duration(slug):
         return cached[1]
     value = POLL_DURATION
     try:
-        import yaml
         with open(yaml_path, encoding='utf-8') as config_file:
             cfg = yaml.safe_load(config_file) or {}
         raw = cfg.get('poll_duration')
@@ -138,6 +143,8 @@ def get_poll_duration(slug):
         value = POLL_DURATION
     if not (5 <= value <= 300):
         value = POLL_DURATION
+    if len(_poll_duration_cache) >= POLL_DURATION_CACHE_LIMIT:
+        _poll_duration_cache.clear()
     _poll_duration_cache[slug] = (mtime, value)
     return value
 
@@ -161,6 +168,15 @@ MAX_EXPORT_BYTES = 50 * 1024 * 1024
 COURSE_AVAILABILITY_TTL = 30
 COURSE_UNAVAILABLE_TTL = 5
 DEMO_RESET_COOLDOWN_SECONDS = 10
+# Students and instructors in a live demo poll /api/poll continuously, so the
+# .last-used TTL marker is refreshed at most once per minute per instance
+# instead of on every request.
+DEMO_TOUCH_INTERVAL = 60
+DEMO_TOUCH_CACHE_LIMIT = 128
+# Unauthenticated routes key these caches by attacker-controlled slugs, so
+# cap them like the demo touch cache: clear once the limit is reached.
+POLL_DURATION_CACHE_LIMIT = 256
+COURSE_AVAILABILITY_CACHE_LIMIT = 256
 REQUIRED_COURSE_SCHEMA = {
     'instructors': {'id', 'username', 'name', 'pin'},
     'courses': {
@@ -181,6 +197,8 @@ REQUIRED_COURSE_TABLES = frozenset(REQUIRED_COURSE_SCHEMA)
 _course_availability_cache = {}
 _course_availability_lock = threading.RLock()
 _demo_instance_create_lock = threading.Lock()
+_demo_instance_touch_lock = threading.Lock()
+_demo_instance_touch_last = {}
 
 
 def is_valid_slug(slug):
@@ -192,6 +210,16 @@ def _parse_db_datetime(dt_str):
     if not dt_str:
         return None
     return datetime.fromisoformat(str(dt_str).replace(' ', 'T'))
+
+
+def _utcnow():
+    """Current UTC time as a naive datetime.
+
+    Stored timestamps (SQLite CURRENT_TIMESTAMP, session ISO strings) are
+    naive UTC, so keeping ``now`` naive preserves comparison behavior while
+    replacing the deprecated ``datetime.utcnow()``.
+    """
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
 def course_db_path(slug):
@@ -213,17 +241,6 @@ def active_presentation_key(state):
     if 'presentation_started_at' in state.keys() and state['presentation_started_at']:
         return f"pres-{state['presentation_started_at']}"
     return None
-
-
-def active_discussion_source_key(state):
-    """Return the reusable question-bank key for the current discussion post."""
-    if not state:
-        return None
-    if ('current_discussion_source_key' in state.keys() and
-            state['current_discussion_source_key']):
-        return state['current_discussion_source_key']
-    # Existing databases used the live discussion key as the source key.
-    return state['current_discussion_key']
 
 
 def _presentation_guard(data, state):
@@ -275,26 +292,12 @@ def _expected_roster_state_guard(data, state):
     return None
 
 
-def _expected_discussion_state_guard(data, state):
-    """Reject a post or unpost that targets an older discussion state."""
-    guard = _expected_state_guard(data, state)
-    if guard:
-        return guard
-    if 'expected_discussion_key' not in data:
-        return 'Expected discussion key is required', 400
-    expected_key = str(data.get('expected_discussion_key') or '')
-    current_key = str(state['current_discussion_key'] or '')
-    if expected_key != current_key:
-        return 'The posted discussion question changed; reload before continuing', 409
-    return None
-
-
 def _create_reset_backup(slug):
     """Create a consistent SQLite backup immediately before destructive reset."""
     source_path = course_db_path(slug)
     backup_dir = os.path.join(config.DATA_DIR, slug, 'reset-backups')
     os.makedirs(backup_dir, exist_ok=True)
-    stamp = datetime.utcnow().strftime('%Y%m%dT%H%M%S%f')
+    stamp = _utcnow().strftime('%Y%m%dT%H%M%S%f')
     backup_path = os.path.join(backup_dir, f'popping-before-reset-{stamp}.db')
     source = sqlite3.connect(source_path, timeout=30)
     target = sqlite3.connect(backup_path)
@@ -336,7 +339,7 @@ def _poll_is_open(state, now=None, poll_duration=None):
         return False
     try:
         started = _parse_db_datetime(state['poll_started_at'])
-        return (now or datetime.utcnow()) < started + timedelta(
+        return (now or _utcnow()) < started + timedelta(
             seconds=poll_duration or POLL_DURATION)
     except (TypeError, ValueError):
         return False
@@ -350,7 +353,7 @@ def _derive_timing_state(state, now=None, poll_duration=None):
             'poll_remaining': 0,
             'session_elapsed': None,
         }
-    now = now or datetime.utcnow()
+    now = now or _utcnow()
     presentation_remaining = state['presentation_remaining']
     if state['presentation_started_at'] and state['presentation_time_cap']:
         try:
@@ -406,7 +409,7 @@ def _sync_student_activity(slug, session_key):
     last_synced = session.get('last_active_synced_at')
     if last_synced:
         try:
-            stale = datetime.utcnow() - _parse_db_datetime(last_synced) \
+            stale = _utcnow() - _parse_db_datetime(last_synced) \
                 >= STUDENT_ACTIVITY_SYNC_INTERVAL
         except (TypeError, ValueError):
             stale = True
@@ -419,93 +422,7 @@ def _sync_student_activity(slug, session_key):
         [session['student_id']]
     )
     session['activity_session_key'] = session_key
-    session['last_active_synced_at'] = datetime.utcnow().isoformat()
-
-
-class QuestionParseError(ValueError):
-    pass
-
-
-def parse_question_blocks(content):
-    """Parse repeated YAML-frontmatter blocks without splitting body Markdown."""
-    import yaml
-
-    normalized = content.replace('\r\n', '\n').replace('\r', '\n')
-    if not normalized.strip():
-        return []
-    lines = normalized.split('\n')
-    delimiters = []
-    fence_char = None
-    fence_length = 0
-    fence_line = None
-    for index, line in enumerate(lines):
-        fence = re.match(r'^\s*(`{3,}|~{3,})', line)
-        if fence:
-            marker = fence.group(1)
-            if fence_char is None:
-                fence_char = marker[0]
-                fence_length = len(marker)
-                fence_line = index
-            elif marker[0] == fence_char and len(marker) >= fence_length:
-                fence_char = None
-                fence_length = 0
-                fence_line = None
-            continue
-        if fence_char is None and re.fullmatch(r'\s*---\s*', line):
-            delimiters.append(index)
-
-    if fence_char is not None:
-        raise QuestionParseError(
-            f'Unclosed fenced code block near line {fence_line + 1}'
-        )
-
-    headers = []
-    position = 0
-    while position + 1 < len(delimiters):
-        opening = delimiters[position]
-        closing = delimiters[position + 1]
-        frontmatter = '\n'.join(lines[opening + 1:closing]).strip()
-        try:
-            metadata = yaml.safe_load(frontmatter) if frontmatter else None
-        except yaml.YAMLError:
-            position += 1
-            continue
-        if isinstance(metadata, dict) and str(metadata.get('title') or '').strip():
-            headers.append((opening, closing, frontmatter))
-            position += 2
-        else:
-            position += 1
-
-    if not headers:
-        raise QuestionParseError('No valid question frontmatter found')
-    used_delimiters = {
-        delimiter for opening, closing, _frontmatter in headers
-        for delimiter in (opening, closing)
-    }
-    for delimiter_position, delimiter in enumerate(delimiters):
-        if delimiter in used_delimiters:
-            continue
-        next_delimiter = delimiters[delimiter_position + 1] \
-            if delimiter_position + 1 < len(delimiters) else len(lines)
-        candidate = '\n'.join(lines[delimiter + 1:next_delimiter]).strip()
-        first_line = candidate.split('\n', 1)[0] if candidate else ''
-        if re.match(r'^\s*title\s*:', first_line):
-            if next_delimiter == len(lines):
-                raise QuestionParseError(
-                    f'Unclosed question frontmatter near line {delimiter + 1}'
-                )
-            raise QuestionParseError(
-                f'Invalid question frontmatter near line {delimiter + 1}'
-            )
-    if any(line.strip() for line in lines[:headers[0][0]]):
-        raise QuestionParseError('Unexpected content before the first question')
-
-    entries = []
-    for index, (_opening, closing, frontmatter) in enumerate(headers):
-        body_end = headers[index + 1][0] if index + 1 < len(headers) else len(lines)
-        body = '\n'.join(lines[closing + 1:body_end]).strip()
-        entries.append((frontmatter, body))
-    return entries
+    session['last_active_synced_at'] = _utcnow().isoformat()
 
 
 def _serialize_question_blocks(entries):
@@ -535,21 +452,7 @@ def _write_text_atomic(path, content):
 def read_presentation_question_index(slug, week_num):
     week_dir = os.path.join(_course_class_dir(slug), f'week{week_num}')
     index_path = os.path.join(week_dir, 'index.md')
-    if not os.path.exists(index_path):
-        return None
-
-    questions = []
-    with open(index_path, 'r', encoding='utf-8-sig') as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            m = re.match(r'^(\d+)\.\s+(.+)$', line)
-            if m:
-                qnum = int(m.group(1))
-                title = m.group(2).strip()
-                questions.append({'num': qnum, 'title': title})
-    return questions
+    return read_presentation_index(index_path)
 
 
 def sync_presentation_questions(
@@ -641,7 +544,6 @@ def _read_appendix_question_rows(slug, week_num):
     with open(appendix_path, 'r', encoding='utf-8-sig') as f:
         entries = parse_question_blocks(f.read())
 
-    import yaml
     rows = []
     seen_numbers = set()
     for position, (fm_block, body_block) in enumerate(entries, 1):
@@ -792,7 +694,7 @@ def load_question_html(slug, week_num, question_num):
 @app.before_request
 def track_student_activity():
     if _exclusive_session_role() == 'student':
-        now = datetime.utcnow()
+        now = _utcnow()
         last_synced = None
         last_iso = session.get('last_active_synced_at')
         if last_iso:
@@ -880,7 +782,7 @@ def _login_client_hash():
 
 def _login_retry_after(slug, course_id, login_type, principal, client_hash):
     """Return seconds until another login may be tried, or zero."""
-    now = datetime.utcnow()
+    now = _utcnow()
     window_start = now - timedelta(seconds=LOGIN_WINDOW_SECONDS)
     row = query_db(
         slug,
@@ -928,7 +830,7 @@ def _record_login_failure(slug, course_id, login_type, principal, client_hash):
     db = get_db(slug)
     db.execute('BEGIN IMMEDIATE')
     try:
-        now = datetime.utcnow()
+        now = _utcnow()
         db.execute(
             '''DELETE FROM login_attempts
                WHERE window_started_at <= datetime('now', ?)
@@ -984,7 +886,12 @@ def _clear_login_failures(slug, course_id, login_type, principal, client_hash):
 
 
 def _rate_limited_login_response(template, slug, course, retry_after):
-    flash('Too many failed login attempts. Please try again later.', 'error')
+    minutes = max(1, math.ceil(retry_after / 60))
+    flash(
+        f'Too many failed login attempts. '
+        f'Please try again in {minutes} minute{"s" if minutes > 1 else ""}.',
+        'error'
+    )
     response = make_response(
         render_template(template, course=course, slug=slug), 429
     )
@@ -1085,10 +992,6 @@ def _inspect_course_availability(slug):
     if not os.path.isdir(class_dir) or not os.path.isfile(yaml_path):
         return result
 
-    try:
-        import yaml
-    except ImportError:
-        return result
     try:
         with open(yaml_path, encoding='utf-8') as config_file:
             course_config = yaml.safe_load(config_file)
@@ -1211,6 +1114,8 @@ def _course_availability(slug):
             if now - cached['checked_at'] < cache_ttl:
                 return copy.deepcopy(cached['result'])
         result = _inspect_course_availability(slug)
+        if len(_course_availability_cache) >= COURSE_AVAILABILITY_CACHE_LIMIT:
+            _course_availability_cache.clear()
         _course_availability_cache[cache_key] = {
             'checked_at': time.monotonic(),
             'result': copy.deepcopy(result),
@@ -1256,6 +1161,12 @@ def index():
         return redirect(url_for('instructor_course', slug=session['slug']))
     if session.get('student_id') or session.get('instructor_id') or session.get('role'):
         session.clear()
+    if request.args.get('session') == 'ended':
+        flash(
+            'Your session ended — please log in again. '
+            'If you were in a class, your instructor may have updated the roster.',
+            'success',
+        )
     courses = _scan_courses()
     return render_template('index.html', courses=courses)
 
@@ -1274,7 +1185,7 @@ def login(slug):
         pin = request.form.get('pin', '').strip()
         if not student_id or not pin:
             flash('Please enter both ID and PIN.', 'error')
-            return render_template('login.html', course=course, slug=slug)
+            return redirect(url_for('login', slug=slug))
         principal = student_id.casefold()[:200]
         client_hash = _login_client_hash()
         retry_after = _login_retry_after(
@@ -1286,7 +1197,8 @@ def login(slug):
             )
         student = query_db(slug,
             '''SELECT s.* FROM students s JOIN courses c ON c.id = s.course_id
-               WHERE s.student_id = ? AND s.pin = ? AND c.slug = ? AND s.is_active = 1''',
+               WHERE s.student_id = ? COLLATE NOCASE
+                 AND s.pin = ? AND c.slug = ? AND s.is_active = 1''',
             [student_id, pin, slug], one=True
         )
         if student:
@@ -1307,6 +1219,7 @@ def login(slug):
             slug, course['id'], 'student', principal, client_hash
         )
         flash('Invalid login for this course.', 'error')
+        return redirect(url_for('login', slug=slug))
 
     return render_template('login.html', course=course, slug=slug)
 
@@ -1325,7 +1238,7 @@ def instructor_login(slug):
         pin = request.form.get('pin', '').strip()
         if not username or not pin:
             flash('Please enter both username and PIN.', 'error')
-            return render_template('instructor_login.html', course=course, slug=slug)
+            return redirect(url_for('instructor_login', slug=slug))
         principal = username.casefold()[:200]
         client_hash = _login_client_hash()
         retry_after = _login_retry_after(
@@ -1354,6 +1267,7 @@ def instructor_login(slug):
             slug, course['id'], 'instructor', principal, client_hash
         )
         flash('Invalid login for this course.', 'error')
+        return redirect(url_for('instructor_login', slug=slug))
 
     return render_template('instructor_login.html', course=course, slug=slug)
 
@@ -1402,6 +1316,24 @@ def _demo_instance_ready(instance_slug):
     return _course_availability(instance_slug)['status'] == 'ready'
 
 
+def _touch_demo_instance_throttled(slug):
+    """Refresh a live demo's .last-used marker at most once a minute."""
+    now = time.monotonic()
+    with _demo_instance_touch_lock:
+        if len(_demo_instance_touch_last) >= DEMO_TOUCH_CACHE_LIMIT:
+            _demo_instance_touch_last.clear()
+        last = _demo_instance_touch_last.get(slug, 0)
+        if now - last < DEMO_TOUCH_INTERVAL:
+            return
+        _demo_instance_touch_last[slug] = now
+    try:
+        touch_demo_instance(config.DATA_DIR, slug)
+    except OSError:
+        # The instance may have been reaped concurrently; the poll itself
+        # still succeeded, so a missing marker is not an error here.
+        pass
+
+
 @app.route('/demo/<instance_slug>')
 def demo_instance_home(instance_slug):
     if not _demo_instance_ready(instance_slug):
@@ -1438,7 +1370,7 @@ def _start_demo_session(instance_slug, role, principal):
     return redirect(url_for('dashboard'))
 
 
-@app.route('/demo/<instance_slug>/instructor')
+@app.route('/demo/<instance_slug>/instructor', methods=['POST'])
 def demo_instructor(instance_slug):
     if not _demo_instance_ready(instance_slug):
         flash('This private demo is no longer available.', 'error')
@@ -1449,7 +1381,8 @@ def demo_instructor(instance_slug):
     return _start_demo_session(instance_slug, 'instructor', instructor)
 
 
-@app.route('/demo/<instance_slug>/student/<int:student_number>')
+@app.route('/demo/<instance_slug>/student/<int:student_number>',
+           methods=['POST'])
 def demo_student(instance_slug, student_number):
     if student_number not in (1, 2) or not _demo_instance_ready(instance_slug):
         flash('This private demo student is not available.', 'error')
@@ -1475,7 +1408,7 @@ def legacy_demo_role():
     return redirect(url_for('demo'))
 
 
-@app.route('/demo/exit')
+@app.route('/demo/exit', methods=['POST'])
 def demo_exit():
     """Exit demo mode, leaving the private instance for its short TTL."""
     session.clear()
@@ -1525,7 +1458,7 @@ def legacy_demo_reset():
     return 'Forbidden', 403
 
 
-@app.route('/logout')
+@app.route('/logout', methods=['POST'])
 def logout():
     session.clear()
     return redirect(url_for('index'))
@@ -1596,7 +1529,7 @@ def instructor_course(slug):
     )
     if state:
         state = dict(state)
-        now = datetime.utcnow()
+        now = _utcnow()
         state['poll_active'] = _poll_is_open(
             state, now=now, poll_duration=get_poll_duration(slug))
         state.update(_derive_timing_state(state, now=now))
@@ -1646,7 +1579,7 @@ def instructor_course(slug):
         [course['id'], selected_week, int(presentation_catalog_ready),
          state['active_question_id'] if state else None]
     )
-    cutoff = (datetime.utcnow() - timedelta(minutes=3)).strftime('%Y-%m-%d %H:%M:%S')
+    cutoff = (_utcnow() - timedelta(minutes=3)).strftime('%Y-%m-%d %H:%M:%S')
     students_enhanced = []
     for s in students:
         d = dict(s)
@@ -1728,12 +1661,6 @@ def instructor_course(slug):
 # ---------------------------------------------------------------------------
 # Student API
 # ---------------------------------------------------------------------------
-
-def _get_slug_from_session():
-    if 'slug' in session:
-        return session['slug']
-    return None
-
 
 def _authenticated_role(slug):
     """Return the role only when the session principal belongs to this course."""
@@ -1890,7 +1817,7 @@ def _compute_top_teams(slug, course_id, history, session_key):
 
 
 def _compute_state(slug, include_poll_count=True, known_question_id=None,
-                   known_question_revision=None, known_discussion_key=None):
+                   known_question_revision=None):
     """Compute the course-state dict — shared by /api/state and /api/poll.
 
     This is the single source of truth for presentation timer, poll status,
@@ -1951,7 +1878,7 @@ def _compute_state(slug, include_poll_count=True, known_question_id=None,
                 full_question['revision'] = revision
                 active_question = full_question
 
-    now = datetime.utcnow()
+    now = _utcnow()
     poll_duration = get_poll_duration(slug)
     timing = _derive_timing_state(state, now=now, poll_duration=poll_duration)
     presentation_remaining = timing['presentation_remaining']
@@ -2158,7 +2085,7 @@ def _compute_teams(slug, course_id, max_teams=None, member_team_id=None,
 
 @app.route('/api/teams', methods=['GET'])
 def api_teams():
-    slug = _get_slug_from_session()
+    slug = session.get('slug')
     role = _authenticated_role(slug)
     if not role:
         return jsonify({'error': 'Not logged in'}), 401
@@ -2276,7 +2203,6 @@ def api_state():
         include_poll_count=is_instructor,
         known_question_id=request.args.get('known_question_id', type=int),
         known_question_revision=request.args.get('known_question_revision'),
-        known_discussion_key=request.args.get('known_discussion_key'),
     )
     # Strip internal + grading metadata from student responses
     state_data.pop('_course_id', None)
@@ -2299,6 +2225,10 @@ def api_poll():
     role = _authenticated_role(slug)
     if not role:
         return jsonify({'error': 'Not logged in'}), 401
+
+    # Active use keeps a demo instance alive even past the 2h TTL marker.
+    if is_demo_instance_slug(slug):
+        _touch_demo_instance_throttled(slug)
 
     ensure_schema(slug)
 
@@ -2359,7 +2289,6 @@ def api_poll():
         include_poll_count=is_instructor,
         known_question_id=request.args.get('known_question_id', type=int),
         known_question_revision=request.args.get('known_question_revision'),
-        known_discussion_key=request.args.get('known_discussion_key'),
     )
     if role == 'student':
         _sync_student_activity(slug, state_data.get('session_key'))
@@ -2388,10 +2317,12 @@ def api_poll():
     # 1s during all active phases so instructor actions (phase changes, posting
     # questions, starting polls, selecting teams) appear within 1 second.
     # Keep a low-frequency recovery poll after End Session so another session
-    # can start without requiring every student to reload manually.
+    # can start without requiring every student to reload manually. ~5s is
+    # slow enough to be cheap but fast enough that students sitting on the
+    # results screen see a new session start promptly.
     stop_polling = False
     if state_data['phase'] == 'ended':
-        poll_interval = 30000
+        poll_interval = 5000
     elif role == 'instructor':
         poll_interval = 1000
     else:
@@ -2633,7 +2564,7 @@ def _finalize_active_presentation(slug, course_id, db=None):
                 'responses': count['c'] if count else 0,
                 'started_at': started_at,
                 'question_id': state['active_question_id'],
-                'ended_at': datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S'),
+                'ended_at': _utcnow().strftime('%Y-%m-%d %H:%M:%S'),
             })
 
         _clear_active_presentation(db, course_id, json.dumps(history))
@@ -2769,71 +2700,6 @@ def set_phase():
         'success': True,
         'phase': phase,
         'session_key': fresh['session_key'] if fresh else 0,
-    })
-
-
-@app.route('/api/set_question', methods=['POST'])
-@instructor_login_required
-def set_question():
-    slug = session['slug']
-    data = request.get_json(silent=True) or {}
-    supplied = data.get('question')
-    if isinstance(supplied, dict):
-        question_key = str(supplied.get('key') or '').strip()
-        title = str(supplied.get('title') or '').strip()
-        content = str(supplied.get('content') or '').strip()
-    else:
-        question_key = str(data.get('key') or '').strip()
-        title = str(data.get('title') or supplied or '').strip()
-        content = str(data.get('content') or '').strip()
-    clearing = not title and not content
-    if not clearing and (not title or not content):
-        return jsonify({'error': 'Question title and content are required'}), 400
-    if len(title) > 500 or len(content) > 50000:
-        return jsonify({'error': 'Question is too long'}), 400
-    if not clearing and not question_key:
-        digest = hashlib.sha256((title + '\0' + content).encode('utf-8')).hexdigest()[:16]
-        question_key = f'manual:{digest}'
-    ensure_schema(slug)
-    db = get_db(slug)
-    db.execute('BEGIN IMMEDIATE')
-    try:
-        course = db.execute('SELECT id FROM courses LIMIT 1').fetchone()
-        state = db.execute(
-            'SELECT * FROM course_state WHERE course_id = ?', [course['id']]
-        ).fetchone()
-        guard = _expected_discussion_state_guard(data, state)
-        if guard:
-            db.rollback()
-            return jsonify({'error': guard[0]}), guard[1]
-        if not state or state['phase'] != 'discussion':
-            db.rollback()
-            return jsonify({'error': 'Questions can only be posted during discussion'}), 403
-        discussion_instance_key = None if clearing else f'disc-{uuid.uuid4().hex}'
-        db.execute(
-            '''UPDATE course_state
-               SET current_question = ?, current_discussion_key = ?,
-                   current_discussion_source_key = ?,
-                   current_discussion_title = ?, current_discussion_content = ?
-               WHERE course_id = ?''',
-            ([None, None, None, None, None, course['id']] if clearing else
-             [title, discussion_instance_key, question_key, title, content,
-              course['id']])
-        )
-        db.commit()
-    except Exception:
-        db.rollback()
-        raise
-    if clearing:
-        return jsonify({'success': True, 'discussion_question': None})
-    return jsonify({
-        'success': True,
-        'discussion_question': {
-            'key': discussion_instance_key,
-            'source_key': question_key,
-            'title': title,
-            'content': content,
-        },
     })
 
 
@@ -3309,7 +3175,6 @@ def discussion_questions():
             return out
         with open(filepath, 'r', encoding='utf-8-sig') as f:
             content = f.read()
-        import yaml
         seen_appendix_ids = set()
         for position, (fm_block, body_block) in enumerate(
                 parse_question_blocks(content), 1):
@@ -3499,7 +3364,6 @@ def add_question():
         existing_entries = parse_question_blocks(original_content) \
             if original_content.strip() else []
 
-        import yaml
         highest_label = 0
         for position, (frontmatter, _body) in enumerate(existing_entries, 1):
             metadata = yaml.safe_load(frontmatter) or {}
@@ -3523,11 +3387,22 @@ def add_question():
             slug, course['id'], week, db=db, commit=False
         )
         _bump_discussion_questions_version(db, course['id'])
+        # The competition question select is keyed by the numeric question
+        # id, so return it for an in-place option rebuild (no reload).
+        question_row = db.execute(
+            '''SELECT id, title FROM questions
+               WHERE course_id = ? AND source_key = ?''',
+            [course['id'], f'appendix:{week}:{label}']
+        ).fetchone()
         db.commit()
         return jsonify({
             'success': True,
             'label': label,
             'appendix_id': label,
+            'question_id': question_row['id'] if question_row else None,
+            'title': (
+                question_row['title'] if question_row else f'{label}: {title}'
+            ),
         })
     except QuestionParseError as exc:
         try:
@@ -3593,7 +3468,6 @@ def delete_appendix_question():
         with open(appendix_path, 'r', encoding='utf-8-sig') as handle:
             original_content = handle.read()
         entries = parse_question_blocks(original_content)
-        import yaml
         selected_index = None
         selected_key = None
         for index, (frontmatter, body) in enumerate(entries):
@@ -3618,7 +3492,12 @@ def delete_appendix_question():
         sync_appendix_questions(
             slug, course['id'], week, db=db, commit=False
         )
-        unposted = active_discussion_source_key(state) == selected_key
+        # Legacy posted-question columns: clear them if the deleted question
+        # was the one last posted by the removed single-question flow.
+        unposted = bool(state) and (
+            (state['current_discussion_source_key'] or
+             state['current_discussion_key']) == selected_key
+        )
         if unposted:
             db.execute(
                 '''UPDATE course_state
@@ -3632,6 +3511,116 @@ def delete_appendix_question():
         _bump_discussion_questions_version(db, course['id'])
         db.commit()
         return jsonify({'success': True, 'unposted': unposted})
+    except QuestionParseError as exc:
+        try:
+            if file_written:
+                _write_text_atomic(appendix_path, original_content)
+        finally:
+            db.rollback()
+        return jsonify({'error': str(exc)}), 422
+    except Exception:
+        try:
+            if file_written:
+                _write_text_atomic(appendix_path, original_content)
+        finally:
+            db.rollback()
+        raise
+
+
+@app.route('/api/edit_appendix_question', methods=['POST'])
+@instructor_login_required
+def edit_appendix_question():
+    """Edit one appendix question in place, keeping its A-number label."""
+    slug = session['slug']
+    data = request.get_json(silent=True) or {}
+    appendix_id = str(data.get('appendix_id') or '').strip().upper()
+    title = str(data.get('title') or '').strip()
+    content = str(data.get('content') or '').strip()
+    if not re.fullmatch(r'A\d+', appendix_id):
+        return jsonify({'error': 'Appendix question ID required'}), 400
+    try:
+        requested_week = int(data.get('week'))
+    except (ValueError, TypeError):
+        return jsonify({'error': 'Valid week required'}), 400
+    if not title or not content:
+        return jsonify({'error': 'Title and content required'}), 400
+    if len(title) > 500 or len(content) > 50000:
+        return jsonify({'error': 'Title or content is too long'}), 400
+
+    ensure_schema(slug)
+    db = get_db(slug)
+    db.execute('BEGIN IMMEDIATE')
+    original_content = ''
+    file_written = False
+    appendix_path = None
+    try:
+        course = db.execute('SELECT id FROM courses LIMIT 1').fetchone()
+        state = db.execute(
+            '''SELECT discussion_week, phase, session_key FROM course_state
+               WHERE course_id = ?''',
+            [course['id']]
+        ).fetchone()
+        guard = _expected_state_guard(data, state)
+        if guard:
+            db.rollback()
+            return jsonify({'error': guard[0]}), guard[1]
+        if state and state['phase'] == 'competition':
+            db.rollback()
+            return jsonify({'error': 'Appendix questions cannot be edited during presentations'}), 409
+        week = state['discussion_week'] if state and state['discussion_week'] else 1
+        if requested_week != week:
+            db.rollback()
+            return jsonify({'error': 'The displayed appendix week is stale'}), 409
+        appendix_path = _appendix_path(slug, week)
+        if not os.path.exists(appendix_path):
+            db.rollback()
+            return jsonify({'error': 'Appendix file not found'}), 404
+
+        _read_appendix_question_rows(slug, week)
+        with open(appendix_path, 'r', encoding='utf-8-sig') as handle:
+            original_content = handle.read()
+        entries = parse_question_blocks(original_content)
+        selected_index = None
+        selected_label = None
+        for index, (frontmatter, body) in enumerate(entries):
+            metadata = yaml.safe_load(frontmatter) or {}
+            entry_title = str(metadata.get('title') or '').strip()
+            label = re.match(r'^A(\d+)\s*:', entry_title, re.IGNORECASE)
+            identity = f'A{label.group(1)}' if label else None
+            if identity == appendix_id:
+                selected_index = index
+                selected_label = identity
+                break
+        if selected_index is None:
+            db.rollback()
+            return jsonify({'error': 'Appendix question not found'}), 404
+
+        frontmatter = f'title: {json.dumps(f"{selected_label}: {title}")}'
+        entries[selected_index] = (frontmatter, content)
+        _write_text_atomic(appendix_path, _serialize_question_blocks(entries))
+        file_written = True
+        sync_appendix_questions(
+            slug, course['id'], week, db=db, commit=False
+        )
+        _bump_discussion_questions_version(db, course['id'])
+        # The competition question select is keyed by the numeric question
+        # id, so return it for an in-place option rebuild (no reload).
+        question_row = db.execute(
+            '''SELECT id, title FROM questions
+               WHERE course_id = ? AND source_key = ?''',
+            [course['id'], f'appendix:{week}:{selected_label}']
+        ).fetchone()
+        db.commit()
+        return jsonify({
+            'success': True,
+            'label': selected_label,
+            'appendix_id': selected_label,
+            'question_id': question_row['id'] if question_row else None,
+            'title': (
+                question_row['title'] if question_row
+                else f'{selected_label}: {title}'
+            ),
+        })
     except QuestionParseError as exc:
         try:
             if file_written:
@@ -3947,7 +3936,8 @@ def start_presentation():
         time_cap = int(time_cap)
     except (TypeError, ValueError):
         return jsonify({'error': 'Invalid team, question, or time cap'}), 400
-    if time_cap < 10 or time_cap > 3600:
+    time_cap_clamped = time_cap < 10 or time_cap > 3600
+    if time_cap_clamped:
         time_cap = 300
     ensure_schema(slug)
     db = get_db(slug)
@@ -4042,7 +4032,7 @@ def start_presentation():
             }), 409
 
         question_text = question['title'] or question['question_text']
-        started_at = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S.%f')
+        started_at = _utcnow().strftime('%Y-%m-%d %H:%M:%S.%f')
         presentation_key = f'pres-{uuid.uuid4().hex}'
         db.execute(
             '''UPDATE course_state
@@ -4060,7 +4050,16 @@ def start_presentation():
              presentation_key, course['id']]
         )
         db.commit()
-        return jsonify({'success': True, 'presentation_key': presentation_key})
+        response = {
+            'success': True,
+            'presentation_key': presentation_key,
+            'time_cap': time_cap,
+        }
+        if time_cap_clamped:
+            response['notice'] = (
+                f'Time cap adjusted to {time_cap}s (allowed range 10–3600s)'
+            )
+        return jsonify(response)
     except Exception:
         db.rollback()
         raise
@@ -4085,7 +4084,7 @@ def stop_presentation():
             db.rollback()
             return jsonify({'error': 'Presentation timer is already paused'}), 409
         started = _parse_db_datetime(state['presentation_started_at'])
-        elapsed = (datetime.utcnow() - started).total_seconds()
+        elapsed = (_utcnow() - started).total_seconds()
         cap = state['presentation_time_cap'] or 300
         remaining = max(0, int(cap - elapsed))
         db.execute(
@@ -4122,7 +4121,7 @@ def resume_presentation():
             return jsonify({'error': 'No remaining time to resume'}), 409
         cap = state['presentation_time_cap'] or 300
         consumed = cap - remaining
-        shifted_start = datetime.utcnow() - timedelta(seconds=consumed)
+        shifted_start = _utcnow() - timedelta(seconds=consumed)
         db.execute(
             '''UPDATE course_state
                SET presentation_started_at = ?, presentation_remaining = NULL
@@ -4426,6 +4425,11 @@ def submit_rating():
         raise
 
 
+def _escape_like(term):
+    """Escape LIKE wildcards so a search term matches literally."""
+    return term.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
+
+
 @app.route('/api/students', methods=['GET'])
 @instructor_login_required
 def api_students():
@@ -4444,13 +4448,13 @@ def api_students():
     sort_sql = allowed_sorts[sort_col]
     order_sql = 'DESC' if order == 'desc' else 'ASC'
 
-    cutoff = (datetime.utcnow() - timedelta(minutes=3)).strftime('%Y-%m-%d %H:%M:%S')
+    cutoff = (_utcnow() - timedelta(minutes=3)).strftime('%Y-%m-%d %H:%M:%S')
 
     where_clause = ''
     params = [course['id']]
     if search:
-        where_clause += ' AND s.student_id LIKE ?'
-        params.append(f'%{search}%')
+        where_clause += " AND s.student_id LIKE ? ESCAPE '\\'"
+        params.append(f'%{_escape_like(search)}%')
     if team_filter == 'none':
         where_clause += ' AND s.team_id IS NULL'
     elif team_filter and team_filter != 'none':
@@ -4724,6 +4728,7 @@ def reset_data():
         db.execute('DELETE FROM peer_reviews WHERE course_id = ?', [course_id])
         db.execute('DELETE FROM teammate_thumbs WHERE course_id = ?', [course_id])
         db.execute('DELETE FROM presentation_ratings WHERE course_id = ?', [course_id])
+        db.execute('DELETE FROM hidden_discussion_questions WHERE course_id = ?', [course_id])
         legacy_tables = {
             row['name'] for row in db.execute(
                 "SELECT name FROM sqlite_master WHERE type = 'table' "
@@ -4816,6 +4821,27 @@ def export_data(slug):
         ) or 1
         max_teams = (state_row['max_teams'] if state_row else None) or 6
 
+        # Default stays current-week for backward compat; ?weeks=all exports
+        # every week that has recorded activity.
+        export_all = request.args.get('weeks', '').lower() == 'all'
+        if export_all:
+            export_weeks = sorted({
+                (row['week_num'] or 1)
+                for row in query_db(
+                    slug,
+                    '''SELECT week_num FROM questions WHERE course_id = ?
+                       UNION
+                       SELECT week_num FROM teammate_thumbs WHERE course_id = ?
+                       UNION
+                       SELECT week_num FROM presentation_ratings
+                       WHERE course_id = ?''',
+                    [cid, cid, cid],
+                )
+            } | {current_week})
+        else:
+            export_weeks = [current_week]
+        week_ph = ','.join('?' * len(export_weeks))
+
         asset_files = []
         asset_bytes = 0
 
@@ -4828,36 +4854,40 @@ def export_data(slug):
 
         class_dir = _course_class_dir(slug)
         if os.path.isdir(class_dir):
-            discussion_path = os.path.join(
-                class_dir, f'week-{current_week}-questions.md'
-            )
-            add_asset(
-                discussion_path,
-                f'questions/week-{current_week}-questions.md',
-            )
+            for export_week in export_weeks:
+                discussion_path = os.path.join(
+                    class_dir, f'week-{export_week}-questions.md'
+                )
+                add_asset(
+                    discussion_path,
+                    f'questions/week-{export_week}-questions.md',
+                )
 
-            presentation_dir = os.path.join(class_dir, f'week{current_week}')
-            if os.path.isdir(presentation_dir):
-                for root, _dirs, files in os.walk(presentation_dir):
-                    for fname in sorted(files):
-                        fpath = os.path.join(root, fname)
-                        relpath = os.path.relpath(
-                            fpath, class_dir
-                        ).replace('\\', '/')
-                        add_asset(fpath, f'questions/{relpath}')
+                presentation_dir = os.path.join(
+                    class_dir, f'week{export_week}'
+                )
+                if os.path.isdir(presentation_dir):
+                    for root, _dirs, files in os.walk(presentation_dir):
+                        for fname in sorted(files):
+                            fpath = os.path.join(root, fname)
+                            relpath = os.path.relpath(
+                                fpath, class_dir
+                            ).replace('\\', '/')
+                            add_asset(fpath, f'questions/{relpath}')
 
-        appendix_path = os.path.join(
-            config.DATA_DIR, slug, 'appendix',
-            f'week-{current_week}-appendix.md',
-        )
-        if not os.path.isfile(appendix_path):
+        for export_week in export_weeks:
             appendix_path = os.path.join(
-                class_dir, f'week-{current_week}-appendix.md'
+                config.DATA_DIR, slug, 'appendix',
+                f'week-{export_week}-appendix.md',
             )
-        add_asset(
-            appendix_path,
-            f'appendix/week-{current_week}-appendix.md',
-        )
+            if not os.path.isfile(appendix_path):
+                appendix_path = os.path.join(
+                    class_dir, f'week-{export_week}-appendix.md'
+                )
+            add_asset(
+                appendix_path,
+                f'appendix/week-{export_week}-appendix.md',
+            )
 
         if asset_bytes > MAX_EXPORT_BYTES:
             db.rollback()
@@ -4867,17 +4897,17 @@ def export_data(slug):
 
         row_counts = query_db(
             slug,
-            '''SELECT
+            f'''SELECT
                    (SELECT COUNT(*) FROM students WHERE course_id = ?) AS students,
                    (SELECT COUNT(*) FROM (
                         SELECT id FROM teams WHERE course_id = ?
                         ORDER BY id LIMIT ?
                     )) AS teams,
                    (SELECT COUNT(*) FROM teammate_thumbs
-                    WHERE course_id = ? AND week_num = ?) AS thumbs,
+                    WHERE course_id = ? AND week_num IN ({week_ph})) AS thumbs,
                    (SELECT COUNT(*) FROM presentation_ratings
-                    WHERE course_id = ? AND week_num = ?) AS ratings''',
-            [cid, cid, max_teams, cid, current_week, cid, current_week],
+                    WHERE course_id = ? AND week_num IN ({week_ph})) AS ratings''',
+            [cid, cid, max_teams, cid] + export_weeks + [cid] + export_weeks,
             one=True
         )
         if sum(row_counts) > MAX_EXPORT_ROWS:
@@ -4903,7 +4933,7 @@ def export_data(slug):
             [cid, max_teams])
 
         peer_reviews = query_db(slug,
-            '''SELECT p.grader_id, p.recipient_id,
+            f'''SELECT p.grader_id, p.recipient_id,
                       g.student_id as grader_sid, g.name as grader_name,
                       r.student_id as recipient_sid, r.name as recipient_name,
                       p.grader_team_id, p.grader_team_name,
@@ -4915,11 +4945,11 @@ def export_data(slug):
                FROM teammate_thumbs p
                JOIN students g ON p.grader_id = g.id
                JOIN students r ON p.recipient_id = r.id
-               WHERE p.course_id = ? AND p.week_num = ?
-               ORDER BY p.created_at''', [cid, current_week])
+               WHERE p.course_id = ? AND p.week_num IN ({week_ph})
+               ORDER BY p.created_at''', [cid] + export_weeks)
 
         ratings = query_db(slug,
-            '''SELECT pr.question_key, pr.session_key, pr.week_num,
+            f'''SELECT pr.question_key, pr.session_key, pr.week_num,
                       pr.presenting_team_id, pr.presenting_team_name,
                       pr.question_id, pr.question_title,
                       pr.rater_team_id, pr.rater_team_name,
@@ -4928,8 +4958,9 @@ def export_data(slug):
                       pr.q1_developed, pr.q2_easy, pr.created_at
                FROM presentation_ratings pr
                JOIN students s ON pr.student_id = s.id
-               WHERE pr.course_id = ? AND pr.week_num = ?
-               ORDER BY pr.question_key, pr.created_at''', [cid, current_week])
+               WHERE pr.course_id = ? AND pr.week_num IN ({week_ph})
+               ORDER BY pr.question_key, pr.created_at''',
+            [cid] + export_weeks)
 
         question_weeks = {
             row['id']: row['week_num'] or 1
@@ -4940,7 +4971,7 @@ def export_data(slug):
             )
         }
 
-        # Map this week's presentation keys to their teams.
+        # Map this scope's presentation keys to their teams.
         key_to_team = {}
         weekly_rating_keys = {rating['question_key'] for rating in ratings}
         if state_row and state_row['presentation_history']:
@@ -4951,7 +4982,7 @@ def export_data(slug):
                     history_week = question_weeks.get(h.get('question_id'))
                 if history_week is None and qkey in weekly_rating_keys:
                     history_week = current_week
-                if history_week != current_week:
+                if not export_all and history_week != current_week:
                     continue
                 key_to_team[qkey] = h.get('team', 'Unknown')
 
@@ -5000,12 +5031,21 @@ def export_data(slug):
             ('Code', course['code'] or ''),
             ('Semester', course['semester'] or ''),
             ('Lecture Week', current_week),
+            ('Export Scope', 'All weeks' if export_all else f'Week {current_week}'),
             ('Export Date', datetime.now().strftime('%Y-%m-%d %H:%M')),
             ('Active Students', sum(1 for student in students if student['is_active'])),
             ('Archived Students', sum(1 for student in students if not student['is_active'])),
             ('Current Visible Teams', len(teams)),
-            ('Week Peer Reviews (thumbs)', len(peer_reviews)),
-            ('Week Presentation Ratings', len(ratings)),
+            (
+                'All-Week Peer Reviews (thumbs)' if export_all
+                else 'Week Peer Reviews (thumbs)',
+                len(peer_reviews),
+            ),
+            (
+                'All-Week Presentation Ratings' if export_all
+                else 'Week Presentation Ratings',
+                len(ratings),
+            ),
         ]
         for r, (label, val) in enumerate(info_rows, 1):
             ws1.cell(row=r, column=1, value=label).font = bold_font
@@ -5229,9 +5269,12 @@ def export_data(slug):
                 zf.write(fpath, archive_name)
 
         zip_buf.seek(0)
-        filename = (
-            f"popping_{course['code'] or slug}_week_{current_week}_export.zip"
-        )
+        if export_all:
+            filename = f"popping_{course['code'] or slug}_all_weeks_export.zip"
+        else:
+            filename = (
+                f"popping_{course['code'] or slug}_week_{current_week}_export.zip"
+            )
         return send_file(
             zip_buf,
             mimetype='application/zip',
@@ -5239,10 +5282,9 @@ def export_data(slug):
             download_name=filename,
         )
 
-    except Exception as e:
+    except Exception:
         if snapshot_open and db is not None:
             db.rollback()
-        import traceback
-        traceback.print_exc()
-        flash(f'Export failed: {e}', 'error')
+        app.logger.exception('Export failed for course %s', slug)
+        flash('Export failed — please try again.', 'error')
         return redirect(url_for('instructor_course', slug=slug))

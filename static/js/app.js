@@ -31,7 +31,7 @@ async function postJSON(url, body) {
     }
     const { res, data } = result;
     if (res.status === 401) {
-        window.location.href = '/';
+        window.location.href = '/?session=ended';
         return { success: false, error: 'Session expired' };
     }
     data._status = res.status;
@@ -57,7 +57,7 @@ async function deleteJSON(url, body = {}) {
     }
     const { res, data } = result;
     if (res.status === 401) {
-        window.location.href = '/';
+        window.location.href = '/?session=ended';
         return { success: false, error: 'Session expired' };
     }
     data._status = res.status;
@@ -76,6 +76,57 @@ function escapeAttrValue(value) {
         .replace(/"/g, '&quot;')
         .replace(/'/g, '&#39;');
 }
+
+// Discussion question cards: expansion state and card numbers are keyed by
+// the server-provided question key so re-renders (version bumps, hidden
+// questions) neither collapse open cards nor renumber the rest.
+const _discQuestionExpanded = new Set();
+const _discQuestionNumbers = new Map(); // week scope -> Map(key -> number)
+
+function discussionQuestionKey(q) {
+    return (q && (q.key || q._key)) || '';
+}
+
+function discussionQuestionNumber(q, position) {
+    const key = discussionQuestionKey(q);
+    if (!key) return position + 1;
+    const scopeMatch = key.match(/^week-\d+-[qa]-/);
+    const scope = scopeMatch ? scopeMatch[0] : '';
+    let scopeMap = _discQuestionNumbers.get(scope);
+    if (!scopeMap) {
+        scopeMap = new Map();
+        _discQuestionNumbers.set(scope, scopeMap);
+    }
+    if (!scopeMap.has(key)) {
+        scopeMap.set(key, scopeMap.size + 1);
+    }
+    return scopeMap.get(key);
+}
+
+window.toggleDiscQuestionCard = function(header) {
+    const card = header.parentElement;
+    card.classList.toggle('expanded');
+    header.setAttribute(
+        'aria-expanded',
+        card.classList.contains('expanded') ? 'true' : 'false'
+    );
+    const key = card.dataset.questionKey;
+    if (!key) return;
+    if (card.classList.contains('expanded')) {
+        _discQuestionExpanded.add(key);
+    } else {
+        _discQuestionExpanded.delete(key);
+    }
+};
+
+// The accordion header is a div (it can contain real action buttons), so it
+// needs explicit keyboard support: Enter/Space toggles it like a click.
+window.discQuestionHeaderKeydown = function(event) {
+    if (event.key !== 'Enter' && event.key !== ' ') return;
+    if (event.target !== event.currentTarget) return;
+    event.preventDefault();
+    event.currentTarget.click();
+};
 
 /** Format a student as 'Name (id)' or just 'id' if no name / name equals id. */
 function formatStudentDisplay(name, studentId) {
@@ -210,10 +261,10 @@ function appendInstructorStateForm(formData) {
     formData.append('expected_roster_version', panel.dataset.rosterVersion || '0');
 }
 
-const resetMessage = sessionStorage.getItem('popping-reset-message');
-if (resetMessage) {
-    sessionStorage.removeItem('popping-reset-message');
-    window.setTimeout(() => showToast(resetMessage, 'success'), 0);
+const flashMessage = sessionStorage.getItem('popping-flash-message');
+if (flashMessage) {
+    sessionStorage.removeItem('popping-flash-message');
+    window.setTimeout(() => showToast(flashMessage, 'success'), 0);
 }
 
 function rosterErrorMessage(data, fallback) {
@@ -264,7 +315,7 @@ window.handleRosterFile = async function(e) {
             UPLOAD_TIMEOUT_MS
         );
         if (res.status === 401) {
-            window.location.href = '/';
+            window.location.href = '/?session=ended';
             return;
         }
         if (res.ok && data.requires_confirmation && data.preview_token) {
@@ -301,7 +352,7 @@ window.confirmRosterUpload = async function() {
             UPLOAD_TIMEOUT_MS
         );
         if (res.status === 401) {
-            window.location.href = '/';
+            window.location.href = '/?session=ended';
             return;
         }
         if (!res.ok || !data.success) {
@@ -338,11 +389,11 @@ let pollSelections = { q1: 0, q2: 0 };
 let savedPollSelections = null;
 let lastRatedPresentationKey = null; // track active presentation to reset the rating UI
 let lastRenderedQuestionKey = null; // track active question to avoid re-rendering same HTML
-let lastRenderedDiscussionKey = null;
 let lastKnownQuestionId = null;    // lets the server omit unchanged question bodies
 let lastKnownQuestionRevision = null;
 let lastKnownStateVersion = null;  // lets the server skip _compute_state when unchanged
 let activePollOpen = false;
+let ratingPollOpenForTimer = false;  // presentation timer shows "time's up" instead of alarm while a rating poll is open
 let ratingSubmissionInProgress = false;
 let ratingDraftDirty = false;
 let _responseRequestId = 0;
@@ -359,18 +410,14 @@ if (dashboard) {
     let _connectionStatusTimer = null;
     let _connectionInterrupted = false;
     let _pollAgainImmediately = false;
+    let _studentDiscQuestionsVersion = null;
 
     function initDashboard() {
-        lastRenderedDiscussionKey = dashboard.dataset.discussionKey || null;
-        const initialDiscussion = document.querySelector('#current-question .initial-question-content');
-        if (initialDiscussion) {
-            initialDiscussion.innerHTML = renderMarkdown(initialDiscussion.textContent);
-            safeTypeset(initialDiscussion);
-            safeHighlight(initialDiscussion);
-        }
         initStarRows();
         updateRatingControlAvailability();
-        updateThumbAvailability(Boolean(lastRenderedDiscussionKey));
+        // Thumb buttons are only rendered during the discussion phase; the
+        // server gates them on the phase, not on posted questions.
+        updateThumbAvailability(dashboard.dataset.phase === 'discussion');
         pollOnce();
     }
 
@@ -425,16 +472,13 @@ if (dashboard) {
             if (lastKnownQuestionRevision) {
                 pollParams.set('known_question_revision', lastKnownQuestionRevision);
             }
-            if (lastRenderedDiscussionKey) {
-                pollParams.set('known_discussion_key', lastRenderedDiscussionKey);
-            }
             const questionQuery = pollParams.toString();
             const { res, data } = await fetchJSONWithTimeout(
                 '/api/poll' + (questionQuery ? `?${questionQuery}` : '')
             );
             if (res.status === 401) {
                 _pollStopped = true;
-                window.location.href = '/';
+                window.location.href = '/?session=ended';
                 return;
             }
             if (!res.ok) throw new Error('poll failed');
@@ -531,7 +575,7 @@ if (dashboard) {
         try {
             const { res, data: teams } = await fetchJSONWithTimeout('/api/teams');
             if (res.status === 401) {
-                window.location.href = '/';
+                window.location.href = '/?session=ended';
                 return;
             }
             if (!res.ok) throw new Error('team load failed');
@@ -624,25 +668,74 @@ if (dashboard) {
         if (status) status.style.display = 'none';
     }
 
-    function updateThumbAvailability(questionAvailable) {
+    function renderStudentDiscussionQuestions(questions) {
+        const container = document.getElementById('student-disc-questions-list');
+        if (!container) return;
+        if (!questions || questions.length === 0) {
+            container.innerHTML = '<p class="hint">Waiting for the instructor to post questions...</p>';
+            return;
+        }
+        container.innerHTML = questions.map((q, i) => {
+            const key = discussionQuestionKey(q);
+            const expanded = key && _discQuestionExpanded.has(key) ? ' expanded' : '';
+            const keyAttr = key ? ` data-question-key="${escapeAttrValue(key)}"` : '';
+            return `
+        <div class="disc-question-card${expanded}"${keyAttr}>
+            <div class="disc-question-header" role="button" tabindex="0" aria-expanded="${expanded ? 'true' : 'false'}" onclick="toggleDiscQuestionCard(this)" onkeydown="discQuestionHeaderKeydown(event)">
+                <span class="disc-question-num">#${discussionQuestionNumber(q, i)}</span>
+                <span class="disc-question-title">${escapeHtmlValue(q.title || 'Untitled')}</span>
+            </div>
+            <div class="disc-question-body">
+                <div class="markdown-content">${renderMarkdown(q.content || '')}</div>
+            </div>
+        </div>
+    `}).join('');
+        safeTypeset(container);
+        safeHighlight(container);
+    }
+
+    async function syncDiscussionQuestions(state) {
+        if (!document.getElementById('student-disc-questions-list')) return;
+        if (state.phase !== 'discussion') {
+            _studentDiscQuestionsVersion = null;
+            return;
+        }
+        const version = Number(state.discussion_questions_version) || 0;
+        if (_studentDiscQuestionsVersion === version) return;
+        const { res, data } = await fetchJSONWithTimeout('/api/discussion_questions');
+        if (res.status === 401) {
+            _pollStopped = true;
+            window.location.href = '/?session=ended';
+            return;
+        }
+        if (!res.ok) throw new Error('discussion questions load failed');
+        _studentDiscQuestionsVersion = version;
+        renderStudentDiscussionQuestions(data.questions || []);
+    }
+
+    function updateThumbAvailability(thumbsAvailable) {
+        // Thumbs are keyed server-side to the whole discussion phase, not to
+        // any single posted question, so availability follows the phase.
         document.querySelectorAll('.thumb-btn').forEach(btn => {
-            btn.dataset.questionAvailable = questionAvailable ? '1' : '0';
-            btn.disabled = !questionAvailable || btn.dataset.saving === '1';
-            if (questionAvailable) {
-                if (btn.title === 'Wait for the instructor to post a question') {
+            btn.dataset.thumbsAvailable = thumbsAvailable ? '1' : '0';
+            btn.disabled = !thumbsAvailable || btn.dataset.saving === '1';
+            if (thumbsAvailable) {
+                if (btn.title === 'Thumbs are only available during the discussion phase') {
                     btn.removeAttribute('title');
                 }
             } else {
-                btn.title = 'Wait for the instructor to post a question';
+                btn.title = 'Thumbs are only available during the discussion phase';
             }
         });
     }
 
     function syncMyResponses(state) {
-        const discussionKey = state.phase === 'discussion' ? state.discussion_question?.key : null;
+        // Thumbs are recorded for the whole discussion phase (keyed by a
+        // constant server-side), independent of any single posted question.
+        const inDiscussion = state.phase === 'discussion';
         const presentationKey = state.phase === 'competition' ? state.poll_question_key : null;
-        const context = discussionKey
-            ? `discussion:${discussionKey}`
+        const context = inDiscussion
+            ? `discussion:${state.discussion_week}`
             : presentationKey
                 ? `competition:${presentationKey}`
                 : state.phase;
@@ -652,7 +745,7 @@ if (dashboard) {
         _responseContext = context;
         const requestId = ++_responseRequestId;
         if (contextChanged) resetResponseControls();
-        if (!discussionKey && !presentationKey) {
+        if (!inDiscussion && !presentationKey) {
             responseNeedsRefresh = false;
             return;
         }
@@ -660,7 +753,7 @@ if (dashboard) {
         fetchJSONWithTimeout('/api/my_responses').then(({ res, data }) => {
             if (res.status === 401) {
                 _pollStopped = true;
-                window.location.href = '/';
+                window.location.href = '/?session=ended';
                 return null;
             }
             if (!res.ok) return null;
@@ -668,8 +761,8 @@ if (dashboard) {
         }).then(data => {
             if (!data || requestId !== _responseRequestId || context !== _responseContext) return;
             responseNeedsRefresh = false;
-            if (discussionKey) {
-                if (data.phase !== 'discussion' || data.discussion_question_key !== discussionKey) return;
+            if (inDiscussion) {
+                if (data.phase !== 'discussion') return;
                 const selected = new Set((data.thumb_recipient_ids || []).map(String));
                 document.querySelectorAll('.teammate-card[data-student-id] .thumb-btn').forEach(btn => {
                     const card = btn.closest('.teammate-card');
@@ -741,24 +834,11 @@ if (dashboard) {
             badge.className = 'phase-badge phase-' + state.phase;
         }
 
-        const qEl = document.getElementById('current-question');
-        const question = state.discussion_question;
-        if (question && question.key) {
-            if (qEl && question.key !== lastRenderedDiscussionKey && !question.content_unchanged) {
-                    qEl.innerHTML = `<h3>${escapeHtmlValue(question.title || 'Discussion question')}</h3>${renderMarkdown(question.content || '')}`;
-                    safeTypeset(qEl);
-                    safeHighlight(qEl);
-            }
-            // Even students who are awaiting team assignment must acknowledge
-            // the body so it is not resent on every discussion poll.
-            lastRenderedDiscussionKey = question.key;
-        } else {
-            if (qEl) {
-                qEl.textContent = 'Waiting for the instructor to post a question...';
-            }
-            lastRenderedDiscussionKey = null;
+        try {
+            await syncDiscussionQuestions(state);
+        } catch (e) {
+            // Keep polling healthy; retry the questions fetch on the next cycle.
         }
-        updateThumbAvailability(Boolean(question?.key));
 
         syncMyResponses(state);
 
@@ -785,8 +865,8 @@ if (dashboard) {
             const canRate = !!(hasActivePresentation && MY_TEAM_ID && !amPresenting &&
                 state.poll_active && state.poll_question_key);
             activePollOpen = canRate;
+            ratingPollOpenForTimer = !!(hasActivePresentation && state.poll_active);
             updateRatingControlAvailability();
-            if (teamGradeSec) teamGradeSec.style.display = canRate ? 'block' : 'none';
 
             // Update rating prompt with the presenting team's name
             const ratingPrompt = document.getElementById('rating-prompt');
@@ -828,6 +908,20 @@ if (dashboard) {
                 // Clear submitted-rating status
                 const rStatus = document.getElementById('rating-status');
                 if (rStatus) rStatus.style.display = 'none';
+            }
+
+            // An unsubmitted draft survives the rating window closing: keep
+            // the section visible with the inputs disabled (activePollOpen is
+            // false, so updateRatingControlAvailability already disabled them)
+            // and explain instead of letting the UI vanish mid-tap.
+            const draftLostWithWindow = !canRate && ratingDraftDirty && !!lastRatedPresentationKey;
+            if (teamGradeSec) {
+                teamGradeSec.style.display = (canRate || draftLostWithWindow) ? 'block' : 'none';
+            }
+            if (draftLostWithWindow) {
+                showRatingWindowClosed();
+            } else {
+                hideRatingWindowClosed();
             }
 
             if (show) {
@@ -947,8 +1041,7 @@ if (dashboard) {
         try {
             const data = await postJSON('/api/grade_peer', {
                 recipient_id: recipientId,
-                selected,
-                question_key: lastRenderedDiscussionKey || ''
+                selected
             });
             return data && data.success;
         } catch (e) {
@@ -1111,7 +1204,10 @@ if (dashboard) {
         const cards = [...table.querySelectorAll('.teammate-card')].filter(c => c.id !== 'card-you');
         const youCard = document.getElementById('card-you');
         const positions = {};
-        if (cards.length <= 6) {
+        // On narrow tables the ellipse spread squeezes cards together
+        // horizontally, so fall back to the row layout even for few cards.
+        const useRowLayout = cards.length > 6 || table.clientWidth < 450;
+        if (!useRowLayout) {
             const cx = 50, cy = 55, rx = 42, ry = 32;
             cards.forEach((card, i) => {
                 const angle = Math.PI -
@@ -1148,9 +1244,9 @@ if (dashboard) {
         // You at bottom center
         if (youCard) {
             youCard.style.left = '50%';
-            youCard.style.top = cards.length > 6 ? '90%' : '85%';
+            youCard.style.top = useRowLayout ? '90%' : '85%';
             youCard.style.transform = 'translate(-50%, -50%)';
-            positions['you'] = { left: 50, top: cards.length > 6 ? 90 : 85 };
+            positions['you'] = { left: 50, top: useRowLayout ? 90 : 85 };
         }
         saveCardPositions(positions);
     };
@@ -1176,7 +1272,7 @@ if (dashboard) {
         ++_responseRequestId;
         responseNeedsRefresh = true;
         delete btn.dataset.saving;
-        btn.disabled = btn.dataset.questionAvailable !== '1';
+        btn.disabled = btn.dataset.thumbsAvailable !== '1';
         if (!ok) {
             btn.classList.toggle('active-green', wasSelected);
             btn.setAttribute('aria-pressed', wasSelected ? 'true' : 'false');
@@ -1225,7 +1321,7 @@ window.randomAssign = async function(btn) {
             } else {
                 showToast(`Assigned ${data.assigned} student(s) to teams.`, 'success');
             }
-            window.setTimeout(() => window.location.reload(), 250);
+            refreshRosterInPlace();
         } else {
             showInstructorMutationError(data, 'Assignment failed');
         }
@@ -1253,6 +1349,28 @@ function showInstructorMutationError(data, fallback) {
     if (data?._status === 409 &&
             /stale|changed|another page|reload|no active presentation/i.test(data.error || '')) {
         window.setTimeout(() => window.location.reload(), 500);
+    }
+}
+
+// Setup-phase roster mutations (team assign, add/remove student,
+// auto-assign, clear-all) bump the server roster_version, and the
+// instructor poll loop already re-fetches and re-renders the roster grid
+// on that version change — so a full-page reload is unnecessary. Kick the
+// poll so the grid (and the roster_version sent with mutation guards)
+// catches up immediately, and refresh the student table explicitly since
+// the poll only re-renders it every 10s. Reload stays as the fallback when
+// the roster grid isn't on the page (these endpoints are setup-only, so
+// this should not happen — correctness beats smoothness).
+function refreshRosterInPlace() {
+    if (!document.querySelector('.roster-grid')) {
+        window.location.reload();
+        return;
+    }
+    if (typeof window.instructorPollOnce === 'function') {
+        window.instructorPollOnce();
+    }
+    if (document.getElementById('student-tbody')) {
+        loadStudentTable();
     }
 }
 
@@ -1311,8 +1429,6 @@ if (instructor) {
                 instructor.dataset.pollQuestionKey,
                 state.poll_question_key
             ) ||
-            normalized(instructor.dataset.activeTeamId) !== normalized(state.active_team?.id) ||
-            normalized(instructor.dataset.activeQuestionId) !== normalized(state.active_question?.id) ||
             differsWhenPresent(
                 'discussion_week',
                 instructor.dataset.discussionWeek,
@@ -1325,6 +1441,61 @@ if (instructor) {
             ) ||
             differsWhenPresent('max_teams', instructor.dataset.maxTeams, state.max_teams) ||
             differsWhenPresent('max_members', instructor.dataset.maxMembers, state.max_members);
+    }
+
+    // Active team/question changes are NOT structural: both competition
+    // blocks render server-side, so reconcilePresentationBlocks swaps them
+    // in place instead of reloading.
+    function instructorPresentationChanged(state) {
+        const normalized = value => value == null ? '' : String(value);
+        return normalized(instructor.dataset.activeTeamId) !== normalized(state.active_team?.id) ||
+            normalized(instructor.dataset.activeQuestionId) !== normalized(state.active_question?.id);
+    }
+
+    // Swap the competition card between the idle block (team/question
+    // selects) and the active block (timer/poll controls), and seed the
+    // fields the rest of this poll cycle then repopulates. Returns false
+    // when the expected structure is missing so the caller can reload.
+    function reconcilePresentationBlocks(state) {
+        const activeBlock = document.getElementById('presentation-active');
+        const idleBlock = document.getElementById('presentation-idle');
+        if (!activeBlock || !idleBlock) return false;
+        const isActive = Boolean(state.active_team && state.active_question);
+        activeBlock.style.display = isActive ? '' : 'none';
+        idleBlock.style.display = isActive ? 'none' : '';
+        instructor.dataset.activeTeamId = isActive ? String(state.active_team.id) : '';
+        instructor.dataset.activeQuestionId = isActive ? String(state.active_question.id) : '';
+        if (isActive) {
+            const teamName = document.getElementById('active-team-name');
+            if (teamName) teamName.textContent = state.active_team.name || '';
+            const qText = document.getElementById('active-question-text');
+            if (qText) qText.dataset.qnum = state.active_question.id;
+            const pollCount = document.getElementById('poll-count');
+            if (pollCount) pollCount.textContent = 'Loading rating activity...';
+            lastRenderedQuestionKey = null;
+        } else {
+            stopCountdownTimer();
+            stopPollGlide();
+            setTimerExpired(false);
+            markPresentedCompQuestionOptions(state.presentation_history);
+        }
+        return true;
+    }
+
+    // Mirror the server-rendered "— previously presented" option suffix
+    // once a presentation moves into the history.
+    function markPresentedCompQuestionOptions(history) {
+        const select = document.getElementById('comp-question');
+        if (!select || !Array.isArray(history)) return;
+        const presented = new Set(
+            history.map(item => String(item?.question_id ?? ''))
+        );
+        select.querySelectorAll('option[value]').forEach(option => {
+            if (!option.value || !presented.has(option.value)) return;
+            if (!option.textContent.endsWith(' — previously presented')) {
+                option.textContent += ' — previously presented';
+            }
+        });
     }
 
     function updateCapacityStatus(state) {
@@ -1373,7 +1544,7 @@ if (instructor) {
             );
             if (res.status === 401) {
                 _instrPollStopped = true;
-                window.location.href = '/';
+                window.location.href = '/?session=ended';
                 return;
             }
             if (!res.ok) throw new Error('poll failed');
@@ -1389,15 +1560,30 @@ if (instructor) {
                 return;
             }
 
-            if (document.getElementById('discussion-post-status')) {
-                updatePostedDiscussionQuestion(state.discussion_question || null);
-                const participation = document.getElementById('thumb-participation');
-                if (participation) {
-                    const count = Number(state.thumb_participant_count) || 0;
-                    const eligible = Number(state.thumb_eligible_count) || 0;
-                    const online = Number(state.thumb_online_eligible_count) || 0;
-                    participation.textContent = `Recorded participants: ${count}. Eligible now: ${eligible}; online now: ${online}.`;
+            // Presentation start/next/cancel swap the two competition
+            // blocks in place; reload only if the structure is missing.
+            if (state && instructor.dataset.phase === 'competition' &&
+                    instructorPresentationChanged(state) &&
+                    !reconcilePresentationBlocks(state)) {
+                _instrPollStopped = true;
+                window.location.reload();
+                return;
+            }
+
+            if (document.getElementById('disc-questions-list') &&
+                    (Number(state.discussion_questions_version) || 0) !== renderedDiscQuestionsVersion) {
+                try {
+                    await refreshDiscussionQuestions();
+                } catch (e) {
+                    // Retry on the next poll without blocking other updates.
                 }
+            }
+            const participation = document.getElementById('thumb-participation');
+            if (participation) {
+                const count = Number(state.thumb_participant_count) || 0;
+                const eligible = Number(state.thumb_eligible_count) || 0;
+                const online = Number(state.thumb_online_eligible_count) || 0;
+                participation.textContent = `Recorded participants: ${count}. Eligible now: ${eligible}; online now: ${online}.`;
             }
 
             updateCapacityStatus(state);
@@ -1426,7 +1612,11 @@ if (instructor) {
                 }
             }
 
-            if (document.getElementById('student-tbody') && Date.now() - _lastStudentTableRefresh >= 10000) {
+            // Skip the tbody re-render while a team-picker dropdown is open so
+            // the picker isn't orphaned mid-click; retry on the next poll.
+            if (document.getElementById('student-tbody') &&
+                    !document.querySelector('.team-picker') &&
+                    Date.now() - _lastStudentTableRefresh >= 10000) {
                 _lastStudentTableRefresh = Date.now();
                 loadStudentTable();
             }
@@ -1489,6 +1679,7 @@ if (instructor) {
                 const pauseButton = document.getElementById('btn-pause');
                 const resumeButton = document.getElementById('btn-resume');
                 const remaining = Number(state.presentation_remaining);
+                ratingPollOpenForTimer = !!state.poll_active;
                 if (state.presentation_started_at && remaining > 0) {
                     startCountdownTimer(remaining);
                     if (pauseButton) pauseButton.style.display = '';
@@ -1522,6 +1713,17 @@ if (instructor) {
             if (completed && state.completed_presentation_count != null) {
                 const count = Number(state.completed_presentation_count) || 0;
                 completed.textContent = `${count} completed`;
+            }
+
+            // History list: the "N completed" counter above updates live, so
+            // re-render the server-rendered list when the history changes to
+            // keep the two in agreement.
+            if (document.getElementById('history-list') && Array.isArray(state.presentation_history)) {
+                const historySignature = JSON.stringify(state.presentation_history);
+                if (instructor.dataset.presentationHistory !== historySignature) {
+                    instructor.dataset.presentationHistory = historySignature;
+                    renderHistory();
+                }
             }
 
             if (data.poll_interval) interval = data.poll_interval;
@@ -1757,7 +1959,10 @@ window.setPhase = async function(phase) {
     _instructorActionInFlight = true;
     try {
         const currentPhase = instructor?.dataset?.phase || '';
-        const leavingActivePresentation = phase !== 'competition' && document.getElementById('timer-box');
+        // timer-box renders even while idle, so key off the tracked active
+        // team instead of the element's presence.
+        const leavingActivePresentation = phase !== 'competition' &&
+            currentPhase === 'competition' && instructor?.dataset?.activeTeamId;
         let confirmEndSession = false;
         if (phase === 'ended' && currentPhase !== 'ended') {
             const message = leavingActivePresentation
@@ -1788,10 +1993,34 @@ window.setPhase = async function(phase) {
 let studentSort = 'student_id';
 let studentOrder = 'asc';
 let studentPage = 1;
+let studentPerPage = parseInt(localStorage.getItem('popping-student-per-page') || '10', 10);
+if (![10, 25, 50, 100].includes(studentPerPage)) studentPerPage = 10;
 let teamFilterVal = '';
 let _studentTableLoading = false;
 let _studentTableLoadFailed = false;
 let _studentTableRetryTimer = null;
+
+window.setStudentPerPage = function(value) {
+    const size = parseInt(value, 10);
+    if (![10, 25, 50, 100].includes(size)) return;
+    studentPerPage = size;
+    localStorage.setItem('popping-student-per-page', String(size));
+    studentPage = 1;
+    loadStudentTable();
+};
+
+// Page-size selector next to the pagination controls; the choice persists
+// across reloads via localStorage.
+function initStudentPageSizeSelector() {
+    const pag = document.getElementById('student-pagination');
+    if (!pag || document.getElementById('student-per-page')) return;
+    const wrapper = document.createElement('span');
+    wrapper.className = 'pag-info';
+    wrapper.innerHTML = `Rows per page: <select id="student-per-page" onchange="setStudentPerPage(this.value)">
+        ${[10, 25, 50, 100].map(n => `<option value="${n}"${n === studentPerPage ? ' selected' : ''}>${n}</option>`).join('')}
+    </select>`;
+    pag.parentElement.insertBefore(wrapper, pag);
+}
 
 window.toggleTeamFilter = function(e) {
     e.stopPropagation();
@@ -1831,7 +2060,7 @@ window.loadStudentTable = async function() {
     _studentTableLoading = true;
     const search = document.getElementById('student-search')?.value || '';
     const params = new URLSearchParams({
-        page: studentPage, per_page: 10, sort: studentSort, order: studentOrder, search, team: teamFilterVal
+        page: studentPage, per_page: studentPerPage, sort: studentSort, order: studentOrder, search, team: teamFilterVal
     });
     let data;
     try {
@@ -1839,10 +2068,14 @@ window.loadStudentTable = async function() {
             '/api/students?' + params
         );
         if (res.status === 401) {
-            window.location.href = '/';
+            window.location.href = '/?session=ended';
             return;
         }
-        if (!res.ok) throw new Error('student load failed');
+        if (!res.ok) {
+            const loadError = new Error('student load failed');
+            loadError.serverMessage = (studentData && studentData.error) || null;
+            throw loadError;
+        }
         data = studentData;
     } catch (error) {
         const tbody = document.getElementById('student-tbody');
@@ -1850,7 +2083,11 @@ window.loadStudentTable = async function() {
             tbody.innerHTML = '<tr><td colspan="6" class="empty">Could not load students. Retrying automatically.</td></tr>';
         }
         if (!_studentTableLoadFailed) {
-            showToast('Could not refresh the student list. Retrying automatically.', 'error');
+            showToast(
+                (error && error.serverMessage) ||
+                'Could not refresh the student list. Retrying automatically.',
+                'error'
+            );
         }
         _studentTableLoadFailed = true;
         if (_studentTableRetryTimer === null) {
@@ -1935,6 +2172,7 @@ window.goToStudentPage = function(p) {
 
 // Load on page load if table exists
 if (document.getElementById('student-tbody')) {
+    initStudentPageSizeSelector();
     loadStudentTable();
 }
 
@@ -1986,7 +2224,8 @@ window.pickTeam = async function(studentId, teamId) {
             team_id: teamId
         }));
         if (data && data.success) {
-            window.location.reload();
+            showToast('Team assignment updated', 'success');
+            refreshRosterInPlace();
         } else {
             showInstructorMutationError(data, 'Failed to assign student');
         }
@@ -2009,7 +2248,17 @@ window.addStudent = async function(btn) {
         }));
         if (data.success) {
             showToast(data.updated ? 'Student info updated' : 'Student added', 'success');
-            window.setTimeout(() => window.location.reload(), 250);
+            document.getElementById('new-student-id').value = '';
+            document.getElementById('new-name').value = '';
+            document.getElementById('new-pin').value = '';
+            if (!data.updated) {
+                // New or reactivated student: keep the capacity summary's
+                // total (read from this dataset key) correct until the next
+                // full page load.
+                instructor.dataset.studentCount =
+                    String((Number(instructor.dataset.studentCount) || 0) + 1);
+            }
+            refreshRosterInPlace();
         } else {
             showInstructorMutationError(data, 'Failed to add student');
         }
@@ -2020,10 +2269,8 @@ window.addStudent = async function(btn) {
 
 /* ===== DISCUSSION QUESTIONS (weekly .md files) ===== */
 
-let discussionQuestionsByKey = new Map();
 let discussionCurrentWeek = null;
-let currentDiscussionInstanceKey = '';
-let discussionPostPending = false;
+let renderedDiscQuestionsVersion = 0;
 
 // Populate setup week selector and discussion loader
 async function initWeekSelector() {
@@ -2033,20 +2280,30 @@ async function initWeekSelector() {
             '/api/discussion_questions'
         );
         if (res.status === 401) {
-            window.location.href = '/';
+            window.location.href = '/?session=ended';
             return;
         }
-        if (!res.ok) throw new Error('question load failed');
+        if (!res.ok) {
+            const loadError = new Error('question load failed');
+            loadError.serverMessage = (questionData && questionData.error) || null;
+            throw loadError;
+        }
         data = questionData;
         discussionCurrentWeek = Number(data.current_week) || null;
     } catch (error) {
+        const serverMessage = error && error.serverMessage;
         const setupSel = document.getElementById('setup-week-select');
         if (setupSel) {
             setupSel.innerHTML = '<option value="" selected disabled>Could not load question weeks</option>';
             setupSel.disabled = true;
         }
         const container = document.getElementById('disc-questions-list');
-        if (container) container.innerHTML = '<p class="empty">Could not load discussion questions. Please refresh.</p>';
+        if (container) {
+            container.innerHTML = `<p class="empty">${escapeHtmlValue(
+                serverMessage || 'Could not load discussion questions. Please refresh.'
+            )}</p>`;
+        }
+        if (serverMessage) showToast(serverMessage, 'error');
         return;
     }
 
@@ -2078,12 +2335,93 @@ async function initWeekSelector() {
         }
     }
 
+    // Preview affordance: let instructors inspect a week's questions before
+    // committing to the change via setDiscussionWeek().
+    if (setupSel && weeks.length > 0 && !document.getElementById('btn-preview-week')) {
+        const previewBtn = document.createElement('button');
+        previewBtn.type = 'button';
+        previewBtn.id = 'btn-preview-week';
+        previewBtn.className = 'btn btn-sm btn-secondary';
+        previewBtn.textContent = 'Preview';
+        previewBtn.onclick = previewDiscussionWeek;
+        setupSel.insertAdjacentElement('afterend', previewBtn);
+    }
+
     // Discussion page: auto-load questions for current week
     const container = document.getElementById('disc-questions-list');
     if (container) {
         renderDiscussionQuestions(data);
     }
 }
+
+/* ===== WEEK PREVIEW MODAL ===== */
+// Shows a week's questions (fetched with ?week=N) without committing; the
+// explicit "Use this week" action runs the normal setDiscussionWeek flow.
+function closeWeekPreviewModal() {
+    document.getElementById('week-preview-overlay')?.remove();
+}
+window.closeWeekPreviewModal = closeWeekPreviewModal;
+
+window.usePreviewedWeek = function(week) {
+    const select = document.getElementById('setup-week-select');
+    if (select) select.value = String(week);
+    closeWeekPreviewModal();
+    setDiscussionWeek();
+};
+
+function showWeekPreviewModal(week, questions) {
+    closeWeekPreviewModal();
+    const overlay = document.createElement('div');
+    overlay.id = 'week-preview-overlay';
+    overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.55);display:flex;align-items:center;justify-content:center;z-index:1000;padding:16px;';
+    const panel = document.createElement('div');
+    panel.className = 'card';
+    panel.style.cssText = 'max-width:720px;width:100%;max-height:80vh;overflow-y:auto;margin:0;';
+    const body = questions.length
+        ? questions.map((q, i) => `
+        <div class="disc-question-card">
+            <div class="disc-question-header" role="button" tabindex="0" aria-expanded="false" onclick="toggleDiscQuestionCard(this)" onkeydown="discQuestionHeaderKeydown(event)">
+                <span class="disc-question-num">#${discussionQuestionNumber(q, i)}</span>
+                <span class="disc-question-title">${escapeHtmlValue(q.title || 'Untitled')}</span>
+            </div>
+            <div class="disc-question-body">
+                <div class="markdown-content">${renderMarkdown(q.content || '')}</div>
+            </div>
+        </div>`).join('')
+        : '<p class="empty">No questions found for this week.</p>';
+    panel.innerHTML = `
+        <h2>Week ${week} questions preview</h2>
+        ${body}
+        <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:12px;">
+            <button type="button" class="btn btn-secondary" onclick="closeWeekPreviewModal()">Cancel</button>
+            <button type="button" class="btn btn-primary" onclick="usePreviewedWeek(${week})">Use this week</button>
+        </div>`;
+    overlay.appendChild(panel);
+    overlay.addEventListener('click', (e) => {
+        if (e.target === overlay) closeWeekPreviewModal();
+    });
+    document.body.appendChild(overlay);
+    safeTypeset(panel);
+    safeHighlight(panel);
+}
+
+window.previewDiscussionWeek = async function() {
+    const select = document.getElementById('setup-week-select');
+    const week = select?.value;
+    if (!week) { showToast('Select a week to preview', 'warning'); return; }
+    const { res, data } = await fetchJSONWithTimeout(
+        '/api/discussion_questions?week=' + encodeURIComponent(week)
+    );
+    if (res.status === 401) {
+        window.location.href = '/?session=ended';
+        return;
+    }
+    if (!res.ok) {
+        showToast((data && data.error) || 'Could not load the week preview', 'error');
+        return;
+    }
+    showWeekPreviewModal(parseInt(week, 10), data.questions || []);
+};
 
 window.setDiscussionWeek = async function() {
     const select = document.getElementById('setup-week-select');
@@ -2107,34 +2445,6 @@ window.setDiscussionWeek = async function() {
     }
 };
 
-function setDiscussionPostPending(pending) {
-    discussionPostPending = pending;
-    document.querySelectorAll('.post-question-btn').forEach(button => {
-        button.disabled = pending || button.closest('.disc-question-card')
-            ?.classList.contains('is-posted');
-    });
-    const unpostButton = document.getElementById('btn-unpost-question');
-    if (unpostButton) unpostButton.disabled = pending;
-}
-
-window.postActiveQuestion = async function(question) {
-    if (!question?.key || discussionPostPending) return;
-    setDiscussionPostPending(true);
-    const data = await postJSON('/api/set_question', instructorStatePayload({
-        key: question.key,
-        title: question.title || '',
-        content: question.content || '',
-        expected_discussion_key: currentDiscussionInstanceKey
-    }));
-    if (data && data.success) {
-        updatePostedDiscussionQuestion(data.discussion_question || question);
-        showToast('Question posted: ' + question.title, 'success');
-    } else {
-        showInstructorMutationError(data, 'Failed to post question');
-    }
-    setDiscussionPostPending(false);
-};
-
 // Load on page load
 if (document.getElementById('setup-week-select') || document.getElementById('disc-questions-list')) {
     initWeekSelector();
@@ -2155,7 +2465,14 @@ window.startPresentation = async function() {
             time_cap: timeCap
         });
         if (data.success) {
-            window.location.reload();
+            if (data.notice) showToast(data.notice, 'warning');
+            // The poll swaps in the active-presentation block; reload only
+            // when no poll loop is running to reconcile the card.
+            if (typeof window.instructorPollOnce === 'function') {
+                window.instructorPollOnce();
+            } else {
+                window.location.reload();
+            }
         } else {
             showInstructorMutationError(data, 'Failed to start presentation');
         }
@@ -2217,7 +2534,11 @@ window.nextPresentation = async function() {
     try {
         const data = await postJSON('/api/next_presentation', instructorStatePayload());
         if (data.success) {
-            window.location.reload();
+            if (typeof window.instructorPollOnce === 'function') {
+                window.instructorPollOnce();
+            } else {
+                window.location.reload();
+            }
         } else {
             showInstructorMutationError(data, 'Failed to finish presentation');
         }
@@ -2240,7 +2561,11 @@ window.cancelPresentation = async function() {
             }));
         }
         if (data.success) {
-            window.location.reload();
+            if (typeof window.instructorPollOnce === 'function') {
+                window.instructorPollOnce();
+            } else {
+                window.location.reload();
+            }
         } else {
             showInstructorMutationError(data, 'Failed to cancel presentation');
         }
@@ -2469,10 +2794,26 @@ function showCurrentRating(values) {
 
 function showRatingDraftStatus() {
     const status = document.getElementById('rating-status');
-    if (!status) return;
+    if (!status || status.dataset.windowClosed === '1') return;
     status.textContent = 'Changes not submitted.';
     status.style.color = 'var(--warning-text)';
     status.style.display = 'block';
+}
+
+function showRatingWindowClosed() {
+    const status = document.getElementById('rating-status');
+    if (!status) return;
+    status.textContent = 'Rating window closed — your rating was not saved.';
+    status.style.color = 'var(--error-text)';
+    status.style.display = 'block';
+    status.dataset.windowClosed = '1';
+}
+
+function hideRatingWindowClosed() {
+    const status = document.getElementById('rating-status');
+    if (!status || status.dataset.windowClosed !== '1') return;
+    delete status.dataset.windowClosed;
+    status.style.display = 'none';
 }
 
 function showRatingNotSaved() {
@@ -2537,7 +2878,8 @@ window.unassignAll = async function(btn) {
     const data = await postJSON('/api/unassign_all', instructorStatePayload());
     if (data.success) {
         showToast('All team assignments cleared', 'warning');
-        window.setTimeout(() => window.location.reload(), 250);
+        if (btn) btn.disabled = false;
+        refreshRosterInPlace();
     } else {
         if (btn) btn.disabled = false;
         showInstructorMutationError(data, 'Failed to clear team assignments');
@@ -2547,6 +2889,8 @@ window.unassignAll = async function(btn) {
 // ===== APPENDIX QUESTIONS =====
 
 let appendixMutationInProgress = false;
+let editingAppendixId = null;
+const appendixQuestionsById = new Map();
 
 function displayedAppendixWeek() {
     const week = Number(
@@ -2575,47 +2919,187 @@ function endAppendixMutation(button) {
     }
 }
 
+// Add or update one appendix option in the server-rendered competition
+// question select. New questions always receive the highest A-label, and
+// appendix options sort after the bank questions, so appending matches the
+// server-rendered order. Returns false when the response cannot be
+// reconciled with the select, so the caller can fall back to a reload.
+function upsertCompQuestionOption(data) {
+    const select = document.getElementById('comp-question');
+    const questionId = Number(data?.question_id);
+    if (!select || !questionId) return false;
+    const title = String(data?.title || data?.label || data?.appendix_id || '');
+    const truncated = title.length > 60 ? `${title.slice(0, 60)}...` : title;
+    const text = `Appendix — ${truncated}`;
+    const existing = select.querySelector(`option[value="${questionId}"]`);
+    if (existing) {
+        const presented = existing.textContent.endsWith(' — previously presented');
+        existing.textContent = presented ? `${text} — previously presented` : text;
+        return true;
+    }
+    const placeholder = select.querySelector('option[value=""][disabled]');
+    if (placeholder) placeholder.remove();
+    const option = document.createElement('option');
+    option.value = String(questionId);
+    option.textContent = text;
+    select.appendChild(option);
+    return true;
+}
+
 window.addAppendixQuestion = async function(button) {
     const title = document.getElementById('appendix-title')?.value.trim();
     const content = document.getElementById('appendix-content')?.value.trim();
     if (!title || !content) { showToast('Title and content required', 'warning'); return; }
     const week = displayedAppendixWeek();
     if (!week) { showToast('Could not determine the displayed week', 'error'); return; }
-    if (!beginAppendixMutation(button, 'Adding...')) return;
+    const editingId = editingAppendixId;
+    if (!beginAppendixMutation(button, editingId ? 'Saving...' : 'Adding...')) return;
     let keepPending = false;
     try {
-        const data = await postJSON('/api/questions', instructorStatePayload({
-            title,
-            content,
-            week
-        }));
+        const data = await postJSON(
+            editingId ? '/api/edit_appendix_question' : '/api/questions',
+            instructorStatePayload(editingId
+                ? { appendix_id: editingId, title, content, week }
+                : { title, content, week })
+        );
         if (data && data.success) {
             document.getElementById('appendix-title').value = '';
             document.getElementById('appendix-content').value = '';
-            showToast(`${data.label || 'Appendix question'} added`, 'success');
-            if (document.getElementById('competition-appendix-form')) {
-                keepPending = true;
-                window.setTimeout(() => window.location.reload(), 250);
+            showToast(editingId
+                ? `${data.appendix_id || editingId} updated`
+                : `${data.label || 'Appendix question'} added`, 'success');
+            resetAppendixFormMode();
+            clearAppendixDraft();
+            if (document.getElementById('comp-question')) {
+                // Competition phase: add/update the presentation question
+                // option in place. Reload stays as the fallback when the
+                // response cannot be reconciled with the select.
+                if (!upsertCompQuestionOption(data)) {
+                    keepPending = true;
+                    window.setTimeout(() => window.location.reload(), 250);
+                }
             } else {
                 await initWeekSelector();
             }
         } else {
-            showInstructorMutationError(data, 'Failed to add question');
+            showInstructorMutationError(
+                data,
+                editingId ? 'Failed to edit question' : 'Failed to add question'
+            );
         }
     } finally {
         if (!keepPending) endAppendixMutation(button);
     }
 };
 
+function resetAppendixFormMode() {
+    editingAppendixId = null;
+    const addButton = document.querySelector('.appendix-add-btn');
+    if (addButton) {
+        delete addButton.dataset.idleLabel;
+        addButton.textContent = 'Add to Appendix';
+    }
+    const cancelButton = document.querySelector('.appendix-cancel-edit-btn');
+    if (cancelButton) cancelButton.style.display = 'none';
+}
+
+window.editAppendixQuestion = function(button) {
+    const appendixId = button?.dataset?.appendixId;
+    const question = appendixId ? appendixQuestionsById.get(appendixId) : null;
+    const titleInput = document.getElementById('appendix-title');
+    const contentInput = document.getElementById('appendix-content');
+    const addButton = document.querySelector('.appendix-add-btn');
+    if (!question || !titleInput || !contentInput || !addButton) return;
+    editingAppendixId = appendixId;
+    titleInput.value = question.title.replace(/^A\d+:\s*/, '');
+    contentInput.value = question.content;
+    addButton.textContent = `Save ${appendixId}`;
+    const cancelButton = document.querySelector('.appendix-cancel-edit-btn');
+    if (cancelButton) cancelButton.style.display = '';
+    titleInput.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    titleInput.focus();
+};
+
+window.cancelAppendixEdit = function() {
+    document.getElementById('appendix-title').value = '';
+    document.getElementById('appendix-content').value = '';
+    resetAppendixFormMode();
+    clearAppendixDraft();
+};
+
+/* ===== APPENDIX DRAFT PRESERVATION =====
+   Structural reloads (phase transitions, another instructor tab mutating
+   state) rebuild the page server-side and would wipe a half-written
+   appendix question. Stash the form on every input — same sessionStorage
+   pattern as 'popping-flash-message' — and restore it after the reload. */
+function appendixDraftStorageKey() {
+    return `popping-appendix-draft:${instructor?.dataset?.slug || ''}`;
+}
+
+function stashAppendixDraft() {
+    const titleInput = document.getElementById('appendix-title');
+    const contentInput = document.getElementById('appendix-content');
+    if (!titleInput || !contentInput) return;
+    const key = appendixDraftStorageKey();
+    try {
+        if (!titleInput.value && !contentInput.value) {
+            sessionStorage.removeItem(key);
+            return;
+        }
+        sessionStorage.setItem(key, JSON.stringify({
+            week: Number(instructor?.dataset?.discussionWeek) || null,
+            title: titleInput.value,
+            content: contentInput.value,
+            editingId: editingAppendixId
+        }));
+    } catch (e) {
+        // sessionStorage unavailable (e.g. some private modes): the draft
+        // simply isn't kept — never break typing over it.
+    }
+}
+
+function clearAppendixDraft() {
+    try {
+        sessionStorage.removeItem(appendixDraftStorageKey());
+    } catch (e) { /* ignore */ }
+}
+
+function restoreAppendixDraft() {
+    const titleInput = document.getElementById('appendix-title');
+    const contentInput = document.getElementById('appendix-content');
+    if (!titleInput || !contentInput || titleInput.value || contentInput.value) return;
+    let draft = null;
+    try {
+        draft = JSON.parse(sessionStorage.getItem(appendixDraftStorageKey()) || 'null');
+    } catch (e) {
+        draft = null;
+    }
+    if (!draft || (!draft.title && !draft.content)) return;
+    // Only restore into the week the draft was written for.
+    const currentWeek = Number(instructor?.dataset?.discussionWeek) || null;
+    if (draft.week && currentWeek && draft.week !== currentWeek) return;
+    titleInput.value = draft.title || '';
+    contentInput.value = draft.content || '';
+    if (draft.editingId) {
+        editingAppendixId = draft.editingId;
+        const addButton = document.querySelector('.appendix-add-btn');
+        if (addButton) addButton.textContent = `Save ${draft.editingId}`;
+        const cancelButton = document.querySelector('.appendix-cancel-edit-btn');
+        if (cancelButton) cancelButton.style.display = '';
+    }
+    showToast('Restored your unsaved appendix draft', 'warning');
+}
+
+['appendix-title', 'appendix-content'].forEach(id => {
+    document.getElementById(id)?.addEventListener('input', stashAppendixDraft);
+});
+restoreAppendixDraft();
+
 window.deleteAppendixQuestion = async function(button) {
     const appendixId = button?.dataset?.appendixId;
     const week = displayedAppendixWeek();
     if (!appendixId || !week || appendixMutationInProgress) return;
-    const isPosted = button.closest('.disc-question-card')?.classList.contains('is-posted');
-    const warning = isPosted
-        ? 'This question is currently posted. Delete it and remove it from student screens?'
-        : 'Delete this appendix question?';
-    if (!confirm(warning)) return;
+    if (!confirm('Delete this appendix question?')) return;
     if (!beginAppendixMutation(button, 'Deleting...')) return;
     try {
         const data = await postJSON(
@@ -2623,7 +3107,7 @@ window.deleteAppendixQuestion = async function(button) {
             instructorStatePayload({ appendix_id: appendixId, week })
         );
         if (data && data.success) {
-            showToast(data.unposted ? 'Question deleted and unposted' : 'Question deleted');
+            showToast('Question deleted');
             await initWeekSelector();
         } else {
             showInstructorMutationError(data, 'Failed to delete question');
@@ -2642,7 +3126,9 @@ window.removeStudent = async function(studentDbId, btn) {
     );
     if (data.success) {
         showToast('Student removed');
-        window.setTimeout(() => window.location.reload(), 250);
+        instructor.dataset.studentCount =
+            String(Math.max(0, (Number(instructor.dataset.studentCount) || 0) - 1));
+        refreshRosterInPlace();
     } else {
         if (btn) btn.disabled = false;
         showInstructorMutationError(data, 'Failed to remove student');
@@ -2663,7 +3149,7 @@ window.resetData = async function() {
     if (data.success) {
         clearSessionTimerStorage();
         sessionStorage.setItem(
-            'popping-reset-message',
+            'popping-flash-message',
             `Reset complete. Backup: ${data.backup || 'created'}. The three most recent reset backups are retained.`
         );
         window.location.reload();
@@ -2720,13 +3206,23 @@ function stopCountdownTimer() {
 }
 
 function setTimerExpired(expired) {
+    // Time up while a rating poll is still open is not an alarm state: show
+    // a calmer "time's up — rating open" style instead of the red pulse.
+    const ratingOpen = Boolean(expired) && ratingPollOpenForTimer;
     document.querySelectorAll('.timer-value').forEach(el => {
-        el.classList.toggle('timer-expired', expired);
+        el.classList.toggle('timer-expired', Boolean(expired) && !ratingOpen);
+        el.classList.toggle('timer-time-up', ratingOpen);
     });
     const timerBox = document.getElementById('timer-box');
-    if (timerBox) timerBox.classList.toggle('timer-expired', expired);
+    if (timerBox) {
+        timerBox.classList.toggle('timer-expired', Boolean(expired) && !ratingOpen);
+        timerBox.classList.toggle('timer-time-up', ratingOpen);
+    }
     const studentTimer = document.getElementById('student-timer');
-    if (studentTimer) studentTimer.classList.toggle('timer-expired', expired);
+    if (studentTimer) {
+        studentTimer.classList.toggle('timer-expired', Boolean(expired) && !ratingOpen);
+        studentTimer.classList.toggle('timer-time-up', ratingOpen);
+    }
 }
 
 function stopTimer() {
@@ -2866,7 +3362,10 @@ function renderHistory() {
     const completedTeams = [...new Set(history.map(h => h.team).filter(Boolean))];
     const completedSet = new Set(completedTeams);
     document.querySelectorAll('#comp-team option[value]').forEach(option => {
-        const baseLabel = option.dataset.baseLabel || option.textContent.trim();
+        // Empty teams render as "Team N (empty)"; strip the suffix so the
+        // stored base label matches history team names.
+        const baseLabel = option.dataset.baseLabel ||
+            option.textContent.trim().replace(/ \(empty\)$/, '');
         option.dataset.baseLabel = baseLabel;
         option.textContent = completedSet.has(baseLabel) ? `${baseLabel} (completed)` : baseLabel;
     });
@@ -2888,32 +3387,45 @@ function renderHistory() {
 function renderDiscussionQuestions(data) {
     const container = document.getElementById('disc-questions-list');
     if (!container) return;
+    renderedDiscQuestionsVersion = Number(data.version) || 0;
+    appendixQuestionsById.clear();
 
     if (!data.questions || data.questions.length === 0) {
-        discussionQuestionsByKey.clear();
         container.innerHTML = '<p class="empty">No questions found. Add <code>week-N-questions.md</code> files in the course folder, then select a week during setup.</p>';
         return;
     }
 
-    discussionQuestionsByKey = new Map();
     container.innerHTML = data.questions.map((q, i) => {
-        const key = q.key || q._key || `week-${data.current_week}-q${i}`;
-        const question = { key, title: q.title || 'Untitled', content: q.content || '' };
-        discussionQuestionsByKey.set(key, question);
+        const key = discussionQuestionKey(q) || `week-${data.current_week}-q${i}`;
         const safeTitle = escapeHtmlValue(q.title || 'Untitled');
+        const expanded = _discQuestionExpanded.has(key) ? ' expanded' : '';
         const appendixId = q.appendix_id || '';
+        if (appendixId) {
+            appendixQuestionsById.set(appendixId, {
+                title: q.title || '',
+                content: q.content || ''
+            });
+        }
+        const editBtn = appendixId
+            ? `<button class="btn btn-sm btn-secondary appendix-edit-btn" data-appendix-id="${escapeAttrValue(appendixId)}" onclick="event.stopPropagation(); editAppendixQuestion(this)">✏️ Edit</button>`
+            : '';
         const deleteBtn = appendixId
             ? `<button class="btn btn-sm btn-danger appendix-delete-btn" data-appendix-id="${escapeAttrValue(appendixId)}" onclick="event.stopPropagation(); deleteAppendixQuestion(this)">🗑 Delete</button>`
             : '';
+        const hiddenBadge = q.hidden
+            ? '<span class="hidden-question-badge">Hidden from students</span>'
+            : '';
+        const toggleBtn = `<button class="btn btn-sm ${q.hidden ? 'btn-primary' : 'btn-secondary'} toggle-question-btn" data-question-key="${escapeAttrValue(key)}" data-hidden="${q.hidden ? 1 : 0}" onclick="event.stopPropagation(); toggleDiscussionQuestion(this)">${q.hidden ? 'Show' : 'Hide'}</button>`;
         const action = `<div class="disc-question-actions">
-               <span class="posted-question-badge" hidden>● Currently Posted</span>
-               <button class="btn btn-sm btn-primary post-question-btn" data-question-key="${escapeAttrValue(key)}" onclick="event.stopPropagation(); postActiveQuestionFromButton(this)">Post to Class</button>
+               ${hiddenBadge}
+               ${toggleBtn}
+               ${editBtn}
                ${deleteBtn}
            </div>`;
         return `
-        <div class="disc-question-card" data-question-key="${escapeAttrValue(key)}">
-            <div class="disc-question-header" onclick="this.parentElement.classList.toggle('expanded')">
-                <span class="disc-question-num">#${i + 1}</span>
+        <div class="disc-question-card${q.hidden ? ' is-hidden' : ''}${expanded}" data-question-key="${escapeAttrValue(key)}">
+            <div class="disc-question-header" role="button" tabindex="0" aria-expanded="${expanded ? 'true' : 'false'}" onclick="toggleDiscQuestionCard(this)" onkeydown="discQuestionHeaderKeydown(event)">
+                <span class="disc-question-num">#${discussionQuestionNumber(q, i)}</span>
                 <span class="disc-question-title">${safeTitle}</span>
                 ${action}
             </div>
@@ -2923,63 +3435,43 @@ function renderDiscussionQuestions(data) {
         </div>
     `}).join('');
 
-    updatePostedDiscussionQuestion(data.discussion_question || data.current_question || null);
-
     safeTypeset(container);
     safeHighlight(container);
 }
 
-window.postActiveQuestionFromButton = function(btn) {
-    postActiveQuestion(discussionQuestionsByKey.get(btn.dataset.questionKey));
-};
-
-window.unpostDiscussionQuestion = async function() {
-    if (discussionPostPending) return;
-    setDiscussionPostPending(true);
-    const data = await postJSON('/api/set_question', instructorStatePayload({
-        key: '',
-        title: '',
-        content: '',
-        expected_discussion_key: currentDiscussionInstanceKey
-    }));
-    if (data.success) {
-        updatePostedDiscussionQuestion(null);
-        showToast('Question removed from student screens');
-    } else {
-        showInstructorMutationError(data, 'Failed to unpost question');
+async function refreshDiscussionQuestions() {
+    const container = document.getElementById('disc-questions-list');
+    if (!container) return;
+    const { res, data } = await fetchJSONWithTimeout('/api/discussion_questions');
+    if (res.status === 401) {
+        window.location.href = '/?session=ended';
+        return;
     }
-    setDiscussionPostPending(false);
-};
-
-function updatePostedDiscussionQuestion(question) {
-    let posted = question;
-    if (typeof question === 'string') {
-        posted = [...discussionQuestionsByKey.values()].find(q => q.title === question) ||
-            (question ? { key: '', title: question, content: '' } : null);
-    }
-    const postedKey = posted?.source_key || posted?.key || '';
-    const postedTitle = posted?.title || '';
-    currentDiscussionInstanceKey = posted?.key || '';
-    const status = document.getElementById('discussion-post-status');
-    const statusText = document.getElementById('posted-discussion-question');
-    if (status) status.classList.toggle('has-posted-question', !!postedTitle);
-    if (statusText) {
-        statusText.textContent = postedTitle
-            ? `Currently posted: ${postedTitle}`
-            : 'No question is currently posted to the class.';
-    }
-    const unpostButton = document.getElementById('btn-unpost-question');
-    if (unpostButton) unpostButton.hidden = !postedTitle;
-
-    document.querySelectorAll('.disc-question-card[data-question-key]').forEach(card => {
-        const isPosted = !!postedKey && card.dataset.questionKey === postedKey;
-        card.classList.toggle('is-posted', isPosted);
-        const badge = card.querySelector('.posted-question-badge');
-        if (badge) badge.hidden = !isPosted;
-        const button = card.querySelector('.post-question-btn');
-        if (button) {
-            button.disabled = isPosted;
-            button.textContent = isPosted ? 'Posted to Class' : 'Post to Class';
-        }
-    });
+    if (!res.ok) throw new Error('question load failed');
+    renderDiscussionQuestions(data);
 }
+
+window.toggleDiscussionQuestion = async function(btn) {
+    const key = btn.dataset.questionKey;
+    const currentlyHidden = btn.dataset.hidden === '1';
+    if (!key) return;
+    btn.disabled = true;
+    try {
+        const data = await postJSON('/api/toggle_discussion_question', instructorStatePayload({
+            question_key: key,
+            visible: currentlyHidden
+        }));
+        if (data && data.success) {
+            showToast(currentlyHidden
+                ? 'Question is visible to students'
+                : 'Question hidden from students', 'success');
+            // No direct refresh here: the toggle bumps
+            // discussion_questions_version and the instructor poll loop
+            // re-renders the list on that version change.
+        } else {
+            showInstructorMutationError(data, 'Failed to update question visibility');
+        }
+    } finally {
+        btn.disabled = false;
+    }
+};
