@@ -1,4 +1,5 @@
 ---
+id: why-ensemble
 title: "Why Ensemble?"
 ---
 
@@ -9,6 +10,7 @@ A single decision tree has high variance: small changes in the training data can
 3. What would happen to a random forest if the individual trees were highly correlated with each other?
 
 ---
+id: tuning-gradient-boosting
 title: "Tuning Gradient Boosting"
 ---
 

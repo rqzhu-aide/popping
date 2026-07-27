@@ -304,6 +304,102 @@ class TestPrivateDemoDatabase:
         finally:
             connection.close()
 
+    def test_reset_cooldown_is_shared_by_the_demo_database(
+            self, private_demo_env):
+        slug, path = _create_private(private_demo_env)
+        args = (
+            str(private_demo_env['data_dir']),
+            str(private_demo_env['classes_dir']),
+            slug,
+        )
+
+        demo_instance.reset_demo_instance(
+            *args, cooldown_seconds=10, now=1000
+        )
+        with pytest.raises(demo_instance.DemoResetCooldown) as exc_info:
+            demo_instance.reset_demo_instance(
+                *args, cooldown_seconds=10, now=1005
+            )
+        assert 4.9 <= exc_info.value.retry_after <= 5.1
+
+        demo_instance.reset_demo_instance(
+            *args, cooldown_seconds=10, now=1010
+        )
+        _assert_seed_shape(path, expected_slug=slug)
+
+    def test_bounded_creation_prunes_an_interrupted_candidate(
+            self, private_demo_env):
+        partial_slug = 'demo_' + 'a' * 32
+        partial_dir = private_demo_env['data_dir'] / partial_slug
+        partial_dir.mkdir()
+        (partial_dir / '.candidate-interrupted.db').write_bytes(b'partial')
+
+        slug, removed = demo_instance.create_bounded_demo_instance(
+            str(private_demo_env['data_dir']),
+            str(private_demo_env['classes_dir']),
+            str(private_demo_env['schema']),
+        )
+
+        assert partial_slug in removed
+        assert not partial_dir.exists()
+        assert demo_instance.is_demo_instance_slug(slug)
+        assert demo_instance.count_demo_instances(
+            str(private_demo_env['data_dir'])
+        ) == 1
+
+    def test_bounded_creation_never_exceeds_four_across_processes(
+            self, private_demo_env):
+        for _index in range(3):
+            _create_private(private_demo_env)
+
+        gate = private_demo_env['data_dir'] / 'start-workers'
+        worker = """
+import sys
+import time
+from pathlib import Path
+
+import demo_instance
+
+gate = Path(sys.argv[4])
+deadline = time.time() + 20
+while not gate.exists():
+    if time.time() >= deadline:
+        raise RuntimeError('worker gate timed out')
+    time.sleep(0.01)
+slug, _removed = demo_instance.create_bounded_demo_instance(
+    sys.argv[1], sys.argv[2], sys.argv[3], lock_timeout=10
+)
+print(slug or 'NONE')
+"""
+        args = [
+            str(private_demo_env['data_dir']),
+            str(private_demo_env['classes_dir']),
+            str(private_demo_env['schema']),
+            str(gate),
+        ]
+        processes = [
+            subprocess.Popen(
+                [sys.executable, '-c', worker, *args],
+                cwd=PROJECT_ROOT,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            for _index in range(3)
+        ]
+        gate.touch()
+        results = []
+        for process in processes:
+            stdout, stderr = process.communicate(timeout=30)
+            assert process.returncode == 0, stderr
+            results.append(stdout.strip())
+
+        assert sum(value.startswith('demo_') for value in results) == 1
+        assert results.count('NONE') == 2
+        assert demo_instance.count_demo_instances(
+            str(private_demo_env['data_dir'])
+        ) == 4
+
     @pytest.mark.parametrize('slug', [
         'demo',
         'demo_bad',

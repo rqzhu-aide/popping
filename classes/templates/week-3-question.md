@@ -1,4 +1,5 @@
 ---
+id: gradient-descent-convergence
 title: "Gradient Descent Convergence"
 author: "Tyrande Whisperwind (twhisp2)"
 ---

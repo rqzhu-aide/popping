@@ -1,4 +1,5 @@
 ---
+id: gradient-descent
 title: "Gradient Descent"
 ---
 
@@ -11,6 +12,7 @@ $$
 What happens if $\alpha$ is too large or too small?
 
 ---
+id: decision-trees
 title: "Decision Trees"
 ---
 
@@ -23,6 +25,7 @@ $$
 Discuss the tradeoffs between tree depth and generalization.
 
 ---
+id: support-vector-machines
 title: "Support Vector Machines"
 ---
 

@@ -467,6 +467,64 @@ def test_transient_course_unavailability_preserves_session_and_recovers(
         assert browser_session["instructor_id"] == instructor_id
 
 
+def test_temporary_database_disappearance_preserves_session_and_recovers(
+        catalog_env, monkeypatch):
+    slug = "temporary_missing_database"
+    _write_config(catalog_env, slug)
+    db_path = _write_database(catalog_env, slug)
+    db = sqlite3.connect(db_path)
+    try:
+        instructor_id = db.execute(
+            "SELECT instructor_id FROM courses WHERE slug = ?", (slug,)
+        ).fetchone()[0]
+    finally:
+        db.close()
+
+    clock = {"now": 100.0}
+    monkeypatch.setattr(
+        app_module.time, "monotonic", lambda: clock["now"]
+    )
+    client = app_module.app.test_client()
+    with client.session_transaction() as browser_session:
+        browser_session["slug"] = slug
+        browser_session["role"] = "instructor"
+        browser_session["instructor_id"] = instructor_id
+
+    assert client.get("/api/poll").status_code == 200
+
+    offline_path = db_path.with_name("popping.db.temporarily-offline")
+    db_path.replace(offline_path)
+    try:
+        # Expire the prior ready result so the missing file is observed.
+        clock["now"] += app_module.COURSE_AVAILABILITY_TTL + 1
+        unavailable = client.get("/api/poll")
+        assert unavailable.status_code == 503
+        assert unavailable.get_json() == {
+            "error": "Course data is temporarily unavailable. Please try again."
+        }
+        assert unavailable.headers["Retry-After"] == "5"
+        with client.session_transaction() as browser_session:
+            assert browser_session["slug"] == slug
+            assert browser_session["role"] == "instructor"
+            assert browser_session["instructor_id"] == instructor_id
+
+        offline_path.replace(db_path)
+
+        # Missing results use the short outage TTL, then recover without
+        # clearing either the browser session or the availability cache.
+        clock["now"] += app_module.COURSE_UNAVAILABLE_TTL - 1
+        assert client.get("/api/poll").status_code == 503
+        clock["now"] += 2
+        assert client.get("/api/poll").status_code == 200
+        with client.session_transaction() as browser_session:
+            assert browser_session["slug"] == slug
+            assert browser_session["role"] == "instructor"
+            assert browser_session["instructor_id"] == instructor_id
+    finally:
+        if offline_path.exists():
+            offline_path.replace(db_path)
+
+
 def test_existing_instructor_session_is_revoked_when_course_is_deactivated(
         catalog_env):
     slug = "deactivated_course"

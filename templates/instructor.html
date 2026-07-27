@@ -5,6 +5,7 @@
 {% block content %}
 <div class="instructor" data-slug="{{ course.slug }}"
      data-course-slug="{{ course.slug }}"
+     data-demo="{{ 1 if session.get('is_demo') else 0 }}"
      data-phase="{{ state.phase }}"
      data-session-key="{{ state.session_key or 0 }}"
      data-roster-version="{{ state.roster_version or 0 }}"
@@ -76,9 +77,13 @@
             </div>
             <div class="week-selector" id="setup-week-selector">
                 <span class="week-label">Discussion week</span>
-                <select id="setup-week-select" onchange="setDiscussionWeek()">
+                <select id="setup-week-select">
                     <option value="">Loading...</option>
                 </select>
+                <button type="button" class="btn btn-sm btn-secondary"
+                        id="btn-preview-week" onclick="previewDiscussionWeek()">Preview</button>
+                <button type="button" class="btn btn-sm btn-primary"
+                        id="btn-apply-week" onclick="setDiscussionWeek()">Apply Week</button>
             </div>
         </div>
             <div class="phase-settings phase-settings-secondary">
@@ -86,7 +91,9 @@
                     {% if teams_locked %}Unlock Teams{% else %}Lock Teams{% endif %}
                 </button>
                 <button class="btn btn-sm btn-secondary" onclick="unassignAll(this)">Clear All Teams</button>
+                {% if not session.get('is_demo') %}
                 <button class="btn btn-sm btn-danger" onclick="resetData()">Reset Course Data</button>
+                {% endif %}
             </div>
         {% endif %}
     </section>
@@ -133,12 +140,14 @@
 
     <section class="card">
         <h2>Student Management</h2>
+        {% if not session.get('is_demo') %}
         <div class="add-student-form">
             <input type="text" id="new-student-id" placeholder="Student ID" required>
             <input type="text" id="new-name" placeholder="Name (optional)">
             <input type="text" id="new-pin" placeholder="PIN (4 digits)" required maxlength="4" pattern="\d{4}">
             <button class="btn btn-primary" onclick="addStudent(this)">Add Student</button>
         </div>
+        {% endif %}
 
         <div class="table-toolbar">
             <input type="text" id="student-search" placeholder="Search by ID..." oninput="debouncedStudentSearch()">
@@ -167,7 +176,9 @@
                         <th>Team</th>
                         <th class="sortable" data-sort="last_active_at" onclick="sortStudents('last_active_at')">Status <span class="sort-arrow"></span></th>
                         <th>Last Login</th>
+                        {% if not session.get('is_demo') %}
                         <th>Action</th>
+                        {% endif %}
                     </tr>
                 </thead>
                 <tbody id="student-tbody">
@@ -334,7 +345,9 @@
         <h2>🏁 Class Ended</h2>
         <p class="hint">The class session has ended. Download the results export for your records.</p>
         <a href="{{ url_for('export_data', slug=course.slug) }}" class="btn btn-primary">⬇ Download Results</a>
+        {% if not session.get('is_demo') %}
         <button class="btn btn-danger" onclick="resetData()">Reset Course Data</button>
+        {% endif %}
     </section>
 
     {% if end_stats %}

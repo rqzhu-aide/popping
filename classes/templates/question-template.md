@@ -4,6 +4,7 @@ Each question in a weekly file follows this format:
 
 ```markdown
 ---
+id: unique-question-id
 title: "Your question title (max 50 characters)"
 ---
 
@@ -25,5 +26,6 @@ np.linalg.inv(X.T @ X) @ X.T @ y
 ```
 
 Fields:
-- `title` — required, max 50 chars, displayed as the question heading
+- `id` - required, unique within the week, and kept unchanged when reordering or editing
+- `title` - required, unique within the week, max 50 chars, and displayed as the question heading
 - content (body) — required, supports Markdown, LaTeX math, and code blocks

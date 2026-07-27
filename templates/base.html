@@ -52,7 +52,8 @@
                     <button class="nav-link nav-dropdown-btn" onclick="toggleToolsDropdown()">Tools ▾</button>
                     <div class="nav-dropdown-menu" id="tools-menu">
                         <a href="{{ url_for('export_data', slug=session.slug) }}" class="nav-dropdown-item">⬇ Download Week Results</a>
-                        <a href="{{ url_for('export_data', slug=session.slug, weeks='all') }}" class="nav-dropdown-item">⬇ Download All Results</a>
+                        <a href="{{ url_for('export_legacy_feedback', slug=session.slug) }}" class="nav-dropdown-item">⬇ Download Legacy Feedback (week unknown)</a>
+                        {% if not session.get('is_demo') %}
                         {% if state is defined and state and state.phase != 'setup' %}
                         <span class="nav-dropdown-item disabled" title="The roster can only be replaced during setup">📋 Upload Student Roster (setup only)</span>
                         {% else %}
@@ -60,6 +61,7 @@
                         {% endif %}
                         <a href="/roster_template.csv" class="nav-dropdown-item">📄 Download Roster Template</a>
                         <input type="file" id="roster-file-input" accept=".csv" style="display:none" onchange="handleRosterFile(event)">
+                        {% endif %}
                     </div>
                 </div>
                 <form method="post" action="{{ url_for('logout') }}" class="nav-logout-form">
@@ -75,17 +77,18 @@
             🎮 <strong>Private Demo</strong>: this sandbox belongs to its private URL.
         </span>
         <form method="post" action="{{ url_for('demo_reset', instance_slug=session.slug) }}"
-              class="demo-banner-reset-form" onsubmit="return confirmDemoReset()">
+              class="demo-banner-reset-form" onsubmit="return confirmDemoReset(this)">
             <button type="submit" class="demo-banner-reset"
                     data-course-slug="{{ session.slug or '' }}">🔄 Reset</button>
         </form>
-        <form method="post" action="{{ url_for('demo_exit') }}" class="demo-banner-exit-form">
+        <form method="post" action="{{ url_for('demo_exit') }}" class="demo-banner-exit-form"
+              onsubmit="return beginPageNavigation(this)">
             <button type="submit" class="demo-banner-exit">Exit Demo →</button>
         </form>
     </div>
     {% endif %}
 
-    {% if session.instructor_id %}
+    {% if session.instructor_id and not session.get('is_demo') %}
     <div class="modal-backdrop" id="roster-preview-dialog" role="dialog" aria-modal="true"
          aria-labelledby="roster-preview-title" hidden>
         <div class="modal-card">

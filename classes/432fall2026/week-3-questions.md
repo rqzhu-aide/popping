@@ -1,16 +1,19 @@
 ---
+id: bagging-vs-boosting
 title: "Ensemble Methods — Bagging vs Boosting"
 ---
 
 Explain the key differences between bagging and boosting. How does each method reduce variance and bias, respectively? When would you choose one over the other?
 
 ---
+id: random-forest-feature-importance
 title: "Random Forest Feature Importance"
 ---
 
 A random forest model reports high feature importance for `X1` and `X2`. Discuss why this does not necessarily mean these features are causally related to the outcome. What are the limitations of permutation-based importance?
 
 ---
+id: ensemble-bias-variance
 title: "Bias-Variance in Ensemble Learning"
 ---
 
@@ -23,6 +26,7 @@ Consider a random forest with $B$ trees. As $B$ increases:
 Justify your answers mathematically.
 
 ---
+id: gradient-boosting-learning-rate
 title: "Gradient Boosting — Learning Rate"
 ---
 
@@ -35,6 +39,7 @@ $$
 What happens when $\eta$ is very small (e.g., 0.001) versus very large (e.g., 1.0)? How does $\eta$ interact with the number of boosting rounds?
 
 ---
+id: xgboost-regularization
 title: "XGBoost Regularization"
 ---
 
@@ -47,6 +52,7 @@ $$
 where $T$ is the number of leaves and $w_j$ are leaf weights. How does $\gamma$ control tree complexity? What is the effect of $\lambda$ on model smoothness?
 
 ---
+id: adaboost-weight-updates
 title: "AdaBoost Weight Updates"
 ---
 
@@ -59,6 +65,7 @@ $$
 Explain why this reweighting strategy focuses the ensemble on "hard" examples. What happens if the data contains outliers?
 
 ---
+id: stacking-vs-blending
 title: "Stacking vs Blending"
 ---
 
@@ -69,6 +76,7 @@ Compare stacking and blending as meta-learning strategies:
 3. Why might stacking be more prone to overfitting than blending?
 
 ---
+id: out-of-bag-error
 title: "Out-of-Bag Error"
 ---
 
@@ -77,6 +85,7 @@ In bagging, each bootstrap sample excludes approximately 37% of observations. Th
 Explain why the OOB error is an unbiased estimate. What are its advantages and limitations compared to $k$-fold cross-validation?
 
 ---
+id: neural-networks-universal-approximation
 title: "Neural Networks as Universal Approximators"
 ---
 
@@ -85,6 +94,7 @@ The universal approximation theorem states that a feedforward network with a sin
 Given this theorem, why do deep learning practitioners prefer deeper networks over wider shallow networks? Discuss computational efficiency, feature hierarchy, and generalization.
 
 ---
+id: deep-learning-overfitting
 title: "Overfitting in Deep Learning"
 ---
 

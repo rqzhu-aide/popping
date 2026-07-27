@@ -83,3 +83,13 @@ def test_dynamic_team_colors_remain_decorative():
     assert ".hljs .hljs-comment" in css
 
     assert "storedTheme === null || storedTheme === 'light'" in base
+
+
+def test_student_timer_can_wrap_on_narrow_screens():
+    css = (PROJECT_ROOT / "static" / "css" / "style.css").read_text(
+        encoding="utf-8"
+    )
+    student_timer = re.search(r"\.student-timer\s*\{(.*?)\}", css, re.DOTALL)
+
+    assert student_timer
+    assert "flex-wrap: wrap" in student_timer.group(1)

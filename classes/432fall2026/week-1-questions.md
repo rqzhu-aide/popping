@@ -1,4 +1,5 @@
 ---
+id: bias-variance-tradeoff
 title: "Bias-Variance Tradeoff"
 ---
 
@@ -11,6 +12,7 @@ $$
 Discuss how this relates to overfitting and underfitting.
 
 ---
+id: cross-validation
 title: "Cross-Validation"
 ---
 
@@ -25,6 +27,7 @@ folds <- sample(rep(1:5, length.out = nrow(data)))
 How do we choose the optimal $k$?
 
 ---
+id: regularization
 title: "Regularization"
 ---
 

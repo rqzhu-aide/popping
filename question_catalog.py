@@ -404,7 +404,14 @@ def validate_discussion_week(course_dir, week_num):
             else:
                 seen_titles[normalized_title] = position
 
-        if "id" in metadata:
+        if "id" not in metadata:
+            issues.append(_issue(
+                "discussion_id_missing",
+                f"Question {position} has no stable id",
+                path,
+                line,
+            ))
+        else:
             question_id = metadata.get("id")
             if (not isinstance(question_id, str) or
                     not DISCUSSION_ID_PATTERN.fullmatch(question_id.strip())):

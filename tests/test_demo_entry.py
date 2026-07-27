@@ -150,6 +150,9 @@ class TestPrivateDemoEntry:
         student_one = app_module.app.test_client()
         student_two = app_module.app.test_client()
         _enter_instructor(instructor, slug)
+        role_page = instructor.get(f'/demo/{slug}')
+        assert b'onsubmit="return confirmDemoReset(this)"' in role_page.data
+
         _enter_student(student_one, slug, 1)
         _enter_student(student_two, slug, 2)
 
@@ -257,6 +260,119 @@ class TestPrivateDemoEntry:
         assert f'/login/{slug}'.encode() not in landing.data
         assert f'/instructor_login/{slug}'.encode() not in landing.data
 
+    def test_demo_roster_is_fixed_in_the_ui_and_all_mutation_routes(
+            self, demo_env):
+        slug, db_path = _start_demo(app_module.app.test_client(), demo_env)
+        instructor = app_module.app.test_client()
+        _enter_instructor(instructor, slug)
+
+        page = instructor.get(f'/instructor/{slug}').get_data(as_text=True)
+        assert 'data-demo="1"' in page
+        assert 'Student Management' in page
+        assert 'Add Student' not in page
+        assert 'Upload Student Roster' not in page
+        assert 'Download Roster Template' not in page
+        assert 'Reset Course Data' not in page
+        assert '<th>Action</th>' not in page
+
+        state = _state(instructor)
+        guard = {
+            'expected_phase': state['phase'],
+            'expected_session_key': state['session_key'],
+            'expected_roster_version': state['roster_version'],
+        }
+        student_db_id = _database_value(
+            db_path,
+            "SELECT id FROM students WHERE student_id = 'demo001'",
+        )
+        assert instructor.post('/api/add_student', json={
+            **guard,
+            'student_id': 'demo003',
+            'name': 'Extra Student',
+            'pin': '1234',
+        }).status_code == 403
+        assert instructor.post('/api/upload_roster').status_code == 403
+        assert instructor.delete(
+            f'/api/remove_student/{student_db_id}', json=guard
+        ).status_code == 403
+        assert instructor.post('/api/reset_data', json={
+            **guard,
+            'confirm_slug': slug,
+        }).status_code == 403
+
+        # The slug itself enforces the rule, even if a session did not enter
+        # through the private demo role picker.
+        with instructor.session_transaction() as session_data:
+            session_data.pop('is_demo', None)
+        assert instructor.post('/api/add_student', json={
+            **guard,
+            'student_id': 'demo003',
+            'name': 'Extra Student',
+            'pin': '1234',
+        }).status_code == 403
+        assert _database_value(
+            db_path, 'SELECT COUNT(*) FROM students WHERE is_active = 1'
+        ) == 2
+        assert _database_value(
+            db_path,
+            """SELECT COUNT(*) FROM students
+               WHERE is_active = 1
+                 AND student_id NOT IN ('demo001', 'demo002')""",
+        ) == 0
+
+    def test_demo_role_buttons_resolve_the_two_seed_ids_exactly(
+            self, demo_env):
+        slug, db_path = _start_demo(app_module.app.test_client(), demo_env)
+        connection = sqlite3.connect(db_path)
+        try:
+            course_id = connection.execute(
+                'SELECT id FROM courses LIMIT 1'
+            ).fetchone()[0]
+            connection.execute(
+                "UPDATE students SET is_active = 0 WHERE student_id = 'demo001'"
+            )
+            connection.execute(
+                '''INSERT INTO students
+                   (course_id, student_id, name, pin, is_active)
+                   VALUES (?, 'intruder', 'Not a demo role', 'demo', 1)''',
+                [course_id],
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        student_one = app_module.app.test_client()
+        unavailable = student_one.post(f'/demo/{slug}/student/1')
+        assert unavailable.status_code == 302
+        assert unavailable.headers['Location'].endswith(f'/demo/{slug}')
+
+        student_two = app_module.app.test_client()
+        _enter_student(student_two, slug, 2)
+        with student_two.session_transaction() as session_data:
+            assert session_data['student_id'] == 'demo002'
+
+
+    def test_missing_demo_database_ends_session(self, demo_env):
+        client = app_module.app.test_client()
+        slug, db_path = _start_demo(client, demo_env)
+        _enter_instructor(client, slug)
+        assert client.get('/api/poll').status_code == 200
+
+        offline_path = db_path.with_name('popping.db.expired')
+        db_path.replace(offline_path)
+        try:
+            app_module._clear_course_availability_cache(slug)
+            response = client.get('/api/poll')
+
+            assert response.status_code == 401
+            assert response.get_json() == {'error': 'Not logged in'}
+            with client.session_transaction() as session_data:
+                assert not session_data
+        finally:
+            if offline_path.exists():
+                offline_path.replace(db_path)
+            app_module._clear_course_availability_cache(slug)
+
 
 class TestDemoReset:
     def test_reset_is_authorized_isolated_and_has_no_subprocess(
@@ -302,6 +418,23 @@ class TestDemoReset:
         response = student.post(f'/demo/{slug}/reset')
         assert response.status_code == 429
         assert int(response.headers['Retry-After']) >= 1
+
+    def test_reset_cooldown_is_shared_across_browser_sessions(self, demo_env):
+        slug, _db_path = _start_demo(app_module.app.test_client(), demo_env)
+        first = app_module.app.test_client()
+        second = app_module.app.test_client()
+        _enter_student(first, slug, 1)
+        _enter_student(second, slug, 2)
+
+        assert first.post(f'/demo/{slug}/reset').status_code == 302
+        response = second.post(f'/demo/{slug}/reset')
+        assert response.status_code == 429
+        assert int(response.headers['Retry-After']) >= 1
+
+        assert first.post('/demo/exit').status_code == 302
+        _enter_student(first, slug, 1)
+        response = first.post(f'/demo/{slug}/reset')
+        assert response.status_code == 429
 
 
 class TestDemoTimeToLive:

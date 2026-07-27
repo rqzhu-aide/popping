@@ -1,4 +1,5 @@
 ---
+id: bootstrap-confidence-intervals
 title: "Bootstrap Confidence Intervals"
 author: "Arthas Menethil (amenet2)"
 ---

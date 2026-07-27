@@ -13,6 +13,7 @@ See these example files in this folder for the exact format:
 
 ```markdown
 ---
+id: ols-squared-error
 title: "Why does OLS minimize squared error?"
 author: "Illidan Stormrage (istorm2)"
 ---
@@ -31,6 +32,7 @@ Hint: think about differentiability and the normal equations.
 
 ```markdown
 ---
+id: bootstrap-confidence-intervals
 title: "Bootstrap Confidence Intervals"
 author: "Arthas Menethil (amenet2)"
 ---
@@ -52,6 +54,7 @@ What assumptions does the bootstrap make about the underlying distribution?
 
 ```markdown
 ---
+id: gradient-descent-convergence
 title: "Gradient Descent Convergence"
 author: "Tyrande Whisperwind (twhisp2)"
 ---
@@ -78,7 +81,8 @@ What would happen if we set `alpha = 1.0`?
 
 | Rule | Details |
 |---|---|
-| **Title** | Required. Max 50 characters. Descriptive and specific. |
+| **ID** | Required. Unique within the week. Use letters, numbers, hyphens, or underscores, and do not change it after submission. |
+| **Title** | Required. Unique within the week. Max 50 characters. Descriptive and specific. |
 | **Author** | Required. Format: `Your Name (your-netid)` |
 | **Content length** | Max 200 words (excluding code blocks and math). |
 | **Question types** | Open-ended or multiple choice. For multiple choice, include a lead-in sentence (e.g. "Choose the correct statement:") followed by A/B/C/D options. |

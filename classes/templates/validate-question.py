@@ -6,8 +6,9 @@ Usage:
     python validate-question.py classes/432fall2026/week-1-questions.md
 
 Checks:
-    - Required fields: title, author
-    - Title: non-empty, max 50 characters
+    - Required fields: id, title, author
+    - ID: letters, numbers, hyphens, or underscores; unique within the file
+    - Title: non-empty, max 50 characters; unique within the file
     - Author format: "Name (student-id)"
     - Content: max 200 words (excluding code blocks and math)
     - No forbidden LaTeX macros
@@ -32,6 +33,7 @@ FORBIDDEN_COMMANDS = [
 
 MAX_TITLE_LENGTH = 50
 MAX_WORDS = 200
+QUESTION_ID_PATTERN = re.compile(r'^[A-Za-z0-9_-]+$')
 
 
 def count_words(text):
@@ -66,7 +68,8 @@ def check_code_blocks(content):
     return issues
 
 
-def validate_question(block_num, fm_text, body_text):
+def validate_question(block_num, fm_text, body_text,
+                      seen_question_ids=None, seen_question_titles=None):
     """Validate a single question block."""
     import yaml
     issues = []
@@ -80,12 +83,41 @@ def validate_question(block_num, fm_text, body_text):
     if not isinstance(fm, dict):
         return ["Frontmatter must be a YAML dictionary"]
 
+    # Stable question ID
+    question_id = fm.get('id')
+    if question_id is None or question_id == '':
+        issues.append("Missing 'id' field")
+    elif (not isinstance(question_id, str) or
+          not QUESTION_ID_PATTERN.fullmatch(question_id.strip())):
+        issues.append(
+            "ID may contain only letters, numbers, hyphens, and underscores"
+        )
+    elif seen_question_ids is not None:
+        normalized_id = question_id.strip().casefold()
+        first_block = seen_question_ids.get(normalized_id)
+        if first_block is not None:
+            issues.append(
+                f"Duplicate 'id' field: matches question #{first_block}"
+            )
+        else:
+            seen_question_ids[normalized_id] = block_num
+
     # Title
-    title = fm.get('title', '')
-    if not title:
-        issues.append("Missing 'title' field")
-    elif len(str(title)) > MAX_TITLE_LENGTH:
-        issues.append(f"Title too long: {len(title)} chars (max {MAX_TITLE_LENGTH})")
+    title = fm.get('title')
+    if not isinstance(title, str) or not title.strip():
+        issues.append("Title must be a non-empty string")
+    elif len(title.strip()) > MAX_TITLE_LENGTH:
+        issues.append(
+            f"Title too long: {len(title.strip())} chars "
+            f"(max {MAX_TITLE_LENGTH})"
+        )
+    elif seen_question_titles is not None:
+        normalized_title = " ".join(title.split()).casefold()
+        first_block = seen_question_titles.get(normalized_title)
+        if first_block is not None:
+            issues.append(f"Duplicate title: matches question #{first_block}")
+        else:
+            seen_question_titles[normalized_title] = block_num
 
     # Author
     author = fm.get('author', '')
@@ -123,6 +155,8 @@ def validate_file(filepath):
 
     total_issues = 0
     block_num = 0
+    seen_question_ids = {}
+    seen_question_titles = {}
     i = 0
 
     while i + 1 < len(blocks):
@@ -131,7 +165,10 @@ def validate_file(filepath):
 
         if fm_block:
             block_num += 1
-            issues = validate_question(block_num, fm_block, body_block)
+            issues = validate_question(
+                block_num, fm_block, body_block,
+                seen_question_ids, seen_question_titles,
+            )
             if issues:
                 print(f"\n[FAIL] Question #{block_num} has {len(issues)} issue(s):")
                 for issue in issues:

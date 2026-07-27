@@ -1,6 +1,7 @@
 """Focused tests for filesystem question catalog validation."""
 
 from pathlib import Path
+import subprocess
 import sys
 
 import pytest
@@ -70,7 +71,8 @@ def test_valid_catalog_reports_each_section_ready(tmp_path):
 
 def test_catalog_reports_discussion_and_presentation_separately(tmp_path):
     (tmp_path / "week-2-questions.md").write_text(
-        "---\ntitle: Available discussion\n---\n\nDiscuss this.\n",
+        "---\nid: available-discussion\n"
+        "title: Available discussion\n---\n\nDiscuss this.\n",
         encoding="utf-8",
     )
 
@@ -119,6 +121,18 @@ Third body.
         "discussion_title_duplicate",
         "discussion_title_invalid",
     } <= _codes(status)
+
+
+def test_discussion_requires_stable_question_ids(tmp_path):
+    (tmp_path / "week-1-questions.md").write_text(
+        "---\ntitle: Missing ID\n---\n\nDiscuss this.\n",
+        encoding="utf-8",
+    )
+
+    status = validate_discussion_week(tmp_path, 1)
+
+    assert status.ready is False
+    assert "discussion_id_missing" in _codes(status)
 
 
 @pytest.mark.parametrize(
@@ -215,7 +229,8 @@ def test_presentation_rejects_empty_and_non_utf8_files(
 
 def test_catalog_accepts_utf8_bom_question_sources(tmp_path):
     (tmp_path / "week-1-questions.md").write_text(
-        "---\ntitle: BOM discussion\n---\n\nDiscuss this.\n",
+        "---\nid: bom-discussion\n"
+        "title: BOM discussion\n---\n\nDiscuss this.\n",
         encoding="utf-8-sig",
     )
     presentation_dir = tmp_path / "week1"
@@ -261,3 +276,39 @@ def test_checked_in_course_exposes_missing_presentation_weeks():
     assert report.get_week(2).presentation.ready is False
     assert report.get_week(3).discussion.ready is True
     assert report.get_week(3).presentation.ready is False
+
+
+def test_submission_validator_rejects_duplicate_ids_and_titles(tmp_path):
+    question_file = tmp_path / "week-1-questions.md"
+    question_file.write_text(
+        """---
+id: Same-ID
+title: Repeated   Title
+author: Alice Example (alice1)
+---
+
+Explain the first question.
+
+---
+id: same-id
+title: repeated title
+author: Bob Example (bob2)
+---
+
+Explain the second question.
+""",
+        encoding="utf-8",
+    )
+    validator = (
+        PROJECT_ROOT / "classes" / "templates" / "validate-question.py"
+    )
+
+    result = subprocess.run(
+        [sys.executable, str(validator), str(question_file)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 1
+    assert "Duplicate 'id' field: matches question #1" in result.stdout
+    assert "Duplicate title: matches question #1" in result.stdout

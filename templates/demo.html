@@ -49,7 +49,7 @@
 
         {% if session.get('is_demo') and session.get('slug') == instance_slug %}
         <form method="post" action="{{ url_for('demo_reset', instance_slug=instance_slug) }}"
-              class="demo-actions" onsubmit="return confirmDemoReset()">
+              class="demo-actions" onsubmit="return confirmDemoReset(this)">
             <button type="submit" class="btn btn-sm btn-outline">
                 🔄 Reset Demo Data
             </button>

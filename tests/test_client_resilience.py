@@ -141,7 +141,9 @@ def test_session_loss_redirect_explains_ended_session():
     )
 
     assert "window.location.href = '/';" not in source
-    assert source.count("window.location.href = '/?session=ended';") >= 10
+    assert "function redirectToSessionEnded()" in source
+    assert source.count("window.location.href = '/?session=ended';") == 1
+    assert source.count("redirectToSessionEnded();") >= 10
 
 
 def test_thumbs_follow_discussion_phase_not_question_presence():

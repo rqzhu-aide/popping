@@ -7,7 +7,9 @@ data.
 
 from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor
+import csv
 from datetime import datetime, timedelta
+import hashlib
 import io
 import json
 from pathlib import Path
@@ -865,6 +867,28 @@ def test_reset_restores_hidden_discussion_questions(course_env):
         ).fetchone()[0] == 0
 
 
+def test_reset_succeeds_without_optional_peer_reviews_table(course_env):
+    with _connect(course_env) as db:
+        db.execute("DROP TABLE peer_reviews")
+        db.commit()
+    _set_state(course_env, phase="ended")
+
+    response = _instructor_client(course_env).post(
+        "/api/reset_data", json=_reset_payload(course_env, "ended")
+    )
+
+    assert response.status_code == 200
+    backup_path = (
+        Path(course_env["data_dir"])
+        / course_env["slug"]
+        / "reset-backups"
+        / response.get_json()["backup"]
+    )
+    assert backup_path.is_file()
+    assert _state_row(course_env)["phase"] == "setup"
+    assert _state_row(course_env)["session_key"] == SESSION_KEY + 1
+
+
 def test_unassigned_student_sees_discussion_questions_container(course_env):
     _set_state(course_env, phase="discussion")
 
@@ -946,6 +970,135 @@ def test_student_rating_records_selected_week(course_env):
     assert saved_week == 2
 
 
+def test_sixty_students_can_submit_ratings_concurrently(course_env):
+    student_ids = [f"load-{index:02d}" for index in range(1, 61)]
+    with _connect(course_env) as db:
+        for student_id in student_ids:
+            db.execute(
+                """INSERT INTO students
+                   (course_id, student_id, name, pin, team_id)
+                   VALUES (?, ?, ?, '1111', ?)""",
+                (
+                    course_env["course_id"],
+                    student_id,
+                    student_id,
+                    course_env["teams"]["Team 2"],
+                ),
+            )
+        db.commit()
+    _activate_presentation(
+        course_env,
+        poll_active=1,
+        poll_started_at=datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+    )
+
+    clients = []
+    for student_id in student_ids:
+        client = _student_client(course_env, student_id)
+        with client.session_transaction() as flask_session:
+            flask_session["activity_session_key"] = SESSION_KEY
+            flask_session["last_active_synced_at"] = datetime.utcnow().isoformat()
+        clients.append(client)
+
+    def submit(client):
+        response = client.post(
+            "/api/submit_rating",
+            json={
+                "presentation_key": "pres-current",
+                "q1_developed": 4,
+                "q2_easy": 5,
+            },
+        )
+        return response.status_code
+
+    with ThreadPoolExecutor(max_workers=30) as pool:
+        statuses = list(pool.map(submit, clients))
+
+    assert statuses == [200] * len(student_ids)
+    with _connect(course_env) as db:
+        assert db.execute(
+            """SELECT COUNT(*) FROM presentation_ratings
+               WHERE course_id = ? AND question_key = 'pres-current'""",
+            (course_env["course_id"],),
+        ).fetchone()[0] == len(student_ids)
+
+
+def test_rating_deadline_uses_arrival_time_before_write_lock(
+        course_env, monkeypatch):
+    poll_started = datetime(2026, 7, 25, 12, 0, 0)
+    clock = {"now": poll_started + timedelta(seconds=29)}
+    _activate_presentation(
+        course_env,
+        poll_active=1,
+        poll_started_at=poll_started.strftime("%Y-%m-%d %H:%M:%S"),
+    )
+    client = _student_client(course_env, "s4")
+    with client.session_transaction() as flask_session:
+        flask_session["activity_session_key"] = SESSION_KEY
+        flask_session["last_active_synced_at"] = clock["now"].isoformat()
+
+    original_get_db = app_module.get_db
+
+    class DelayedWriteConnection:
+        def __init__(self, connection):
+            self._connection = connection
+
+        def execute(self, sql, *args, **kwargs):
+            if sql == "BEGIN IMMEDIATE":
+                clock["now"] = poll_started + timedelta(seconds=31)
+            return self._connection.execute(sql, *args, **kwargs)
+
+        def __getattr__(self, name):
+            return getattr(self._connection, name)
+
+    monkeypatch.setattr(app_module, "_utcnow", lambda: clock["now"])
+    monkeypatch.setattr(
+        app_module,
+        "get_db",
+        lambda slug: DelayedWriteConnection(original_get_db(slug)),
+    )
+
+    response = client.post(
+        "/api/submit_rating",
+        json={
+            "presentation_key": "pres-current",
+            "q1_developed": 4,
+            "q2_easy": 5,
+        },
+    )
+
+    assert clock["now"] == poll_started + timedelta(seconds=31)
+    assert response.status_code == 200
+
+
+def test_rating_arrival_before_poll_start_is_rejected(
+        course_env, monkeypatch):
+    request_arrived = datetime(2026, 7, 25, 12, 0, 0)
+    poll_started = request_arrived + timedelta(seconds=1)
+    _activate_presentation(
+        course_env,
+        poll_active=1,
+        poll_started_at=poll_started.strftime("%Y-%m-%d %H:%M:%S"),
+    )
+    client = _student_client(course_env, "s4")
+    with client.session_transaction() as flask_session:
+        flask_session["activity_session_key"] = SESSION_KEY
+        flask_session["last_active_synced_at"] = request_arrived.isoformat()
+    monkeypatch.setattr(app_module, "_utcnow", lambda: request_arrived)
+
+    response = client.post(
+        "/api/submit_rating",
+        json={
+            "presentation_key": "pres-current",
+            "q1_developed": 4,
+            "q2_easy": 5,
+        },
+    )
+
+    assert response.status_code == 403
+    assert response.get_json()["error"] == "The rating poll is closed"
+
+
 def test_discussion_question_visibility_and_version(course_env):
     """Hiding a question removes it from the student list and bumps the
     version students use to refetch; showing it restores it."""
@@ -994,6 +1147,193 @@ def test_discussion_question_visibility_and_version(course_env):
     )
 
 
+
+def test_discussion_visibility_keys_with_shared_prefix_stay_independent(
+        course_env):
+    class_dir = Path(config.CLASSES_DIR) / course_env["slug"]
+    (class_dir / "week-1-questions.md").write_text(
+        """---
+id: topic
+title: Topic
+---
+
+Discuss the broad topic.
+
+---
+id: topic-detail
+title: Topic Detail
+---
+
+Discuss the detailed topic.
+""",
+        encoding="utf-8",
+    )
+    _set_state(course_env, phase="discussion")
+    instructor = _instructor_client(course_env)
+    student = _student_client(course_env, "s1")
+    topic_key = "week-1-q-topic"
+    detail_key = "week-1-q-topic-detail"
+
+    hidden = instructor.post(
+        "/api/toggle_discussion_question",
+        json={
+            "question_key": detail_key,
+            "visible": False,
+            "expected_phase": "discussion",
+            "expected_session_key": SESSION_KEY,
+        },
+    )
+    assert hidden.status_code == 200
+
+    questions = instructor.get(
+        "/api/discussion_questions"
+    ).get_json()["questions"]
+    by_key = {question["key"]: question for question in questions}
+    assert by_key[topic_key]["hidden"] is False
+    assert by_key[detail_key]["hidden"] is True
+
+    shown = instructor.post(
+        "/api/toggle_discussion_question",
+        json={
+            "question_key": topic_key,
+            "visible": True,
+            "expected_phase": "discussion",
+            "expected_session_key": SESSION_KEY,
+        },
+    )
+    assert shown.status_code == 200
+    with _connect(course_env) as db:
+        stored_keys = {
+            row[0] for row in db.execute(
+                """SELECT question_key FROM hidden_discussion_questions
+                   WHERE course_id = ? AND week_num = 1""",
+                (course_env["course_id"],),
+            )
+        }
+    assert stored_keys == {detail_key}
+    student_keys = {
+        question["key"] for question in student.get(
+            "/api/discussion_questions"
+        ).get_json()["questions"]
+    }
+    assert student_keys == {topic_key}
+
+def test_hidden_bank_question_stays_hidden_after_content_edit(course_env):
+    class_dir = Path(config.CLASSES_DIR) / course_env["slug"]
+    question_file = class_dir / "week-1-questions.md"
+    original_title = "Original title"
+    original_body = "Original body."
+    question_file.write_text(
+        "---\nid: stable-bank-question\n"
+        f"title: {original_title}\n---\n\n{original_body}\n",
+        encoding="utf-8",
+    )
+    _set_state(course_env, phase="discussion")
+    instructor = _instructor_client(course_env)
+    student = _student_client(course_env, "s1")
+
+    revision = hashlib.sha256(
+        (original_title + "\0" + original_body).encode("utf-8")
+    ).hexdigest()[:16]
+    legacy_key = f"week-1-q-{revision}-{revision[:8]}"
+    with _connect(course_env) as db:
+        db.execute(
+            """INSERT INTO hidden_discussion_questions
+               (course_id, week_num, question_key)
+               VALUES (?, 1, ?)""",
+            (course_env["course_id"], legacy_key),
+        )
+        db.commit()
+
+    original = instructor.get(
+        "/api/discussion_questions"
+    ).get_json()["questions"][0]
+    assert original["key"] == "week-1-q-stable-bank-question"
+    assert original["hidden"] is True
+    with _connect(course_env) as db:
+        stored_keys = {
+            row[0] for row in db.execute(
+                """SELECT question_key FROM hidden_discussion_questions
+                   WHERE course_id = ? AND week_num = 1""",
+                (course_env["course_id"],),
+            )
+        }
+    assert stored_keys == {original["key"]}
+
+    question_file.write_text(
+        "---\nid: stable-bank-question\n"
+        "title: Revised title\n---\n\nRevised body.\n",
+        encoding="utf-8",
+    )
+    revised = instructor.get(
+        "/api/discussion_questions"
+    ).get_json()["questions"][0]
+    assert revised["key"] == original["key"]
+    assert revised["hidden"] is True
+    assert student.get(
+        "/api/discussion_questions"
+    ).get_json()["questions"] == []
+
+
+def test_hidden_appendix_question_stays_hidden_after_edit(course_env):
+    _set_state(course_env, phase="discussion")
+    instructor = _instructor_client(course_env)
+    student = _student_client(course_env, "s1")
+    added = instructor.post(
+        "/api/questions",
+        json={
+            "title": "Appendix title",
+            "content": "Appendix body.",
+            "week": 1,
+            "expected_phase": "discussion",
+            "expected_session_key": SESSION_KEY,
+        },
+    )
+    assert added.status_code == 200
+
+    original = next(
+        question for question in instructor.get(
+            "/api/discussion_questions"
+        ).get_json()["questions"]
+        if question.get("appendix_id") == "A1"
+    )
+    assert instructor.post(
+        "/api/toggle_discussion_question",
+        json={
+            "question_key": original["key"],
+            "visible": False,
+            "expected_phase": "discussion",
+            "expected_session_key": SESSION_KEY,
+        },
+    ).status_code == 200
+    assert instructor.post(
+        "/api/edit_appendix_question",
+        json={
+            "appendix_id": "A1",
+            "title": "Revised appendix title",
+            "content": "Revised appendix body.",
+            "week": 1,
+            "expected_phase": "discussion",
+            "expected_session_key": SESSION_KEY,
+        },
+    ).status_code == 200
+
+    revised = next(
+        question for question in instructor.get(
+            "/api/discussion_questions"
+        ).get_json()["questions"]
+        if question.get("appendix_id") == "A1"
+    )
+    assert revised["key"] == original["key"]
+    assert revised["hidden"] is True
+    assert all(
+        question["key"] != original["key"]
+        for question in student.get(
+            "/api/discussion_questions"
+        ).get_json()["questions"]
+    )
+
+
 def test_student_discussion_list_excludes_hidden_and_includes_appendix(course_env):
     """5 bank questions + new appendix A1 with Q2 hidden gives students
     exactly Q1, Q3, Q4, Q5, A1 — the full-week visibility model."""
@@ -1024,6 +1364,10 @@ def test_student_discussion_list_excludes_hidden_and_includes_appendix(course_en
     assert [q["title"] for q in instructor_list["questions"]] == [
         "Q1", "Q2", "Q3", "Q4", "Q5", "A1: Extra",
     ]
+    assert [q["display_number"] for q in instructor_list["questions"]] == [
+        1, 2, 3, 4, 5, 6,
+    ]
+    assert len({q["key"] for q in instructor_list["questions"]}) == 6
     q2_key = instructor_list["questions"][1]["key"]
     hide = instructor.post(
         "/api/toggle_discussion_question",
@@ -1038,6 +1382,9 @@ def test_student_discussion_list_excludes_hidden_and_includes_appendix(course_en
     student_list = student.get("/api/discussion_questions").get_json()
     assert [q["title"] for q in student_list["questions"]] == [
         "Q1", "Q3", "Q4", "Q5", "A1: Extra",
+    ]
+    assert [q["display_number"] for q in student_list["questions"]] == [
+        1, 3, 4, 5, 6,
     ]
     assert all(not q["hidden"] for q in student_list["questions"])
 
@@ -1495,126 +1842,82 @@ def test_export_workbook_activity_is_scoped_to_selected_week(course_env):
     assert teams["Team 2"]["combined_avg"] == 4.5
 
 
-def test_export_all_weeks_includes_prior_week_activity(course_env):
-    from openpyxl import load_workbook
+def test_export_all_weeks_parameter_is_rejected(course_env):
+    response = _instructor_client(course_env).get(
+        f"/export/{course_env['slug']}?weeks=all"
+    )
 
-    _write_catalog_week(course_env, 1)
-    _write_catalog_week(course_env, 2)
+    assert response.status_code == 400
+    assert b"Only the current lecture week" in response.data
+
+
+def test_legacy_feedback_export_contains_only_unknown_week_rows(course_env):
     with _connect(course_env) as db:
-        week_2_question_id = db.execute(
-            """INSERT INTO questions
-               (course_id, question_num, question_text, title, week_num,
-                source_key)
-               VALUES (?, 1, 'Week 2 question', 'Week 2 question', 2,
-                       'presentation:2:1')""",
-            (course_env["course_id"],),
-        ).lastrowid
-        for week, question_key in (
-            (1, "week-1-thumb"),
-            (2, "week-2-thumb-a"),
-            (2, "week-2-thumb-b"),
+        for week_num, question_key in (
+            (None, "legacy"),
+            (1, "week-1-current"),
         ):
             db.execute(
                 """INSERT INTO teammate_thumbs
                    (course_id, session_key, week_num, question_key,
-                    source_question_key, question_title, grader_id,
-                    recipient_id)
-                   VALUES (?, ?, ?, ?, ?, 'Question', ?, ?)""",
+                    source_question_key, grader_id, recipient_id)
+                   VALUES (?, 0, ?, ?, ?, ?, ?)""",
                 (
-                    course_env["course_id"], SESSION_KEY, week, question_key,
-                    question_key, course_env["students"]["s1"],
+                    course_env["course_id"],
+                    week_num,
+                    question_key,
+                    question_key,
+                    course_env["students"]["s1"],
                     course_env["students"]["s2"],
                 ),
             )
-        for week, question_key, question_id in (
-            (1, "pres-week-1", course_env["question_id"]),
-            (2, "pres-week-2-a", week_2_question_id),
-            (2, "pres-week-2-b", week_2_question_id),
+        for week_num, question_key in (
+            (None, "legacy-rating"),
+            (1, "week-1-rating"),
         ):
             db.execute(
                 """INSERT INTO presentation_ratings
-                   (course_id, student_id, question_key, session_key, week_num,
-                    presenting_team_id, presenting_team_name, question_id,
-                    question_title, q1_developed, q2_easy)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'Question', ?, ?)""",
+                   (course_id, student_id, question_key, session_key,
+                    week_num, presenting_team_id, presenting_team_name,
+                    rater_team_id, rater_team_name, q1_developed, q2_easy)
+                   VALUES (?, ?, ?, 0, ?, ?, 'Team 2', ?, 'Team 1', 3, 4)""",
                 (
-                    course_env["course_id"], course_env["students"]["s1"],
-                    question_key, SESSION_KEY, week,
-                    course_env["teams"]["Team 2"], "Team 2", question_id,
-                    4, 5,
+                    course_env["course_id"],
+                    course_env["students"]["s1"],
+                    question_key,
+                    week_num,
+                    course_env["teams"]["Team 2"],
+                    course_env["teams"]["Team 1"],
                 ),
             )
-        history = [
-            {
-                "presentation_key": "pres-week-1",
-                "week_num": 1,
-                "team": "Team 2",
-                "question_id": course_env["question_id"],
-            },
-            {
-                "presentation_key": "pres-week-2-a",
-                "team": "Team 2",
-                "question_id": week_2_question_id,
-            },
-            {
-                "presentation_key": "pres-week-2-b",
-                "team": "Team 2",
-                "question_id": None,
-            },
-        ]
-        db.execute(
-            """UPDATE course_state
-               SET discussion_week = 2, presentation_history = ?""",
-            (json.dumps(history),),
-        )
         db.commit()
 
     response = _instructor_client(course_env).get(
-        f"/export/{course_env['slug']}?weeks=all"
+        f"/export/{course_env['slug']}/legacy-feedback.csv"
     )
+
     assert response.status_code == 200
-    assert (
-        "filename=popping_SAFE101_all_weeks_export.zip"
-        in response.headers["Content-Disposition"]
-    )
-    with zipfile.ZipFile(io.BytesIO(response.data)) as archive:
-        names = set(archive.namelist())
-        workbook = load_workbook(
-            io.BytesIO(archive.read("course_data.xlsx")), read_only=True
-        )
-
-    assert {
-        "questions/week-1-questions.md",
-        "questions/week1/index.md",
-        "questions/week-2-questions.md",
-        "questions/week2/index.md",
-    }.issubset(names)
-
-    summary = {
-        row[0]: row[1]
-        for row in workbook["Summary"].iter_rows(values_only=True)
-        if row[0]
-    }
-    assert summary["Lecture Week"] == 2
-    assert summary["Export Scope"] == "All weeks"
-    assert summary["All-Week Peer Reviews (thumbs)"] == 3
-    assert summary["All-Week Presentation Ratings"] == 3
-
-    def sheet_rows(name):
-        values = list(workbook[name].iter_rows(values_only=True))
-        return [dict(zip(values[0], row)) for row in values[1:]]
-
-    peer_rows = sheet_rows("Peer Reviews")
-    assert {row["week"] for row in peer_rows} == {1, 2}
-    assert {row["discussion_post_key"] for row in peer_rows} == {
-        "week-1-thumb", "week-2-thumb-a", "week-2-thumb-b",
-    }
-
-    presentation_rows = sheet_rows("Presentation Ratings")
-    assert {row["week"] for row in presentation_rows} == {1, 2}
-    assert {row["presentation_key"] for row in presentation_rows} == {
-        "pres-week-1", "pres-week-2-a", "pres-week-2-b",
-    }
+    assert response.mimetype == "text/csv"
+    assert "legacy_unknown_week_feedback.csv" in response.headers[
+        "Content-Disposition"
+    ]
+    rows = list(csv.DictReader(io.StringIO(
+        response.data.decode("utf-8-sig")
+    )))
+    assert len(rows) == 2
+    by_type = {row["record_type"]: row for row in rows}
+    thumb = by_type["teammate_thumb"]
+    assert thumb["lecture_week"] == "unknown"
+    assert thumb["question_key"] == "legacy"
+    assert thumb["grader_id"] == "s1"
+    assert thumb["recipient_id"] == "s2"
+    rating = by_type["presentation_rating"]
+    assert rating["lecture_week"] == "unknown"
+    assert rating["question_key"] == "legacy-rating"
+    assert rating["grader_id"] == "s1"
+    assert rating["presenting_team"] == "Team 2"
+    assert rating["q1_developed"] == "3"
+    assert rating["q2_easy"] == "4"
 
 
 def test_export_unknown_weeks_param_keeps_current_week_scope(course_env):
@@ -1636,7 +1939,8 @@ def test_tools_menu_marks_roster_upload_setup_only_outside_setup(course_env):
     ).get_data(as_text=True)
     assert "Upload Student Roster (setup only)" not in page
     assert 'onclick="uploadRoster(event)"' in page
-    assert f"/export/{course_env['slug']}?weeks=all" in page
+    assert f"/export/{course_env['slug']}?weeks=all" not in page
+    assert f"/export/{course_env['slug']}/legacy-feedback.csv" in page
 
     _set_state(course_env, phase="competition")
     page = client.get(
@@ -2557,11 +2861,11 @@ def test_start_presentation_reports_clamped_time_cap(course_env):
     )
     assert clamped.status_code == 200
     payload = clamped.get_json()
-    assert payload["time_cap"] == 300
+    assert payload["time_cap"] == 3600
     assert payload["notice"] == (
-        "Time cap adjusted to 300s (allowed range 10–3600s)"
+        "Time cap adjusted to 3600s (allowed range 10 to 3600 seconds)"
     )
-    assert _state_row(course_env)["presentation_time_cap"] == 300
+    assert _state_row(course_env)["presentation_time_cap"] == 3600
 
     _set_state(
         course_env,
@@ -2588,7 +2892,7 @@ def test_start_presentation_reports_clamped_time_cap(course_env):
     assert _state_row(course_env)["presentation_time_cap"] == 120
 
 
-def test_eighty_student_poll_burst_stays_compact_and_lock_free(course_env):
+def test_eighty_students_sustain_compact_polling_without_locks(course_env):
     with _connect(course_env) as db:
         for index in range(5, 81):
             student_id = f"s{index}"
@@ -2617,15 +2921,31 @@ def test_eighty_student_poll_burst_stays_compact_and_lock_free(course_env):
         for index in range(1, 81)
     ]
 
-    def poll(client):
+    def initial_poll(client):
         response = client.get("/api/poll")
-        return response.status_code, len(response.data)
+        payload = response.get_json()
+        return response.status_code, len(response.data), payload["state_version"]
 
     with ThreadPoolExecutor(max_workers=40) as pool:
-        results = list(pool.map(poll, clients))
+        initial = list(pool.map(initial_poll, clients))
+        assert all(status == 200 for status, _size, _version in initial)
+        assert max(size for _status, size, _version in initial) < 2000
 
-    assert all(status == 200 for status, _size in results)
-    assert max(size for _status, size in results) < 2000
+        versions = [version for _status, _size, version in initial]
+
+        def compact_poll(item):
+            client, version = item
+            response = client.get(f"/api/poll?since={version}")
+            return response.status_code, len(response.data), response.get_json()
+
+        for _round in range(3):
+            compact = list(pool.map(compact_poll, zip(clients, versions)))
+            assert all(status == 200 for status, _size, _data in compact)
+            assert max(size for _status, size, _data in compact) < 300
+            assert all(
+                data["changed"] is False
+                for _status, _size, data in compact
+            )
 
 
 def test_instructor_templates_render_new_controls_in_each_phase(course_env):
@@ -2727,6 +3047,27 @@ def test_student_poll_uses_full_path_while_rating_window_open(course_env):
     assert "state" in same
 
 
+def test_expired_rating_poll_returns_compact_close_signal(course_env):
+    _activate_presentation(course_env)
+    _set_state(
+        course_env,
+        poll_active=1,
+        poll_started_at=(
+            datetime.utcnow() - timedelta(seconds=90)
+        ).strftime("%Y-%m-%d %H:%M:%S"),
+    )
+    client = _student_client(course_env, "s4")
+    version = client.get("/api/poll").get_json()["state_version"]
+
+    same = client.get(f"/api/poll?since={version}")
+    payload = same.get_json()
+
+    assert payload["changed"] is False
+    assert payload["poll_closed"] is True
+    assert "state" not in payload
+    assert len(same.data) < 300
+
+
 def test_instructor_poll_always_uses_full_path(course_env):
     """Instructors need live participation counts (which change without a
     course_state write), so ?since must never short-circuit for them."""
@@ -2780,6 +3121,66 @@ def test_student_activity_write_is_throttled(course_env):
     assert get_last_active() > old
 
 
+def test_student_activity_lock_failure_does_not_fail_poll(course_env):
+    with app_module.app.app_context():
+        database.ensure_schema(course_env["slug"])
+    client = _student_client(course_env, "s1")
+    with client.session_transaction() as flask_session:
+        flask_session["activity_session_key"] = SESSION_KEY
+        flask_session["last_active_synced_at"] = (
+            datetime.utcnow() - timedelta(seconds=90)
+        ).isoformat()
+
+    blocker = sqlite3.connect(course_env["db_path"], timeout=0.1)
+    try:
+        blocker.execute("BEGIN IMMEDIATE")
+        blocker.execute(
+            "UPDATE students SET last_active_at = last_active_at WHERE id = ?",
+            (course_env["students"]["s1"],),
+        )
+
+        response = client.get("/api/poll")
+
+        assert response.status_code == 200
+        assert response.get_json()["changed"] is True
+        with client.session_transaction() as flask_session:
+            assert "last_active_sync_failed_at" in flask_session
+    finally:
+        blocker.rollback()
+        blocker.close()
+
+
+def test_failed_demo_touch_uses_short_retry_then_success_throttle(
+        monkeypatch):
+    slug = "demo-instance-touch-test"
+    clock = {"now": 100.0}
+    calls = []
+
+    def fake_touch(_data_dir, touched_slug):
+        calls.append(touched_slug)
+        if len(calls) == 1:
+            raise OSError("temporary marker failure")
+
+    app_module._demo_instance_touch_last.clear()
+    app_module._demo_instance_touch_failed.clear()
+    app_module._demo_instance_touch_inflight.clear()
+    monkeypatch.setattr(app_module.time, "monotonic", lambda: clock["now"])
+    monkeypatch.setattr(app_module, "touch_demo_instance", fake_touch)
+
+    app_module._touch_demo_instance_throttled(slug)
+    clock["now"] = 102.0
+    app_module._touch_demo_instance_throttled(slug)
+    clock["now"] = 106.0
+    app_module._touch_demo_instance_throttled(slug)
+    clock["now"] = 107.0
+    app_module._touch_demo_instance_throttled(slug)
+
+    assert calls == [slug, slug]
+    assert app_module._demo_instance_touch_last[slug] == 106.0
+    assert slug not in app_module._demo_instance_touch_failed
+    assert slug not in app_module._demo_instance_touch_inflight
+
+
 def test_poll_duration_reads_from_course_yaml(course_env):
     """poll_duration is configurable via course.yaml (clamped 5-300s, default
     30) and flows through to the poll state the client sees."""
@@ -2815,6 +3216,36 @@ def test_poll_duration_reads_from_course_yaml(course_env):
     )
     state = _instructor_client(course_env).get("/api/poll").get_json()["state"]
     assert state["poll_duration"] == 45
+
+
+def test_initial_instructor_timer_uses_configured_poll_duration(
+        course_env, monkeypatch):
+    fixed_now = datetime(2026, 7, 25, 12, 0, 0)
+    started_at = fixed_now - timedelta(seconds=10)
+    class_dir = Path(config.CLASSES_DIR) / course_env["slug"]
+    (class_dir / "course.yaml").write_text(
+        (
+            f"slug: {course_env['slug']}\n"
+            "active: true\n"
+            "poll_duration: 45\n"
+        ),
+        encoding="utf-8",
+    )
+    app_module._poll_duration_cache.clear()
+    monkeypatch.setattr(app_module, "_utcnow", lambda: fixed_now)
+    _activate_presentation(course_env)
+    _set_state(
+        course_env,
+        poll_active=1,
+        poll_started_at=started_at.strftime("%Y-%m-%d %H:%M:%S"),
+    )
+
+    html = _instructor_client(course_env).get(
+        f"/instructor/{course_env['slug']}"
+    ).get_data(as_text=True)
+
+    assert 'data-poll-duration="45"' in html
+    assert 'data-poll-remaining="35"' in html
 
 
 def test_instructor_sees_outstanding_raters(course_env):
@@ -2992,3 +3423,54 @@ def test_competition_page_renders_both_presentation_blocks(course_env):
     assert '<div id="presentation-active">' in active_html
     assert '<div id="presentation-idle" style="display:none">' in active_html
     assert 'id="timer-box"' in active_html
+
+
+def test_legacy_peer_reviews_migrate_into_teammate_thumbs(course_env):
+    """Databases created before teammate_thumbs existed keep their legacy
+    thumbs: _ensure_schema_locked copies peer_reviews rows (score > 0) once,
+    idempotently, and tolerates databases whose legacy table was dropped."""
+    with _connect(course_env) as db:
+        db.execute(
+            "INSERT INTO peer_reviews"
+            " (course_id, grader_id, recipient_id, criterion, score)"
+            " VALUES (?, ?, ?, 'overall', 1)",
+            (
+                course_env["course_id"],
+                course_env["students"]["s1"],
+                course_env["students"]["s2"],
+            ),
+        )
+        db.execute(
+            "INSERT INTO peer_reviews"
+            " (course_id, grader_id, recipient_id, criterion, score)"
+            " VALUES (?, ?, ?, 'overall', 0)",
+            (
+                course_env["course_id"],
+                course_env["students"]["s1"],
+                course_env["students"]["s3"],
+            ),
+        )
+        db.commit()
+
+        database._ensure_schema_locked(db)
+        db.commit()
+        legacy = db.execute(
+            "SELECT * FROM teammate_thumbs WHERE question_key = 'legacy'"
+        ).fetchall()
+        assert len(legacy) == 1
+        assert legacy[0]["grader_id"] == course_env["students"]["s1"]
+        assert legacy[0]["recipient_id"] == course_env["students"]["s2"]
+
+        # Idempotent: a second schema pass does not duplicate the row.
+        database._ensure_schema_locked(db)
+        db.commit()
+        count = db.execute(
+            "SELECT COUNT(*) FROM teammate_thumbs WHERE question_key = 'legacy'"
+        ).fetchone()[0]
+        assert count == 1
+
+        # Databases without the legacy table migrate cleanly (gate works).
+        db.execute("DROP TABLE peer_reviews")
+        db.commit()
+        database._ensure_schema_locked(db)
+        db.commit()

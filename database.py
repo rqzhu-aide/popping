@@ -2,6 +2,7 @@ import os
 import json
 import re
 import sqlite3
+import threading
 from flask import g
 import config
 
@@ -10,6 +11,13 @@ SLUG_RE = re.compile(r'^[A-Za-z0-9_-]+$')
 # Process-local cache: slugs whose schema has already been verified/migrated.
 # Without this, ensure_schema() runs ~10 PRAGMA queries on every API call.
 _schema_checked = set()
+_schema_check_locks = {}
+_schema_check_locks_guard = threading.Lock()
+
+
+def _schema_lock_for(slug):
+    with _schema_check_locks_guard:
+        return _schema_check_locks.setdefault(slug, threading.Lock())
 
 
 def validate_slug(slug):
@@ -25,15 +33,31 @@ def get_db(slug):
         db_path = os.path.join(config.DATA_DIR, slug, 'popping.db')
         if not os.path.exists(db_path):
             raise RuntimeError(f"Database not found for course: {slug}")
-        # timeout=30 sets a 30s busy_timeout so writers wait on lock contention
-        # instead of raising "database is locked" immediately.
+        # Let ordinary writes wait on lock contention.
         conn = sqlite3.connect(db_path, timeout=30)
         conn.row_factory = sqlite3.Row
-        # WAL: readers don't block the writer or each other — essential for the
-        # ~3s student polling load. foreign_keys: actually enforce the schema's
-        # FK constraints (off by default in SQLite).
-        conn.execute("PRAGMA journal_mode=WAL")
+        # WAL mode persists. Check before requesting it because repeating the
+        # write form of this pragma on concurrent requests can itself need a
+        # database lock. A busy connection can retry the upgrade later.
+        conn.execute("PRAGMA busy_timeout=30000")
         conn.execute("PRAGMA foreign_keys=ON")
+        journal_mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
+        if str(journal_mode).lower() != "wal":
+            try:
+                conn.execute("PRAGMA journal_mode=WAL")
+            except sqlite3.OperationalError as exc:
+                error_code = getattr(exc, "sqlite_errorcode", None)
+                primary_error_code = (
+                    error_code & 0xFF
+                    if isinstance(error_code, int)
+                    else None
+                )
+                if primary_error_code not in (
+                    sqlite3.SQLITE_BUSY,
+                    sqlite3.SQLITE_LOCKED,
+                ):
+                    conn.close()
+                    raise
         setattr(g, db_key, conn)
     return getattr(g, db_key)
 
@@ -53,6 +77,8 @@ def init_db(slug):
     os.makedirs(course_dir, exist_ok=True)
     db_path = os.path.join(course_dir, 'popping.db')
     conn = sqlite3.connect(db_path)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA foreign_keys=ON")
     with open(config.DATABASE_SCHEMA, 'r') as f:
         conn.executescript(f.read())
     conn.close()
@@ -66,20 +92,25 @@ def ensure_schema(slug):
     """Run idempotent migrations once per process and safely across workers."""
     if slug in _schema_checked:
         return
-    db = get_db(slug)
-    db.execute('BEGIN IMMEDIATE')
-    try:
-        _ensure_schema_locked(db)
-        db.commit()
-    except Exception:
-        db.rollback()
-        raise
-    _schema_checked.add(slug)
+    with _schema_lock_for(slug):
+        if slug in _schema_checked:
+            return
+        db = get_db(slug)
+        db.execute('BEGIN IMMEDIATE')
+        try:
+            _ensure_schema_locked(db)
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+        _schema_checked.add(slug)
 
 
 def forget_schema(slug):
     """Forget a removed short-lived database from the process cache."""
     _schema_checked.discard(slug)
+    with _schema_check_locks_guard:
+        _schema_check_locks.pop(slug, None)
 
 
 def _ensure_schema_locked(db):
@@ -309,6 +340,44 @@ def _ensure_schema_locked(db):
                   ON presentation_ratings(course_id, question_key)''')
     db.execute('''CREATE INDEX IF NOT EXISTS idx_ratings_export_week
                   ON presentation_ratings(course_id, week_num)''')
+
+    # Preserve thumbs from databases created before teammate_thumbs replaced
+    # peer_reviews. The standard legacy schema had no lecture week, so those
+    # rows remain explicitly unknown-week (week_num NULL) and must not appear
+    # in a normal week-specific export. A few transitional databases may have
+    # an explicit positive INTEGER week_num; that is the only week evidence
+    # reliable enough to retain here.
+    has_peer_reviews = db.execute(
+        '''SELECT 1 FROM sqlite_master
+           WHERE type = 'table' AND name = 'peer_reviews' '''
+    ).fetchone()
+    if has_peer_reviews:
+        peer_review_cols = {
+            row['name'] for row in db.execute(
+                'PRAGMA table_info(peer_reviews)'
+            ).fetchall()
+        }
+        legacy_week_sql = (
+            '''CASE WHEN typeof(week_num) = 'integer' AND week_num > 0
+                    THEN week_num ELSE NULL END'''
+            if 'week_num' in peer_review_cols else 'NULL'
+        )
+        db.execute(
+            f'''INSERT INTO teammate_thumbs
+                (course_id, session_key, week_num, question_key,
+                 source_question_key, grader_id, recipient_id,
+                 created_at, updated_at)
+                SELECT course_id, 0, {legacy_week_sql}, 'legacy', 'legacy',
+                       grader_id, recipient_id, created_at, created_at
+                FROM peer_reviews WHERE score > 0
+                ON CONFLICT(course_id, session_key, question_key,
+                            grader_id, recipient_id)
+                DO UPDATE SET
+                    week_num = COALESCE(
+                        excluded.week_num, teammate_thumbs.week_num
+                    ),
+                    source_question_key = 'legacy' '''
+        )
 
     # One-time, data-preserving cleanup for databases created before numbered
     # default team names were introduced.  Custom team names are untouched.

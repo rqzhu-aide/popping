@@ -1,4 +1,5 @@
 ---
+id: ols-squared-error
 title: "Why does OLS minimize squared error?"
 author: "Illidan Stormrage (istorm2)"
 ---

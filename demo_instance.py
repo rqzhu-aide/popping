@@ -11,6 +11,7 @@ import shutil
 import sqlite3
 import time
 import uuid
+from contextlib import contextmanager
 from pathlib import Path
 
 from question_catalog import read_presentation_index
@@ -21,6 +22,20 @@ DEMO_SEED_VERSION = 2
 DEMO_INSTANCE_TTL_SECONDS = 2 * 60 * 60
 MAX_DEMO_INSTANCES = 4
 MAX_EXPIRED_REMOVALS_PER_START = 8
+DEMO_RESET_COOLDOWN_SECONDS = 10
+DEMO_LIFECYCLE_DB = '.demo-lifecycle.sqlite3'
+
+
+class DemoLifecycleBusy(RuntimeError):
+    """Another worker is creating or cleaning up a demo instance."""
+
+
+class DemoResetCooldown(RuntimeError):
+    """The same private demo was reset too recently."""
+
+    def __init__(self, retry_after):
+        super().__init__('Please wait before resetting again.')
+        self.retry_after = max(0.0, float(retry_after))
 
 
 def is_demo_instance_slug(slug):
@@ -43,6 +58,32 @@ def demo_instance_dir(data_dir, slug):
 
 def demo_database_path(data_dir, slug):
     return os.path.join(demo_instance_dir(data_dir, slug), 'popping.db')
+
+
+@contextmanager
+def _demo_lifecycle_lock(data_dir, timeout=0.0):
+    """Serialize demo creation across threads and Gunicorn workers."""
+    os.makedirs(data_dir, exist_ok=True)
+    lock_path = os.path.join(data_dir, DEMO_LIFECYCLE_DB)
+    connection = sqlite3.connect(lock_path, timeout=max(0.0, float(timeout)))
+    try:
+        connection.execute(
+            f'PRAGMA busy_timeout = {max(0, int(float(timeout) * 1000))}'
+        )
+        try:
+            connection.execute('BEGIN IMMEDIATE')
+        except sqlite3.OperationalError as exc:
+            error_code = getattr(exc, 'sqlite_errorcode', None)
+            if (error_code in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED)
+                    or 'locked' in str(exc).lower()):
+                raise DemoLifecycleBusy() from exc
+            raise
+        try:
+            yield
+        finally:
+            connection.rollback()
+    finally:
+        connection.close()
 
 
 def _read_presentation_questions(classes_dir):
@@ -181,12 +222,63 @@ def create_demo_instance(data_dir, classes_dir, schema_path, slug=None):
         raise
 
 
-def reset_demo_instance(data_dir, classes_dir, slug):
+def _cleanup_incomplete_demo_instances(data_dir):
+    """Remove validly named demo directories left by an interrupted creation."""
+    removed = []
+    if not os.path.isdir(data_dir):
+        return removed
+    for name in os.listdir(data_dir):
+        if not is_demo_instance_slug(name):
+            continue
+        path = os.path.join(data_dir, name)
+        if not os.path.isdir(path):
+            continue
+        database_path = os.path.join(path, 'popping.db')
+        marker_path = os.path.join(path, '.last-used')
+        if os.path.isfile(database_path) and os.path.isfile(marker_path):
+            continue
+        shutil.rmtree(path, ignore_errors=True)
+        if not os.path.exists(path):
+            removed.append(name)
+    return removed
+
+
+def create_bounded_demo_instance(
+        data_dir, classes_dir, schema_path, lock_timeout=0.0):
+    """Create one demo while atomically enforcing the shared instance cap."""
+    with _demo_lifecycle_lock(data_dir, timeout=lock_timeout):
+        removed = _cleanup_incomplete_demo_instances(data_dir)
+        removed.extend(cleanup_expired_demo_instances(data_dir))
+        if count_demo_instances(data_dir) >= MAX_DEMO_INSTANCES:
+            return None, removed
+        slug = create_demo_instance(data_dir, classes_dir, schema_path)
+        return slug, removed
+
+
+def reset_demo_instance(
+        data_dir, classes_dir, slug,
+        cooldown_seconds=DEMO_RESET_COOLDOWN_SECONDS, now=None):
     database_path = demo_database_path(data_dir, slug)
     conn = sqlite3.connect(database_path, timeout=1)
     try:
         conn.execute('PRAGMA foreign_keys = ON')
         conn.execute('BEGIN IMMEDIATE')
+        conn.execute(
+            '''CREATE TABLE IF NOT EXISTS demo_metadata (
+                   key TEXT PRIMARY KEY,
+                   value REAL NOT NULL
+               )'''
+        )
+        reset_at = time.time() if now is None else float(now)
+        last_reset = conn.execute(
+            "SELECT value FROM demo_metadata WHERE key = 'last_reset_at'"
+        ).fetchone()
+        if last_reset and cooldown_seconds:
+            retry_after = float(cooldown_seconds) - (
+                reset_at - float(last_reset[0])
+            )
+            if retry_after > 0:
+                raise DemoResetCooldown(retry_after)
         for table in (
             'teammate_thumbs', 'presentation_ratings', 'peer_reviews',
             'login_attempts', 'course_state', 'questions', 'students', 'teams',
@@ -196,6 +288,12 @@ def reset_demo_instance(data_dir, classes_dir, slug):
         conn.execute('DELETE FROM sqlite_sequence')
         _populate_demo(conn, slug, classes_dir)
         _validate_demo(conn, slug)
+        conn.execute(
+            '''INSERT INTO demo_metadata (key, value)
+               VALUES ('last_reset_at', ?)
+               ON CONFLICT(key) DO UPDATE SET value = excluded.value''',
+            (reset_at,),
+        )
         conn.commit()
     except Exception:
         conn.rollback()
