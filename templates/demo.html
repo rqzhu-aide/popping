@@ -36,16 +36,30 @@
                 <button type="submit" class="demo-role-card demo-role-student">
                 <span class="demo-role-icon">👩‍🎓</span>
                 <span class="demo-role-label">Enter as Student 2</span>
-                <span class="demo-role-desc">Use a separate browser profile to interact with Student 1</span>
+                <span class="demo-role-desc">Open in another tab or share the URL with a friend</span>
             </button>
             </form>
         </div>
 
         <p class="demo-session-note">
             This is a private demo with one instructor and two students.
-            To compare roles at the same time, open each role in a separate
-            browser profile. Only people with this private URL can enter.
+            To explore multiple roles at the same time, open each role in a
+            separate browser tab or window.
         </p>
+        <div class="demo-share-box">
+            <strong>👥 Want to demo with someone else?</strong>
+            <p>
+                Share this page's URL with another person. Anyone who opens
+                this link can enter as the instructor or a student — you'll
+                see each other in real time.
+            </p>
+            <div class="demo-share-url">
+                <input type="text" readonly value="{{ request.base_url }}"
+                       id="demo-url-copy" onclick="this.select(); document.execCommand('copy');" />
+                <button type="button" class="btn btn-sm btn-secondary"
+                        onclick="var el=document.getElementById('demo-url-copy'); el.select(); document.execCommand('copy');">Copy Link</button>
+            </div>
+        </div>
 
         {% if session.get('is_demo') and session.get('slug') == instance_slug %}
         <form method="post" action="{{ url_for('demo_reset', instance_slug=instance_slug) }}"
@@ -57,9 +71,9 @@
         {% endif %}
         {% else %}
         <p class="demo-session-note">
-            Start a fresh private sandbox. It contains only one instructor,
-            two students, and two teams. No identities or responses are shared
-            with another visitor.
+            Start a fresh private sandbox. It contains one instructor and
+            two students across two teams. After starting, you can share the
+            URL with another person to demo together in real time.
         </p>
         <form method="post" action="{{ url_for('demo_start') }}" class="demo-actions">
             <button type="submit" class="btn btn-primary">Start Private Demo</button>
@@ -75,40 +89,40 @@
             <div class="demo-step">
                 <div class="demo-step-num">1</div>
                 <div class="demo-step-body">
-                    <h3>Instructor Creates a Course</h3>
-                    <p>Each course gets its own space with a unique login page. Instructors set up teams and add students (via manual entry or CSV upload).</p>
+                    <h3>Set Up Teams</h3>
+                    <p>The instructor creates a course and adds students (by CSV upload or manual entry). Teams represent physical tables — students sit down and join that table's team in the app.</p>
                 </div>
             </div>
 
             <div class="demo-step">
                 <div class="demo-step-num">2</div>
                 <div class="demo-step-body">
-                    <h3>Students Join & Pick Teams</h3>
-                    <p>Students log in with their ID and PIN, then choose a team. Instructors control how many teams are available and how many members per team.</p>
+                    <h3>Discussion Phase</h3>
+                    <p>Students see the week's questions and discuss them within their teams. Teammates give 👍 thumbs-up to acknowledge significant contributions.</p>
                 </div>
             </div>
 
             <div class="demo-step">
                 <div class="demo-step-num">3</div>
                 <div class="demo-step-body">
-                    <h3>Discussion Phase</h3>
-                    <p>All of the week's questions are visible at once. Students discuss them within their teams and give thumbs-up to significant contributors.</p>
+                    <h3>Presentations</h3>
+                    <p>Teams present solutions one at a time. The instructor picks a team and question, starts a timer, and the presenting team's name appears on everyone's screen.</p>
                 </div>
             </div>
 
             <div class="demo-step">
                 <div class="demo-step-num">4</div>
                 <div class="demo-step-body">
-                    <h3>Competition Phase</h3>
-                    <p>Teams present one at a time. The instructor selects a team and a question from the bank, starts a live timer, and the presenting team's name is broadcast to all students.</p>
+                    <h3>Be a Challenger</h3>
+                    <p>During a presentation, students from other teams can 🙋 raise a hand to challenge the presenter with a follow-up question. The instructor selects challengers, and the remaining students rate each challenger's question on a 1–5 scale.</p>
                 </div>
             </div>
 
             <div class="demo-step">
                 <div class="demo-step-num">5</div>
                 <div class="demo-step-body">
-                    <h3>Presentation Rating</h3>
-                    <p>While a team presents, non-presenting students rate whether the answer was well-developed and easy to follow. Ratings are collected in real time.</p>
+                    <h3>Peer Ratings</h3>
+                    <p>After each presentation, non-presenting students rate whether the solution was well-developed and clearly explained (1–5 stars). Students never see their own ratings — only the instructor sees results.</p>
                 </div>
             </div>
 
@@ -116,7 +130,7 @@
                 <div class="demo-step-num">6</div>
                 <div class="demo-step-body">
                     <h3>Export & Finish</h3>
-                    <p>At the end of class, the instructor downloads a ZIP with team assignments, login times, teammate thumbs, presentation ratings, and question files.</p>
+                    <p>At the end of class, the instructor downloads a ZIP with a full gradebook spreadsheet (team assignments, thumbs, ratings, challenge scores) and all question files.</p>
                 </div>
             </div>
         </div>

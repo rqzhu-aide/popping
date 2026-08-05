@@ -23,6 +23,12 @@ def restore_course_db_module():
 
 
 def create_course_db(path, slug, username):
+    """Create a fully-seeded course database with realistic classroom data.
+
+    Seeds instructor, course, course_state, two teams, four students,
+    two presentation ratings, and one teammate thumb — so that restore
+    tests can verify ALL data types survive, not just the instructor row.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     db = sqlite3.connect(path)
     db.execute("PRAGMA foreign_keys=ON")
@@ -40,8 +46,49 @@ def create_course_db(path, slug, username):
     db.execute(
         """INSERT INTO course_state
            (course_id, phase, max_teams, max_members_per_team)
-           VALUES (?, 'setup', 1, 4)""",
+           VALUES (?, 'setup', 2, 4)""",
         (course_id,),
+    )
+    # Two teams
+    team_a = db.execute(
+        "INSERT INTO teams (course_id, name) VALUES (?, 'Team 1')",
+        (course_id,),
+    ).lastrowid
+    team_b = db.execute(
+        "INSERT INTO teams (course_id, name) VALUES (?, 'Team 2')",
+        (course_id,),
+    ).lastrowid
+    # Four students across both teams
+    students = []
+    for i, (sid, name, team_id) in enumerate([
+        ("s001", "Alice", team_a),
+        ("s002", "Bob", team_a),
+        ("s003", "Carol", team_b),
+        ("s004", "Dave", team_b),
+    ]):
+        row_id = db.execute(
+            """INSERT INTO students (course_id, student_id, name, pin, team_id)
+               VALUES (?, ?, ?, '1111', ?)""",
+            (course_id, sid, name, team_id),
+        ).lastrowid
+        students.append(row_id)
+    # One presentation rating (Bob rates Team 1's presentation)
+    db.execute(
+        """INSERT INTO presentation_ratings
+           (course_id, student_id, question_key, session_key, week_num,
+            presenting_team_id, presenting_team_name,
+            q1_developed, q2_easy)
+           VALUES (?, ?, 'pres-w1-q1', 1, 1, ?, 'Team 1', 4, 3)""",
+        (course_id, students[1], team_a),
+    )
+    # One teammate thumb (Alice gives Bob a thumbs-up)
+    db.execute(
+        """INSERT INTO teammate_thumbs
+           (course_id, session_key, question_key, week_num,
+            grader_id, recipient_id, grader_team_id, grader_team_name,
+            recipient_team_id, recipient_team_name)
+           VALUES (?, 1, 'disc-w1-q1', 1, ?, ?, ?, 'Team 1', ?, 'Team 1')""",
+        (course_id, students[0], students[1], team_a, team_a),
     )
     db.commit()
     db.close()
@@ -51,6 +98,30 @@ def instructor_username(path):
     db = sqlite3.connect(path)
     try:
         return db.execute("SELECT username FROM instructors").fetchone()[0]
+    finally:
+        db.close()
+
+
+def course_data_summary(path):
+    """Return a snapshot of all user-generated data for integrity comparison."""
+    db = sqlite3.connect(path)
+    try:
+        return {
+            "students": db.execute(
+                "SELECT student_id, name, team_id FROM students ORDER BY student_id"
+            ).fetchall(),
+            "ratings": db.execute(
+                """SELECT student_id, question_key, q1_developed, q2_easy
+                   FROM presentation_ratings ORDER BY question_key, student_id"""
+            ).fetchall(),
+            "thumbs": db.execute(
+                """SELECT grader_id, recipient_id, question_key
+                   FROM teammate_thumbs ORDER BY question_key, grader_id"""
+            ).fetchall(),
+            "teams": db.execute(
+                "SELECT name FROM teams ORDER BY id"
+            ).fetchall(),
+        }
     finally:
         db.close()
 
@@ -70,6 +141,7 @@ def test_restore_snapshots_live_db_then_atomically_replaces_it(
     create_course_db(live_db, "safe101", "current-teacher")
     create_course_db(source_db, "safe101", "restored-teacher")
     source_bytes = source_db.read_bytes()
+    live_data_before = course_data_summary(live_db)
     monkeypatch.setenv("DATA_DIR", str(data_dir))
 
     replace_calls = []
@@ -91,6 +163,8 @@ def test_restore_snapshots_live_db_then_atomically_replaces_it(
     assert result == 0
     assert instructor_username(live_db) == "restored-teacher"
     assert source_db.read_bytes() == source_bytes
+    # Verify ALL student data survived the restore, not just the instructor
+    assert course_data_summary(live_db) == course_data_summary(source_db)
     restore_backups = list(
         (live_db.parent / "restore-backups").glob(
             "popping-before-restore-*.db"
@@ -98,6 +172,8 @@ def test_restore_snapshots_live_db_then_atomically_replaces_it(
     )
     assert len(restore_backups) == 1
     assert instructor_username(restore_backups[0]) == "current-teacher"
+    # Backup must contain the live DB's student data before restore
+    assert course_data_summary(restore_backups[0]) == live_data_before
     assert replace_calls[-1][1] == live_db
     assert replace_calls[-1][0].parent == live_db.parent
     assert list(live_db.parent.glob(".popping-restore-*.tmp.db")) == []
@@ -317,6 +393,8 @@ def test_restore_preserves_corrupt_live_database_as_unverified_snapshot(
 
     assert result == 0
     assert instructor_username(live_db) == "restored-teacher"
+    # Verify ALL student data survived the restore, not just the instructor
+    assert course_data_summary(live_db) == course_data_summary(source_db)
     backup_dir = live_db.parent / "restore-backups"
     snapshots = list(
         backup_dir.glob("popping-before-restore-unverified-*.db")

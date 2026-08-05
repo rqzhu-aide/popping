@@ -408,6 +408,13 @@ let ratingDraftDirty = false;
 let _responseRequestId = 0;
 let responseNeedsRefresh = false;
 
+// --- Challenge feature state ---
+let challengeHandRaised = false;
+let challengeRatings = {}; // { challenge_key: selected_score }
+let lastReceivedState = null; // latest state snapshot for the raise-hand toggle
+let _challengeToggleInFlight = false;
+let _lastChallengeCardsSig = null;
+
 const dashboard = document.querySelector('.dashboard');
 if (dashboard) {
     let _pollInProgress = false;
@@ -768,6 +775,9 @@ if (dashboard) {
                 if (data.top_teams) {
                     renderTopTeams(data.top_teams);
                 }
+                if (data.top_challengers) {
+                    renderTopChallengers(data.top_challengers);
+                }
             }
             // The server keeps Ended pages on a low-frequency recovery poll.
             if (data.poll_interval) interval = data.poll_interval;
@@ -1080,6 +1090,7 @@ if (dashboard) {
         // Remember the latest snapshot so pending secondary syncs can retry
         // from cheap changed:false poll cycles.
         _lastState = state;
+        lastReceivedState = state;
 
         // The dashboard's activity controls are rendered server-side for the
         // current phase and team. Reload once when either changes so students
@@ -1284,6 +1295,9 @@ if (dashboard) {
                 stopTimer();
             }
         }
+
+        // --- Challenge feature ---
+        renderChallengeUI(state);
     }
 
     // --- Top 3 Teams results (shown when session ends) ---
@@ -1641,6 +1655,288 @@ function refreshRosterInPlace() {
         loadStudentTable();
     }
 }
+
+/* ===== CHALLENGE FEATURE ===== */
+
+function escapeHtml(str) {
+    const div = document.createElement('div');
+    div.textContent = str;
+    return div.innerHTML;
+}
+
+function getPresentationKey(state) {
+    return state.poll_question_key ||
+        (state.presentation_started_at ? `pres-${state.presentation_started_at}` : null);
+}
+
+function renderChallengeUI(state) {
+    const section = document.getElementById('challenge-section');
+    if (!section) return;
+
+    const isCompetition = state.phase === 'competition';
+    const hasActive = !!(isCompetition && state.active_team && state.active_question);
+    const challenges = state.active_challenges || [];
+    const presKey = getPresentationKey(state);
+
+    // Show section if we're in competition with an active presentation
+    const showSection = hasActive;
+    section.style.display = showSection ? 'block' : 'none';
+    if (!showSection) {
+        challengeHandRaised = false;
+        challengeRatings = {};
+        _lastChallengeCardsSig = null;
+        return;
+    }
+
+    const amPresenting = MY_TEAM_ID !== null && state.active_team.id === MY_TEAM_ID;
+    const noTeam = MY_TEAM_ID === null;
+    const raiseHandDiv = document.getElementById('challenge-raise-hand');
+    if (raiseHandDiv) {
+        raiseHandDiv.style.display = (amPresenting || noTeam) ? 'none' : 'block';
+        const btn = document.getElementById('btn-raise-hand');
+        const status = document.getElementById('raise-hand-status');
+        if (btn) {
+            btn.textContent = challengeHandRaised ? '✋ Hand Raised (Cancel)' : '🙋 Raise Hand to Challenge';
+            btn.className = challengeHandRaised ? 'btn btn-secondary' : 'btn btn-primary';
+            btn.setAttribute('aria-pressed', challengeHandRaised ? 'true' : 'false');
+        }
+        if (status) {
+            status.textContent = challengeHandRaised ? 'Waiting to be selected...' : '';
+        }
+    }
+
+    // Render challenger cards (skip rebuild if data unchanged — avoids
+    // destroying star/submit UI every 1s poll cycle)
+    const cardsDiv = document.getElementById('challenge-cards');
+    if (!cardsDiv) return;
+    const cardsSig = JSON.stringify({ challenges, amPresenting, MY_TEAM_ID });
+    if (cardsSig !== _lastChallengeCardsSig) {
+        _lastChallengeCardsSig = cardsSig;
+        cardsDiv.innerHTML = '';
+
+    for (const ch of challenges) {
+        const isMyTeam = MY_TEAM_ID === ch.challenger_team_id;
+        const isPresentingTeam = amPresenting;
+        const canRate = !isMyTeam && !isPresentingTeam;
+
+        const card = document.createElement('div');
+        card.className = 'challenge-card';
+        card.dataset.challengeKey = ch.challenge_key;
+
+        const header = document.createElement('div');
+        header.className = 'challenge-card-header';
+        header.innerHTML = `<span class="challenge-badge">Challenger ${ch.challenge_num}</span>
+            <strong>${escapeHtml(ch.challenger_name || '')}</strong>
+            <span class="hint">from ${escapeHtml(ch.challenger_team_name || '')}</span>`;
+        card.appendChild(header);
+
+        if (canRate) {
+            const ratingDiv = document.createElement('div');
+            ratingDiv.className = 'challenge-rating-row';
+            ratingDiv.innerHTML = `<span class="hint">Rate this question:</span>`;
+            const starRow = document.createElement('div');
+            starRow.className = 'star-row challenge-stars';
+            starRow.dataset.challengeKey = ch.challenge_key;
+            starRow.setAttribute('role', 'group');
+            starRow.setAttribute('aria-label', `Rate challenger ${ch.challenger_name || ''}: 1 to 5 stars`);
+            const currentVal = challengeRatings[ch.challenge_key] || 0;
+            for (let i = 1; i <= 5; i++) {
+                const star = document.createElement('button');
+                star.type = 'button';
+                star.className = 'star' + (i <= currentVal ? ' active' : '');
+                star.dataset.value = i;
+                star.innerHTML = i <= currentVal ? '★' : '☆';
+                star.setAttribute('aria-label', `${i} out of 5`);
+                star.addEventListener('click', () => selectChallengeRating(ch.challenge_key, i));
+                starRow.appendChild(star);
+            }
+            ratingDiv.appendChild(starRow);
+
+            const submitBtn = document.createElement('button');
+            submitBtn.className = 'btn btn-sm btn-primary';
+            submitBtn.textContent = 'Submit';
+            submitBtn.style.marginLeft = '8px';
+            submitBtn.addEventListener('click', () => submitChallengeRating(ch.challenge_key));
+            ratingDiv.appendChild(submitBtn);
+
+            card.appendChild(ratingDiv);
+        } else if (isMyTeam) {
+            const note = document.createElement('p');
+            note.className = 'hint';
+            note.textContent = '(Your teammate — you cannot rate this)';
+            card.appendChild(note);
+        } else if (isPresentingTeam) {
+            const note = document.createElement('p');
+            note.className = 'hint';
+            note.textContent = '(Your team is presenting — you cannot rate challenges)';
+            card.appendChild(note);
+        }
+
+        cardsDiv.appendChild(card);
+    }
+    } // end if (cardsSig changed)
+}
+
+window.toggleRaiseHand = async function() {
+    if (_challengeToggleInFlight) return;
+    const state = lastReceivedState;
+    if (!state) return;
+    const presKey = getPresentationKey(state);
+    if (!presKey) return;
+    _challengeToggleInFlight = true;
+    try {
+        const endpoint = challengeHandRaised ? '/api/lower_hand' : '/api/raise_hand';
+        const data = await postJSON(endpoint, { presentation_key: presKey });
+        if (data.success) {
+            challengeHandRaised = !challengeHandRaised;
+            renderChallengeUI(state);
+        } else {
+            showToast(data.error || 'Failed', 'error');
+        }
+    } catch (e) {
+        showToast('Network error', 'error');
+    } finally {
+        _challengeToggleInFlight = false;
+    }
+};
+
+function selectChallengeRating(challengeKey, score) {
+    challengeRatings[challengeKey] = score;
+    // Update star display
+    const starRow = document.querySelector(`.challenge-stars[data-challenge-key="${challengeKey}"]`);
+    if (starRow) {
+        starRow.querySelectorAll('.star').forEach(s => {
+            const val = parseInt(s.dataset.value);
+            s.classList.toggle('active', val <= score);
+            s.innerHTML = val <= score ? '★' : '☆';
+        });
+    }
+}
+
+window.submitChallengeRating = async function(challengeKey) {
+    const score = challengeRatings[challengeKey];
+    if (!score) {
+        showToast('Select a rating first', 'warning');
+        return;
+    }
+    try {
+        const data = await postJSON('/api/submit_challenge_rating', {
+            challenge_key: challengeKey,
+            score: score,
+        });
+        if (data.success) {
+            showToast('Rating submitted', 'success');
+        } else {
+            showToast(data.error || 'Failed to submit', 'error');
+        }
+    } catch (e) {
+        showToast('Network error', 'error');
+    }
+};
+
+// Top challengers on the ended page (sibling of top-teams-display)
+function renderTopChallengers(topChallengers) {
+    const chDiv = document.getElementById('top-challengers-display');
+    if (chDiv) {
+        if (topChallengers && topChallengers.length > 0) {
+            chDiv.innerHTML = '<h3>🏅 Best Challenger</h3>';
+            const list = document.createElement('div');
+            list.className = 'top-teams-list';
+            for (const ch of topChallengers) {
+                const item = document.createElement('div');
+                item.className = 'top-team-item';
+                const medal = ch.rank === 1 ? '🥇' : ch.rank === 2 ? '🥈' : '🥉';
+                item.innerHTML = `<span class="medal">${medal}</span> ${escapeHtml(ch.name)}`;
+                list.appendChild(item);
+            }
+            chDiv.appendChild(list);
+        } else {
+            chDiv.innerHTML = '';
+        }
+    }
+}
+
+function renderInstructorChallenge(state) {
+    const panel = document.getElementById('challenge-instructor-panel');
+    if (!panel) return;
+
+    const hands = state.challenge_hands || [];
+    const challenges = state.active_challenges || [];
+    const counts = state.challenge_rating_counts || {};
+
+    // Render raised hands
+    const handsDiv = document.getElementById('challenge-hands-list');
+    if (handsDiv) {
+        if (hands.length === 0) {
+            handsDiv.innerHTML = '<span class="hint">No raised hands yet.</span>';
+        } else {
+            handsDiv.innerHTML = '';
+            for (const h of hands) {
+                const row = document.createElement('div');
+                row.className = 'challenge-hand-row';
+                row.style.cssText = 'display:flex;align-items:center;gap:8px;margin:4px 0;';
+                row.innerHTML = `<span>${escapeHtml(h.student_name)} (${escapeHtml(h.student_team_name || '')})</span>`;
+                const btn = document.createElement('button');
+                btn.className = 'btn btn-sm btn-primary';
+                btn.textContent = 'Select as Challenger';
+                btn.addEventListener('click', () => selectChallenger(h.student_id));
+                row.appendChild(btn);
+                handsDiv.appendChild(row);
+            }
+        }
+    }
+
+    // Render active challengers
+    const activeDiv = document.getElementById('challenge-active-list');
+    if (activeDiv) {
+        if (challenges.length === 0) {
+            activeDiv.innerHTML = '';
+        } else {
+            activeDiv.innerHTML = '';
+            for (const ch of challenges) {
+                const count = counts[ch.challenge_key] || 0;
+                const row = document.createElement('div');
+                row.className = 'challenge-active-row';
+                row.style.cssText = 'display:flex;align-items:center;gap:8px;margin:4px 0;padding:4px 8px;background:var(--accent-bg);border-radius:6px;';
+                row.innerHTML = `<strong>Challenger ${ch.challenge_num}:</strong>
+                    ${escapeHtml(ch.challenger_name)} (${escapeHtml(ch.challenger_team_name || '')})
+                    <span class="hint">— ${count} ratings</span>`;
+                const btn = document.createElement('button');
+                btn.className = 'btn btn-sm btn-danger';
+                btn.textContent = 'Clear';
+                btn.addEventListener('click', () => clearChallenger(ch.challenge_key));
+                row.appendChild(btn);
+                activeDiv.appendChild(row);
+            }
+        }
+    }
+}
+
+window.selectChallenger = async function(studentId) {
+    const payload = instructorStatePayload();
+    payload.student_id = studentId;
+    try {
+        const data = await postJSON('/api/select_challenger', payload);
+        if (!data.success) {
+            showToast(data.error || 'Failed to select challenger', 'error');
+        }
+    } catch (e) {
+        showToast('Network error', 'error');
+    }
+};
+
+window.clearChallenger = async function(challengeKey) {
+    const payload = instructorStatePayload();
+    payload.challenge_key = challengeKey;
+    try {
+        const data = await postJSON('/api/clear_challenger', payload);
+        if (!data.success) {
+            showToast(data.error || 'Failed to clear challenger', 'error');
+        }
+    } catch (e) {
+        showToast('Network error', 'error');
+    }
+};
 
 if (instructor) {
     // Match the compact JSON representation used by poll responses before
@@ -2011,6 +2307,9 @@ if (instructor) {
                     renderHistory();
                 }
             }
+
+            // --- Challenge feature: raised hands + active challengers ---
+            renderInstructorChallenge(state);
 
             if (data.poll_interval) interval = data.poll_interval;
             if (data.stop_polling) _instrPollStopped = true;

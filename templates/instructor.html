@@ -278,6 +278,13 @@
                 <span class="poll-badge">⭐ Poll active</span>
                 <button class="btn btn-sm btn-secondary" onclick="stopPoll()">Stop Poll</button>
             </div>
+
+            {# Challenge controls #}
+            <div class="challenge-instructor-panel" id="challenge-instructor-panel" style="margin-top:16px;">
+                <h4>🗣 Challenge</h4>
+                <div id="challenge-hands-list" class="hint">No raised hands yet.</div>
+                <div id="challenge-active-list" style="margin-top:12px;"></div>
+            </div>
             </div>
             <div id="presentation-idle"{% if presentation_active %} style="display:none"{% endif %}>
             {# --- No active presentation --- #}

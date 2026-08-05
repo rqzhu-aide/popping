@@ -86,6 +86,16 @@
         </div>
     </section>
 
+    <!-- Challenge section: visible during competition when there are active challenges -->
+    <section class="card challenge-section" id="challenge-section" style="display:none;">
+        <h2>🗣 Challenge</h2>
+        <div id="challenge-raise-hand" style="display:none; margin-bottom: 16px;">
+            <button class="btn btn-primary" id="btn-raise-hand" onclick="toggleRaiseHand()">🙋 Raise Hand to Challenge</button>
+            <p id="raise-hand-status" class="hint" style="margin-top:8px;"></p>
+        </div>
+        <div id="challenge-cards"></div>
+    </section>
+
     <!-- Team section -->
     {% if not team %}
     <section class="card team-select">
@@ -182,6 +192,7 @@
         <h2>🏆 Final Results</h2>
         <p class="hint" style="margin-bottom: 16px;">Thank you for participating!</p>
         <div id="top-teams-display"></div>
+        <div id="top-challengers-display" style="margin-top: 20px;"></div>
     </section>
 
     <!-- Roster (always bottom) -->

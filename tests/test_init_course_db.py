@@ -33,10 +33,8 @@ team_pool_size: 3
 max_teams: 2
 max_members_per_team: 4
 teams:
-  - name: Alpha
-    color: '#ef4444'
-  - name: Beta
-    color: '#3b82f6'
+  - color: '#ef4444'
+  - color: '#3b82f6'
 """,
         encoding="utf-8",
     )
@@ -267,7 +265,7 @@ def test_validation_rejects_foreign_key_errors_and_wrong_course_slug(
 
 def test_initializer_rejects_team_capacity_above_99(init_course_db_module):
     config = {
-        "teams": [{"name": "Alpha"}],
+        "teams": [{"color": "#ef4444"}],
         "max_teams": 1,
         "max_members_per_team": 100,
     }

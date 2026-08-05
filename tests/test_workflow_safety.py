@@ -815,12 +815,17 @@ def test_reset_creates_recoverable_backup_before_clearing(course_env):
     assert live_state["session_key"] == SESSION_KEY + 1
 
 
-def test_reset_holds_write_lock_while_creating_backup(course_env, monkeypatch):
+def test_reset_creates_backup_before_acquiring_write_lock(course_env, monkeypatch):
+    """The backup snapshot must happen before BEGIN IMMEDIATE so its internal
+    SQLite connection doesn't compete with the held write lock.  The
+    state_version guard inside the lock is what prevents lost updates."""
     _set_state(course_env, phase="ended")
     original_backup = app_module._create_reset_backup
     lock_observed = []
 
-    def backup_while_contended(slug):
+    def backup_uncontended(slug):
+        # If the write lock were held during backup, this second connection
+        # would get SQLITE_BUSY.  With the backup before the lock, it succeeds.
         contender = sqlite3.connect(course_env["db_path"], timeout=0.05)
         try:
             contender.execute(
@@ -828,21 +833,22 @@ def test_reset_holds_write_lock_while_creating_backup(course_env, monkeypatch):
             )
             contender.commit()
         except sqlite3.OperationalError as exc:
-            assert "locked" in str(exc).lower()
             lock_observed.append(True)
+        else:
+            lock_observed.append(False)
         finally:
             contender.close()
         return original_backup(slug)
 
     monkeypatch.setattr(
-        app_module, "_create_reset_backup", backup_while_contended
+        app_module, "_create_reset_backup", backup_uncontended
     )
     response = _instructor_client(course_env).post(
         "/api/reset_data", json=_reset_payload(course_env, "ended")
     )
 
     assert response.status_code == 200
-    assert lock_observed == [True]
+    assert lock_observed == [False]
 
 
 def test_reset_restores_hidden_discussion_questions(course_env):
@@ -1524,7 +1530,7 @@ def test_recorded_activity_counts_do_not_depend_on_online_presence(course_env):
     assert discussion_state["thumb_online_eligible_count"] == 0
 
 
-def test_student_team_api_hides_other_teams_member_identities(course_env):
+def test_student_team_api_shows_all_team_members(course_env):
     student_teams = _student_client(course_env, "s1").get("/api/teams").get_json()
     by_name = {team["name"]: team for team in student_teams}
 
@@ -1533,10 +1539,10 @@ def test_student_team_api_hides_other_teams_member_identities(course_env):
         "s1",
         "s2",
     }
-    assert by_name["Team 2"]["members_visible"] is False
+    # Students can see all teams' members (not just their own)
+    assert by_name["Team 2"]["members_visible"] is True
     assert by_name["Team 2"]["member_count"] == 1
-    assert by_name["Team 2"]["members"] == []
-    assert "s4" not in str(student_teams)
+    assert [member["student_id"] for member in by_name["Team 2"]["members"]] == ["s4"]
 
     instructor_teams = _instructor_client(course_env).get("/api/teams").get_json()
     instructor_team_2 = next(
@@ -2280,7 +2286,7 @@ def test_cancel_presentation_requires_explicit_rating_discard(course_env):
         ).fetchone()[0] == 0
 
 
-def test_login_throttle_blocks_after_eight_failures_then_expires(course_env):
+def test_login_throttle_blocks_after_three_failures_then_expires(course_env):
     client = app_module.app.test_client()
     route = f"/login/{course_env['slug']}"
     for _ in range(app_module.LOGIN_FAILURE_LIMIT):
@@ -2296,7 +2302,6 @@ def test_login_throttle_blocks_after_eight_failures_then_expires(course_env):
     assert int(blocked.headers["Retry-After"]) > 0
     assert b"Too many failed login attempts" in blocked.data
     assert b"try again in" in blocked.data
-    assert b"minute" in blocked.data
 
     with _connect(course_env) as db:
         db.execute(

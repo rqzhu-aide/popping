@@ -1,5 +1,4 @@
 import os
-import json
 import re
 import sqlite3
 import threading
@@ -166,6 +165,8 @@ def _ensure_schema_locked(db):
         db.execute('ALTER TABLE course_state ADD COLUMN state_version INTEGER DEFAULT 0')
     if 'discussion_questions_version' not in cs_cols:
         db.execute('ALTER TABLE course_state ADD COLUMN discussion_questions_version INTEGER DEFAULT 0')
+    if 'active_challenges_json' not in cs_cols:
+        db.execute("ALTER TABLE course_state ADD COLUMN active_challenges_json TEXT DEFAULT '[]'")
     # Auto-bump state_version on every course_state UPDATE so students polling
     # with ?since=<version> learn about any mutation within one poll. The WHEN
     # guard keeps it loop-free even if recursive_triggers is enabled.
@@ -188,6 +189,82 @@ def _ensure_schema_locked(db):
         FOREIGN KEY (course_id) REFERENCES courses (id) ON DELETE CASCADE,
         PRIMARY KEY (course_id, week_num, question_key)
     )''')
+
+    # Challenge feature: one row per challenger selected during a presentation.
+    db.execute('''CREATE TABLE IF NOT EXISTS challenge_rounds (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        course_id INTEGER NOT NULL,
+        session_key INTEGER NOT NULL,
+        week_num INTEGER,
+        presentation_key TEXT NOT NULL,
+        challenge_key TEXT NOT NULL UNIQUE,
+        challenge_num INTEGER NOT NULL,
+        challenger_id INTEGER NOT NULL,
+        challenger_name TEXT,
+        challenger_team_id INTEGER,
+        challenger_team_name TEXT,
+        presenting_team_id INTEGER,
+        presenting_team_name TEXT,
+        question_id INTEGER,
+        question_title TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (course_id) REFERENCES courses (id) ON DELETE CASCADE,
+        FOREIGN KEY (challenger_id) REFERENCES students (id) ON DELETE CASCADE,
+        FOREIGN KEY (challenger_team_id) REFERENCES teams (id) ON DELETE SET NULL,
+        FOREIGN KEY (presenting_team_id) REFERENCES teams (id) ON DELETE SET NULL,
+        UNIQUE(course_id, presentation_key, challenge_num)
+    )''')
+
+    # Challenge feature: ephemeral raised hands wanting to challenge.
+    db.execute('''CREATE TABLE IF NOT EXISTS challenge_hands (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        course_id INTEGER NOT NULL,
+        session_key INTEGER NOT NULL,
+        presentation_key TEXT NOT NULL,
+        student_id INTEGER NOT NULL,
+        student_name TEXT,
+        student_team_id INTEGER,
+        student_team_name TEXT,
+        raised_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (course_id) REFERENCES courses (id) ON DELETE CASCADE,
+        FOREIGN KEY (student_id) REFERENCES students (id) ON DELETE CASCADE,
+        UNIQUE(course_id, presentation_key, student_id)
+    )''')
+
+    # Challenge feature: 1-5 peer ratings of challenger question quality.
+    db.execute('''CREATE TABLE IF NOT EXISTS challenge_ratings (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        course_id INTEGER NOT NULL,
+        session_key INTEGER NOT NULL,
+        week_num INTEGER,
+        challenge_key TEXT NOT NULL,
+        presentation_key TEXT NOT NULL,
+        challenger_id INTEGER NOT NULL,
+        challenger_name TEXT,
+        challenger_team_id INTEGER,
+        challenger_team_name TEXT,
+        rater_id INTEGER NOT NULL,
+        rater_name TEXT,
+        rater_team_id INTEGER,
+        rater_team_name TEXT,
+        score INTEGER CHECK(score >= 1 AND score <= 5),
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (course_id) REFERENCES courses (id) ON DELETE CASCADE,
+        FOREIGN KEY (challenger_id) REFERENCES students (id) ON DELETE CASCADE,
+        FOREIGN KEY (rater_id) REFERENCES students (id) ON DELETE CASCADE,
+        FOREIGN KEY (challenger_team_id) REFERENCES teams (id) ON DELETE SET NULL,
+        FOREIGN KEY (rater_team_id) REFERENCES teams (id) ON DELETE SET NULL,
+        UNIQUE(course_id, challenge_key, rater_id)
+    )''')
+
+    db.execute('''CREATE INDEX IF NOT EXISTS idx_challenge_rounds_pres
+                  ON challenge_rounds(course_id, presentation_key)''')
+    db.execute('''CREATE INDEX IF NOT EXISTS idx_challenge_hands_pres
+                  ON challenge_hands(course_id, presentation_key)''')
+    db.execute('''CREATE INDEX IF NOT EXISTS idx_challenge_ratings_challenge
+                  ON challenge_ratings(course_id, challenge_key)''')
+    db.execute('''CREATE INDEX IF NOT EXISTS idx_challenge_ratings_export_week
+                  ON challenge_ratings(course_id, week_num)''')
 
     # questions columns
     q_cols = [row['name'] for row in db.execute('PRAGMA table_info(questions)').fetchall()]
@@ -378,90 +455,6 @@ def _ensure_schema_locked(db):
                     ),
                     source_question_key = 'legacy' '''
         )
-
-    # One-time, data-preserving cleanup for databases created before numbered
-    # default team names were introduced.  Custom team names are untouched.
-    greek_defaults = {
-        'Alpha': 'Team 1', 'Beta': 'Team 2', 'Gamma': 'Team 3',
-        'Delta': 'Team 4', 'Epsilon': 'Team 5', 'Zeta': 'Team 6',
-        'Eta': 'Team 7', 'Theta': 'Team 8', 'Iota': 'Team 9',
-        'Kappa': 'Team 10',
-    }
-    for course in db.execute('SELECT id FROM courses').fetchall():
-        rows = db.execute(
-            'SELECT id, name FROM teams WHERE course_id = ?', [course['id']]
-        ).fetchall()
-        by_name = {row['name']: row['id'] for row in rows}
-        renames = [
-            (row['id'], row['name'], greek_defaults[row['name']])
-            for row in rows if row['name'] in greek_defaults
-            and greek_defaults[row['name']] not in by_name
-        ]
-        for team_id, _old_name, _new_name in renames:
-            db.execute(
-                'UPDATE teams SET name = ? WHERE id = ?',
-                [f'__default_team_{team_id}__', team_id]
-            )
-        for team_id, _old_name, new_name in renames:
-            db.execute('UPDATE teams SET name = ? WHERE id = ?', [new_name, team_id])
-        if not renames:
-            continue
-
-        rename_by_old = {
-            old_name: (team_id, new_name)
-            for team_id, old_name, new_name in renames
-        }
-        state = db.execute(
-            '''SELECT id, presentation_history FROM course_state
-               WHERE course_id = ?''',
-            [course['id']]
-        ).fetchone()
-        try:
-            history = json.loads(state['presentation_history'] or '[]') \
-                if state else []
-        except (TypeError, ValueError):
-            history = []
-        history_changed = False
-        for item in history:
-            old_name = item.get('team')
-            if old_name not in rename_by_old:
-                continue
-            team_id, new_name = rename_by_old[old_name]
-            item['team'] = new_name
-            item['team_id'] = team_id
-            history_changed = True
-            question_key = item.get('presentation_key') or (
-                f"pres-{item.get('started_at', '')}" if item.get('started_at') else None
-            )
-            if question_key:
-                db.execute(
-                    '''UPDATE presentation_ratings
-                       SET presenting_team_id = COALESCE(presenting_team_id, ?),
-                           presenting_team_name = ?
-                       WHERE course_id = ? AND question_key = ?
-                         AND (presenting_team_name IS NULL OR presenting_team_name = ?)''',
-                    [team_id, new_name, course['id'], question_key, old_name]
-                )
-        if history_changed:
-            db.execute(
-                'UPDATE course_state SET presentation_history = ? WHERE id = ?',
-                [json.dumps(history), state['id']]
-            )
-        for team_id, old_name, new_name in renames:
-            db.execute(
-                '''UPDATE presentation_ratings
-                   SET presenting_team_id = COALESCE(presenting_team_id, ?),
-                       presenting_team_name = ?
-                   WHERE course_id = ? AND presenting_team_name = ?''',
-                [team_id, new_name, course['id'], old_name]
-            )
-            db.execute(
-                '''UPDATE presentation_ratings
-                   SET rater_team_id = COALESCE(rater_team_id, ?),
-                       rater_team_name = ?
-                   WHERE course_id = ? AND rater_team_name = ?''',
-                [team_id, new_name, course['id'], old_name]
-            )
 
 def get_max_teams(slug, course_id):
     """Get max_teams for a course, with fallback for old databases."""

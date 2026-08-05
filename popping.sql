@@ -1,3 +1,6 @@
+DROP TABLE IF EXISTS challenge_ratings;
+DROP TABLE IF EXISTS challenge_hands;
+DROP TABLE IF EXISTS challenge_rounds;
 DROP TABLE IF EXISTS discussion_responses;
 DROP TABLE IF EXISTS teammate_thumbs;
 DROP TABLE IF EXISTS presentation_ratings;
@@ -114,6 +117,7 @@ CREATE TABLE course_state (
     current_discussion_source_key TEXT,
     current_discussion_title TEXT,
     current_discussion_content TEXT,
+    active_challenges_json TEXT DEFAULT '[]',
     FOREIGN KEY (course_id) REFERENCES courses (id) ON DELETE CASCADE,
     FOREIGN KEY (active_team_id) REFERENCES teams (id) ON DELETE SET NULL,
     FOREIGN KEY (active_question_id) REFERENCES questions (id) ON DELETE SET NULL
@@ -204,6 +208,82 @@ CREATE TABLE hidden_discussion_questions (
     FOREIGN KEY (course_id) REFERENCES courses (id) ON DELETE CASCADE,
     PRIMARY KEY (course_id, week_num, question_key)
 );
+
+-- Challenge round: one row per challenger selected during a presentation.
+CREATE TABLE challenge_rounds (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    course_id INTEGER NOT NULL,
+    session_key INTEGER NOT NULL,
+    week_num INTEGER,
+    presentation_key TEXT NOT NULL,
+    challenge_key TEXT NOT NULL UNIQUE,
+    challenge_num INTEGER NOT NULL,
+    challenger_id INTEGER NOT NULL,
+    challenger_name TEXT,
+    challenger_team_id INTEGER,
+    challenger_team_name TEXT,
+    presenting_team_id INTEGER,
+    presenting_team_name TEXT,
+    question_id INTEGER,
+    question_title TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (course_id) REFERENCES courses (id) ON DELETE CASCADE,
+    FOREIGN KEY (challenger_id) REFERENCES students (id) ON DELETE CASCADE,
+    FOREIGN KEY (challenger_team_id) REFERENCES teams (id) ON DELETE SET NULL,
+    FOREIGN KEY (presenting_team_id) REFERENCES teams (id) ON DELETE SET NULL,
+    UNIQUE(course_id, presentation_key, challenge_num)
+);
+
+-- Raised hands: ephemeral list of students wanting to challenge.
+CREATE TABLE challenge_hands (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    course_id INTEGER NOT NULL,
+    session_key INTEGER NOT NULL,
+    presentation_key TEXT NOT NULL,
+    student_id INTEGER NOT NULL,
+    student_name TEXT,
+    student_team_id INTEGER,
+    student_team_name TEXT,
+    raised_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (course_id) REFERENCES courses (id) ON DELETE CASCADE,
+    FOREIGN KEY (student_id) REFERENCES students (id) ON DELETE CASCADE,
+    UNIQUE(course_id, presentation_key, student_id)
+);
+
+-- Challenge ratings: 1-5 score from peers for the challenger's question.
+CREATE TABLE challenge_ratings (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    course_id INTEGER NOT NULL,
+    session_key INTEGER NOT NULL,
+    week_num INTEGER,
+    challenge_key TEXT NOT NULL,
+    presentation_key TEXT NOT NULL,
+    challenger_id INTEGER NOT NULL,
+    challenger_name TEXT,
+    challenger_team_id INTEGER,
+    challenger_team_name TEXT,
+    rater_id INTEGER NOT NULL,
+    rater_name TEXT,
+    rater_team_id INTEGER,
+    rater_team_name TEXT,
+    score INTEGER CHECK(score >= 1 AND score <= 5),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (course_id) REFERENCES courses (id) ON DELETE CASCADE,
+    FOREIGN KEY (challenger_id) REFERENCES students (id) ON DELETE CASCADE,
+    FOREIGN KEY (rater_id) REFERENCES students (id) ON DELETE CASCADE,
+    FOREIGN KEY (challenger_team_id) REFERENCES teams (id) ON DELETE SET NULL,
+    FOREIGN KEY (rater_team_id) REFERENCES teams (id) ON DELETE SET NULL,
+    UNIQUE(course_id, challenge_key, rater_id)
+);
+
+CREATE INDEX idx_challenge_rounds_pres
+    ON challenge_rounds(course_id, presentation_key);
+CREATE INDEX idx_challenge_hands_pres
+    ON challenge_hands(course_id, presentation_key);
+CREATE INDEX idx_challenge_ratings_challenge
+    ON challenge_ratings(course_id, challenge_key);
+CREATE INDEX idx_challenge_ratings_export_week
+    ON challenge_ratings(course_id, week_num);
 
 -- Auto-increment state_version on every UPDATE of course_state so that no
 -- mutation can forget to signal students. The WHEN guard prevents a loop if a

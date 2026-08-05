@@ -151,9 +151,8 @@ def get_poll_duration(slug):
 # dominant classroom traffic; gzip reduces repeated keys and question HTML
 # substantially without adding a third-party dependency.
 JSON_COMPRESSION_MIN_BYTES = 500
-LOGIN_FAILURE_LIMIT = 8
-LOGIN_WINDOW_SECONDS = 600
-LOGIN_CLIENT_FAILURE_LIMIT = 500
+LOGIN_FAILURE_LIMIT = 3
+LOGIN_WINDOW_SECONDS = 60
 MAX_ROSTER_BYTES = 1024 * 1024
 MAX_ROSTER_ROWS = 500
 MAX_EXPORT_ROWS = 100000
@@ -832,23 +831,6 @@ def _login_retry_after(slug, course_id, login_type, principal, client_hash):
                     .total_seconds()) + 1,
             )
 
-    client_failures = query_db(
-        slug,
-        '''SELECT COALESCE(SUM(failed_count), 0) AS c,
-                  MIN(window_started_at) AS oldest
-           FROM login_attempts
-           WHERE course_id = ? AND login_type = ? AND client_hash = ?
-             AND window_started_at > ?''',
-        [course_id, login_type, client_hash,
-         window_start.strftime('%Y-%m-%d %H:%M:%S')], one=True
-    )
-    if client_failures and client_failures['c'] >= LOGIN_CLIENT_FAILURE_LIMIT:
-        oldest = _parse_db_datetime(client_failures['oldest']) or now
-        return max(
-            1,
-            int((oldest + timedelta(seconds=LOGIN_WINDOW_SECONDS) - now)
-                .total_seconds()) + 1,
-        )
     return 0
 
 
@@ -913,10 +895,15 @@ def _clear_login_failures(slug, course_id, login_type, principal, client_hash):
 
 
 def _rate_limited_login_response(template, slug, course, retry_after):
-    minutes = max(1, math.ceil(retry_after / 60))
+    if retry_after >= 60:
+        unit = 'minute' if retry_after < 120 else 'minutes'
+        amount = max(1, math.ceil(retry_after / 60))
+        wait = f'{amount} {unit}'
+    else:
+        wait = f'{retry_after} second{"s" if retry_after != 1 else ""}'
     flash(
         f'Too many failed login attempts. '
-        f'Please try again in {minutes} minute{"s" if minutes > 1 else ""}.',
+        f'Please try again in {wait}.',
         'error'
     )
     response = make_response(
@@ -1383,12 +1370,19 @@ def demo_instance_home(instance_slug):
     if not _demo_instance_ready(instance_slug):
         flash('This private demo is no longer available.', 'error')
         return redirect(url_for('demo'))
-    touch_demo_instance(config.DATA_DIR, instance_slug)
+    try:
+        touch_demo_instance(config.DATA_DIR, instance_slug)
+    except OSError:
+        flash('This private demo is no longer available.', 'error')
+        return redirect(url_for('demo'))
     return render_template('demo.html', instance_slug=instance_slug)
 
 
 def _start_demo_session(instance_slug, role, principal):
     if not _demo_instance_ready(instance_slug):
+        flash('This private demo is no longer available.', 'error')
+        return redirect(url_for('demo'))
+    if not principal:
         flash('This private demo is no longer available.', 'error')
         return redirect(url_for('demo'))
 
@@ -1855,6 +1849,51 @@ def _compute_top_teams(slug, course_id, history, session_key):
     return team_ratings
 
 
+def _compute_top_challengers(slug, course_id, session_key):
+    """Compute challenger rankings by average challenge rating.
+
+    Follows the _compute_top_teams pattern: exact Fraction-based averages,
+    ties share a rank. Students see name + rank only (no scores) — same
+    grading-privacy rule as the team leaderboard.
+    """
+    all_ratings = query_db(slug,
+        '''SELECT cr.challenger_id, cr.challenger_name, cr.score
+           FROM challenge_ratings cr
+           WHERE cr.course_id = ? AND cr.session_key = ?''',
+        [course_id, session_key])
+
+    challenger_scores = {}
+    for r in all_ratings:
+        name = r['challenger_name']
+        if not name or r['score'] is None:
+            continue
+        identity = ('id', r['challenger_id']) if r['challenger_id'] is not None else (
+            'name', name.casefold()
+        )
+        score = challenger_scores.setdefault(identity, {
+            'id': r['challenger_id'], 'name': name,
+            'score_sum': 0, 'score_count': 0,
+        })
+        score['score_sum'] += r['score']
+        score['score_count'] += 1
+
+    ranked = list(challenger_scores.values())
+    for score in ranked:
+        score['_fraction'] = Fraction(score['score_sum'], score['score_count'])
+    ranked.sort(key=lambda score: (
+        -score['_fraction'], score['name'].casefold(), score['id'] or 0
+    ))
+    prior_fraction = None
+    for position, score in enumerate(ranked, 1):
+        if prior_fraction is None or score['_fraction'] != prior_fraction:
+            rank = position
+        score['rank'] = rank
+        score['avg_score'] = round(float(score['_fraction']), 2)
+        prior_fraction = score['_fraction']
+        score.pop('_fraction')
+    return ranked
+
+
 def _compute_state(slug, include_poll_count=True, known_question_id=None,
                    known_question_revision=None):
     """Compute the course-state dict — shared by /api/state and /api/poll.
@@ -1981,6 +2020,11 @@ def _compute_state(slug, include_poll_count=True, known_question_id=None,
         'state_version': state.get('state_version', 0) if state else 0,
         'session_elapsed': timing['session_elapsed'],
         'presentation_history': history,
+        # Challenge feature: active challengers for this presentation.
+        'active_challenges': (
+            json.loads(state['active_challenges_json'] or '[]')
+            if state else []
+        ),
         # Internal metadata used by api_poll for ended-phase ranking.
         '_course_id': state['course_id'] if state else None,
     }
@@ -2066,6 +2110,41 @@ def _compute_state(slug, include_poll_count=True, known_question_id=None,
                 ]
             else:
                 result['poll_non_raters'] = []
+
+            # Challenge feature: instructor-only raised-hands list + per-challenge
+            # rating counts, shown alongside the presentation poll controls.
+            if pres_key and state.get('active_team_id'):
+                hands = query_db(
+                    slug,
+                    '''SELECT student_id, student_name, student_team_id,
+                              student_team_name
+                       FROM challenge_hands
+                       WHERE course_id = ? AND presentation_key = ?
+                       ORDER BY raised_at''',
+                    [cid, pres_key])
+                result['challenge_hands'] = [
+                    {'student_id': h['student_id'],
+                     'student_name': h['student_name'],
+                     'student_team_id': h['student_team_id'],
+                     'student_team_name': h['student_team_name']}
+                    for h in hands
+                ]
+                active_challenges = result.get('active_challenges') or []
+                challenge_counts = {}
+                for ch in active_challenges:
+                    ch_key = ch.get('challenge_key')
+                    if not ch_key:
+                        continue
+                    cnt = query_db(
+                        slug,
+                        '''SELECT COUNT(*) AS c FROM challenge_ratings
+                           WHERE course_id = ? AND challenge_key = ?''',
+                        [cid, ch_key], one=True)
+                    challenge_counts[ch_key] = cnt['c'] if cnt else 0
+                result['challenge_rating_counts'] = challenge_counts
+            else:
+                result['challenge_hands'] = []
+                result['challenge_rating_counts'] = {}
         else:
             result.update({
                 'unassigned_count': 0, 'poll_eligible_count': 0,
@@ -2073,6 +2152,8 @@ def _compute_state(slug, include_poll_count=True, known_question_id=None,
                 'thumb_participant_count': 0, 'thumb_eligible_count': 0,
                 'thumb_online_eligible_count': 0,
                 'poll_non_raters': [],
+                'challenge_hands': [],
+                'challenge_rating_counts': {},
             })
         result['completed_presentation_count'] = len(history)
         result['presentation_number'] = len(history) + 1 \
@@ -2140,7 +2221,7 @@ def api_teams():
     return jsonify(_compute_teams(
         slug, course['id'],
         member_team_id=student['team_id'] if student else None,
-        include_all_members=False,
+        include_all_members=True,
     ))
 
 
@@ -2359,6 +2440,18 @@ def api_poll():
             for team in all_ranked if team['rank'] <= 3
         ]
 
+    # --- Best Challenger (only when session has ended, students only) ---
+    # Same privacy rule as top teams: name + tied medal rank, no scores.
+    top_challengers = None
+    if state_data['phase'] == 'ended' and role == 'student':
+        all_challengers = _compute_top_challengers(
+            slug, course_id, state_data.get('session_key', 0)
+        )
+        top_challengers = [
+            {'name': c['name'], 'rank': c['rank']}
+            for c in all_challengers if c['rank'] <= 3
+        ]
+
     # --- Adaptive interval hint ---
     # 1s during all active phases so instructor actions (phase changes, posting
     # questions, starting polls, selecting teams) appear within 1 second.
@@ -2383,6 +2476,7 @@ def api_poll():
         'state': state_data,
         'state_version': state_data.get('state_version', 0),
         'top_teams': top_teams,
+        'top_challengers': top_challengers,
         'poll_interval': poll_interval,
         'stop_polling': stop_polling,
     })
@@ -2611,8 +2705,37 @@ def _finalize_active_presentation(slug, course_id, db=None):
                 'started_at': started_at,
                 'question_id': state['active_question_id'],
                 'ended_at': _utcnow().strftime('%Y-%m-%d %H:%M:%S'),
+                'challenges': [
+                    {
+                        'challenge_key': ch['challenge_key'],
+                        'challenge_num': ch['challenge_num'],
+                        'challenger_id': ch['challenger_id'],
+                        'challenger_name': ch['challenger_name'],
+                        'challenger_team_id': ch['challenger_team_id'],
+                        'challenger_team_name': ch['challenger_team_name'],
+                    }
+                    for ch in (
+                        db.execute(
+                            '''SELECT challenge_key, challenge_num,
+                                      challenger_id, challenger_name,
+                                      challenger_team_id, challenger_team_name
+                               FROM challenge_rounds
+                               WHERE course_id = ? AND presentation_key = ?
+                               ORDER BY challenge_num''',
+                            [course_id, presentation_key]
+                        ).fetchall()
+                    )
+                ],
             })
 
+        # Clean up stale raised-hand records for this presentation
+        # (do this BEFORE _clear_active_presentation nulls the state fields).
+        if state['active_team_id'] and state['active_question_id']:
+            db.execute(
+                '''DELETE FROM challenge_hands
+                   WHERE course_id = ? AND presentation_key = ?''',
+                [course_id, presentation_key]
+            )
         _clear_active_presentation(db, course_id, json.dumps(history))
         if owns_transaction:
             db.commit()
@@ -2631,8 +2754,9 @@ def _clear_active_presentation(db, course_id, history_json=None):
         'presentation_created_at = NULL', 'presentation_time_cap = 300',
         'presentation_remaining = NULL', 'poll_active = 0',
         'poll_question_key = NULL', 'poll_started_at = NULL',
+        'active_challenges_json = ?',
     ]
-    params = []
+    params = ["[]"]
     if history_json is not None:
         assignments.append('presentation_history = ?')
         params.append(history_json)
@@ -4339,7 +4463,11 @@ def stop_presentation():
         if not state['presentation_started_at']:
             db.rollback()
             return jsonify({'error': 'Presentation timer is already paused'}), 409
-        started = _parse_db_datetime(state['presentation_started_at'])
+        try:
+            started = _parse_db_datetime(state['presentation_started_at'])
+        except (ValueError, TypeError):
+            db.rollback()
+            return jsonify({'error': 'Presentation start time is corrupted'}), 409
         elapsed = (_utcnow() - started).total_seconds()
         cap = state['presentation_time_cap'] or 300
         remaining = max(0, int(cap - elapsed))
@@ -4569,9 +4697,359 @@ def cancel_presentation():
                    WHERE course_id = ? AND question_key = ?''',
                 [state['course_id'], presentation_key]
             )
+        # Clean up any challenge data for this presentation.
+        db.execute(
+            '''DELETE FROM challenge_ratings
+               WHERE course_id = ? AND presentation_key = ?''',
+            [state['course_id'], presentation_key]
+        )
+        db.execute(
+            '''DELETE FROM challenge_rounds
+               WHERE course_id = ? AND presentation_key = ?''',
+            [state['course_id'], presentation_key]
+        )
+        db.execute(
+            '''DELETE FROM challenge_hands
+               WHERE course_id = ? AND presentation_key = ?''',
+            [state['course_id'], presentation_key]
+        )
         _clear_active_presentation(db, state['course_id'])
         db.commit()
         return jsonify({'success': True, 'discarded_ratings': count})
+    except Exception:
+        db.rollback()
+        raise
+
+
+# ---------------------------------------------------------------------------
+# Challenge API — raise hand, select challenger, rate challenger
+# ---------------------------------------------------------------------------
+
+@app.route('/api/raise_hand', methods=['POST'])
+@student_login_required
+def raise_hand():
+    """Student raises their hand to challenge the presenting team."""
+    slug = session['slug']
+    data = request.get_json(silent=True) or {}
+    expected_key = str(data.get('presentation_key') or '').strip()
+    if not expected_key:
+        return jsonify({'error': 'Presentation key is required'}), 400
+    ensure_schema(slug)
+    db = get_db(slug)
+    db.execute('BEGIN IMMEDIATE')
+    try:
+        state = db.execute('SELECT * FROM course_state LIMIT 1').fetchone()
+        if not state or state['phase'] != 'competition':
+            db.rollback()
+            return jsonify({'error': 'Not in presentation phase'}), 403
+        pres_key = active_presentation_key(state)
+        if not pres_key or pres_key != expected_key:
+            db.rollback()
+            return jsonify({'error': 'The presentation has changed'}), 409
+        student = db.execute(
+            'SELECT * FROM students WHERE student_id = ? AND is_active = 1',
+            [session['student_id']]
+        ).fetchone()
+        if not student:
+            db.rollback()
+            return jsonify({'error': 'Student not found'}), 404
+        if not student['team_id']:
+            db.rollback()
+            return jsonify({'error': 'Join a team first'}), 403
+        if student['team_id'] == state['active_team_id']:
+            db.rollback()
+            return jsonify({'error': 'You cannot challenge your own team'}), 403
+        # Insert (idempotent via UNIQUE constraint)
+        team = db.execute(
+            'SELECT name FROM teams WHERE id = ?', [student['team_id']]
+        ).fetchone()
+        db.execute(
+            '''INSERT INTO challenge_hands
+               (course_id, session_key, presentation_key, student_id,
+                student_name, student_team_id, student_team_name)
+               VALUES (?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(course_id, presentation_key, student_id) DO NOTHING''',
+            [student['course_id'], state['session_key'] or 0, pres_key,
+             student['id'], student['name'], student['team_id'],
+             team['name'] if team else 'Unknown']
+        )
+        db.commit()
+        return jsonify({'success': True})
+    except Exception:
+        db.rollback()
+        raise
+
+
+@app.route('/api/lower_hand', methods=['POST'])
+@student_login_required
+def lower_hand():
+    """Student lowers their hand (withdraws challenge request)."""
+    slug = session['slug']
+    data = request.get_json(silent=True) or {}
+    expected_key = str(data.get('presentation_key') or '').strip()
+    if not expected_key:
+        return jsonify({'error': 'Presentation key is required'}), 400
+    ensure_schema(slug)
+    db = get_db(slug)
+    db.execute('BEGIN IMMEDIATE')
+    try:
+        state = db.execute('SELECT * FROM course_state LIMIT 1').fetchone()
+        if not state or state['phase'] != 'competition':
+            db.rollback()
+            return jsonify({'error': 'Not in presentation phase'}), 403
+        pres_key = active_presentation_key(state)
+        if not pres_key or pres_key != expected_key:
+            db.rollback()
+            return jsonify({'error': 'The presentation has changed'}), 409
+        student = db.execute(
+            'SELECT id FROM students WHERE student_id = ? AND is_active = 1',
+            [session['student_id']]
+        ).fetchone()
+        if not student:
+            db.rollback()
+            return jsonify({'error': 'Student not found'}), 404
+        db.execute(
+            '''DELETE FROM challenge_hands
+               WHERE course_id = ? AND presentation_key = ? AND student_id = ?''',
+            [state['course_id'], pres_key, student['id']]
+        )
+        db.commit()
+        return jsonify({'success': True})
+    except Exception:
+        db.rollback()
+        raise
+
+
+@app.route('/api/select_challenger', methods=['POST'])
+@instructor_login_required
+def select_challenger():
+    """Instructor picks a student from the raised-hands list as a challenger."""
+    slug = session['slug']
+    data = request.get_json(silent=True) or {}
+    target_student_db_id = data.get('student_id')
+    if target_student_db_id is None:
+        return jsonify({'error': 'Student ID is required'}), 400
+    try:
+        target_student_db_id = int(target_student_db_id)
+    except (TypeError, ValueError):
+        return jsonify({'error': 'Invalid student ID'}), 400
+    ensure_schema(slug)
+    db = get_db(slug)
+    db.execute('BEGIN IMMEDIATE')
+    try:
+        state = db.execute('SELECT * FROM course_state LIMIT 1').fetchone()
+        guard = _presentation_guard(data, state)
+        if guard:
+            db.rollback()
+            return jsonify({'error': guard[0]}), guard[1]
+        pres_key = active_presentation_key(state)
+        # Verify the student has raised their hand.
+        hand = db.execute(
+            '''SELECT * FROM challenge_hands
+               WHERE course_id = ? AND presentation_key = ? AND student_id = ?''',
+            [state['course_id'], pres_key, target_student_db_id]
+        ).fetchone()
+        if not hand:
+            db.rollback()
+            return jsonify({'error': 'This student has not raised their hand'}), 409
+        # Compute next challenge number.
+        max_num_row = db.execute(
+            '''SELECT MAX(challenge_num) AS m FROM challenge_rounds
+               WHERE course_id = ? AND presentation_key = ?''',
+            [state['course_id'], pres_key]
+        ).fetchone()
+        challenge_num = (max_num_row['m'] or 0) + 1
+        challenge_key = f"{pres_key}-ch{challenge_num}"
+        presenting_team = db.execute(
+            'SELECT name FROM teams WHERE id = ?',
+            [state['active_team_id']]
+        ).fetchone()
+        question = db.execute(
+            'SELECT title, question_text FROM questions WHERE id = ?',
+            [state['active_question_id']]
+        ).fetchone()
+        db.execute(
+            '''INSERT INTO challenge_rounds
+               (course_id, session_key, week_num, presentation_key,
+                challenge_key, challenge_num, challenger_id, challenger_name,
+                challenger_team_id, challenger_team_name,
+                presenting_team_id, presenting_team_name,
+                question_id, question_title)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+            [state['course_id'], state['session_key'] or 0,
+             state['discussion_week'] or 1, pres_key,
+             challenge_key, challenge_num,
+             hand['student_id'], hand['student_name'],
+             hand['student_team_id'], hand['student_team_name'],
+             state['active_team_id'],
+             presenting_team['name'] if presenting_team else 'Unknown',
+             state['active_question_id'],
+             (question['title'] or question['question_text']) if question else '']
+        )
+        # Remove from raised hands.
+        db.execute(
+            '''DELETE FROM challenge_hands
+               WHERE course_id = ? AND presentation_key = ? AND student_id = ?''',
+            [state['course_id'], pres_key, hand['student_id']]
+        )
+        # Append to active_challenges_json (bumps state_version via trigger).
+        challenges = json.loads(state['active_challenges_json'] or '[]')
+        challenges.append({
+            'challenge_key': challenge_key,
+            'challenge_num': challenge_num,
+            'challenger_id': hand['student_id'],
+            'challenger_name': hand['student_name'],
+            'challenger_team_id': hand['student_team_id'],
+            'challenger_team_name': hand['student_team_name'],
+        })
+        db.execute(
+            'UPDATE course_state SET active_challenges_json = ? WHERE course_id = ?',
+            [json.dumps(challenges), state['course_id']]
+        )
+        db.commit()
+        return jsonify({
+            'success': True,
+            'challenge_key': challenge_key,
+            'challenge_num': challenge_num,
+        })
+    except Exception:
+        db.rollback()
+        raise
+
+
+@app.route('/api/clear_challenger', methods=['POST'])
+@instructor_login_required
+def clear_challenger():
+    """Instructor removes a challenger (mistake selection)."""
+    slug = session['slug']
+    data = request.get_json(silent=True) or {}
+    challenge_key = str(data.get('challenge_key') or '').strip()
+    if not challenge_key:
+        return jsonify({'error': 'Challenge key is required'}), 400
+    ensure_schema(slug)
+    db = get_db(slug)
+    db.execute('BEGIN IMMEDIATE')
+    try:
+        state = db.execute('SELECT * FROM course_state LIMIT 1').fetchone()
+        guard = _presentation_guard(data, state)
+        if guard:
+            db.rollback()
+            return jsonify({'error': guard[0]}), guard[1]
+        # Remove from challenge_rounds
+        db.execute(
+            'DELETE FROM challenge_rounds WHERE course_id = ? AND challenge_key = ?',
+            [state['course_id'], challenge_key]
+        )
+        # Remove any ratings for this challenge
+        db.execute(
+            'DELETE FROM challenge_ratings WHERE course_id = ? AND challenge_key = ?',
+            [state['course_id'], challenge_key]
+        )
+        # Remove from active_challenges_json
+        challenges = json.loads(state['active_challenges_json'] or '[]')
+        challenges = [c for c in challenges if c.get('challenge_key') != challenge_key]
+        db.execute(
+            'UPDATE course_state SET active_challenges_json = ? WHERE course_id = ?',
+            [json.dumps(challenges), state['course_id']]
+        )
+        db.commit()
+        return jsonify({'success': True})
+    except Exception:
+        db.rollback()
+        raise
+
+
+@app.route('/api/submit_challenge_rating', methods=['POST'])
+@student_login_required
+def submit_challenge_rating():
+    """Student submits a 1-5 rating for a challenger's question quality."""
+    request_arrived_at = g.request_arrived_at
+    slug = session['slug']
+    data = request.get_json(silent=True) or {}
+    score = data.get('score')
+    challenge_key = str(data.get('challenge_key') or '').strip()
+    if score is None:
+        return jsonify({'error': 'Score is required'}), 400
+    try:
+        score = int(score)
+    except (ValueError, TypeError):
+        return jsonify({'error': 'Score must be an integer'}), 400
+    if not (1 <= score <= 5):
+        return jsonify({'error': 'Score must be 1-5'}), 400
+    if not challenge_key:
+        return jsonify({'error': 'Challenge key is required'}), 400
+    ensure_schema(slug)
+    db = get_db(slug)
+    db.execute('BEGIN IMMEDIATE')
+    try:
+        state = db.execute('SELECT * FROM course_state LIMIT 1').fetchone()
+        if not state or state['phase'] != 'competition':
+            db.rollback()
+            return jsonify({'error': 'Not in presentation phase'}), 403
+        pres_key = active_presentation_key(state)
+        if not pres_key:
+            db.rollback()
+            return jsonify({'error': 'No active presentation'}), 403
+        student = db.execute(
+            'SELECT * FROM students WHERE student_id = ? AND is_active = 1',
+            [session['student_id']]
+        ).fetchone()
+        if not student:
+            db.rollback()
+            return jsonify({'error': 'Student not found'}), 404
+        if not student['team_id']:
+            db.rollback()
+            return jsonify({'error': 'Join a team before rating'}), 403
+        # Verify the challenge exists and is active.
+        challenge = db.execute(
+            '''SELECT * FROM challenge_rounds
+               WHERE course_id = ? AND challenge_key = ?''',
+            [student['course_id'], challenge_key]
+        ).fetchone()
+        if not challenge:
+            db.rollback()
+            return jsonify({'error': 'Challenge not found'}), 404
+        # Validate it belongs to the current presentation.
+        if challenge['presentation_key'] != pres_key:
+            db.rollback()
+            return jsonify({'error': 'This challenge is from a different presentation'}), 409
+        # Rating eligibility: rater cannot be the challenger or on
+        # the challenger's team, and cannot be on the presenting team.
+        if student['id'] == challenge['challenger_id']:
+            db.rollback()
+            return jsonify({'error': 'You cannot rate your own challenge'}), 403
+        if student['team_id'] == challenge['challenger_team_id']:
+            db.rollback()
+            return jsonify({'error': 'You cannot rate a teammate\'s challenge'}), 403
+        if student['team_id'] == challenge['presenting_team_id']:
+            db.rollback()
+            return jsonify({'error': 'Presenting team cannot rate challenges'}), 403
+        rater_team = db.execute(
+            'SELECT name FROM teams WHERE id = ?', [student['team_id']]
+        ).fetchone()
+        db.execute(
+            '''INSERT INTO challenge_ratings
+               (course_id, session_key, week_num, challenge_key,
+                presentation_key, challenger_id, challenger_name,
+                challenger_team_id, challenger_team_name,
+                rater_id, rater_name, rater_team_id, rater_team_name, score)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(course_id, challenge_key, rater_id)
+               DO UPDATE SET score = excluded.score,
+                             created_at = CURRENT_TIMESTAMP''',
+            [student['course_id'], state['session_key'] or 0,
+             state['discussion_week'] or 1, challenge_key,
+             pres_key, challenge['challenger_id'],
+             challenge['challenger_name'],
+             challenge['challenger_team_id'],
+             challenge['challenger_team_name'],
+             student['id'], student['name'],
+             student['team_id'],
+             rater_team['name'] if rater_team else 'Unknown',
+             score]
+        )
+        db.commit()
+        return jsonify({'success': True})
     except Exception:
         db.rollback()
         raise
@@ -4973,6 +5451,13 @@ def reset_data():
     if initial_state['phase'] not in ('setup', 'ended'):
         return jsonify({'error': 'Data can only be reset during Setup or after End Session'}), 409
 
+    # Snapshot the database *before* acquiring the write lock so the backup's
+    # own SQLite connection doesn't compete with the held BEGIN IMMEDIATE.
+    try:
+        backup_name = _create_reset_backup(slug)
+    except Exception:
+        return jsonify({'error': 'Could not create reset backup; try again'}), 500
+
     db = get_db(slug)
     db.execute('BEGIN IMMEDIATE')
     try:
@@ -4988,9 +5473,6 @@ def reset_data():
         if state['phase'] not in ('setup', 'ended'):
             db.rollback()
             return jsonify({'error': 'Data can only be reset during Setup or after End Session'}), 409
-        # The write lock prevents any committed change from landing between
-        # this backup snapshot and the destructive reset below.
-        backup_name = _create_reset_backup(slug)
         optional_tables = {
             row['name'] for row in db.execute(
                 "SELECT name FROM sqlite_master WHERE type = 'table' "
@@ -5005,6 +5487,9 @@ def reset_data():
         db.execute('DELETE FROM teammate_thumbs WHERE course_id = ?', [course_id])
         db.execute('DELETE FROM presentation_ratings WHERE course_id = ?', [course_id])
         db.execute('DELETE FROM hidden_discussion_questions WHERE course_id = ?', [course_id])
+        db.execute('DELETE FROM challenge_hands WHERE course_id = ?', [course_id])
+        db.execute('DELETE FROM challenge_rounds WHERE course_id = ?', [course_id])
+        db.execute('DELETE FROM challenge_ratings WHERE course_id = ?', [course_id])
         if 'discussion_responses' in optional_tables:
             db.execute('DELETE FROM discussion_responses WHERE course_id = ?', [course_id])
         if 'discussion_selections' in optional_tables:
@@ -5034,6 +5519,7 @@ def reset_data():
                poll_question_key = NULL,
                poll_started_at = NULL,
                presentation_history = '[]',
+               active_challenges_json = '[]',
                teams_locked = 0,
                session_started_at = NULL,
                session_key = COALESCE(session_key, 0) + 1,
@@ -5302,6 +5788,20 @@ def export_data(slug):
                ORDER BY pr.question_key, pr.created_at''',
             [cid] + export_weeks)
 
+        challenge_ratings = query_db(slug,
+            f'''SELECT cr.challenge_key, cr.presentation_key, cr.session_key,
+                      cr.week_num, cr.challenger_id,
+                      ch.challenger_name, ch.challenger_team_id, ch.challenger_team_name,
+                      cr.rater_id, s.student_id as rater_sid, s.name as rater_name,
+                      cr.rater_team_id, cr.rater_team_name,
+                      cr.score, cr.created_at
+               FROM challenge_ratings cr
+               JOIN students s ON cr.rater_id = s.id
+               LEFT JOIN challenge_rounds ch ON cr.challenge_key = ch.challenge_key
+               WHERE cr.course_id = ? AND cr.week_num IN ({week_ph})
+               ORDER BY cr.challenge_key, cr.created_at''',
+            [cid] + export_weeks)
+
         question_weeks = {
             row['id']: row['week_num'] or 1
             for row in query_db(
@@ -5378,6 +5878,7 @@ def export_data(slug):
             ('Current Visible Teams', len(teams)),
             ('Week Peer Reviews (thumbs)', len(peer_reviews)),
             ('Week Presentation Ratings', len(ratings)),
+            ('Week Challenge Ratings', len(challenge_ratings)),
         ]
         for r, (label, val) in enumerate(info_rows, 1):
             ws1.cell(row=r, column=1, value=label).font = bold_font
@@ -5460,6 +5961,7 @@ def export_data(slug):
             'student_id', 'name', 'team', 'status',
             'thumbs_given', 'thumbs_received',
             'presentation_ratings_given',
+            'challenges_rated',
             'last_login', 'last_active',
         ]
         style_header(ws2, s_headers)
@@ -5468,6 +5970,7 @@ def export_data(slug):
         thumbs_given = collections.Counter(pr['grader_id'] for pr in peer_reviews)
         thumbs_recv = collections.Counter(pr['recipient_id'] for pr in peer_reviews)
         ratings_given = collections.Counter(rt['rater_db_id'] for rt in ratings)
+        challenge_ratings_given = collections.Counter(cr['rater_id'] for cr in challenge_ratings)
 
         s_rows = []
         for stu in students:
@@ -5479,6 +5982,7 @@ def export_data(slug):
                 thumbs_given.get(stu['id'], 0),
                 thumbs_recv.get(stu['id'], 0),
                 ratings_given.get(stu['id'], 0),
+                challenge_ratings_given.get(stu['id'], 0),
                 stu['last_login_at'] or '',
                 stu['last_active_at'] or '',
             ]
@@ -5576,6 +6080,37 @@ def export_data(slug):
             for col, val in enumerate(row, 1):
                 ws5.cell(row=i, column=col, value=val)
         set_col_widths(ws5, rt_headers, rt_rows)
+
+        # ════════════════════════════════════════════════════════════════════
+        # TAB 6: Challenge Ratings — raw 1-5 ratings of challenge questions
+        # ════════════════════════════════════════════════════════════════════
+        ws6 = wb.create_sheet('Challenge Ratings')
+        cr_headers = ['session_key', 'week', 'challenge_key', 'presentation_key',
+                      'challenger_id', 'challenger_name', 'challenger_team_id',
+                      'challenger_team', 'rater_id', 'rater_name',
+                      'rater_team_id', 'rater_team', 'score_1to5', 'time']
+        style_header(ws6, cr_headers)
+
+        cr_rows = []
+        for cr in challenge_ratings:
+            cr_rows.append([
+                cr['session_key'],
+                cr['week_num'],
+                cr['challenge_key'],
+                cr['presentation_key'],
+                cr['challenger_id'],
+                cr['challenger_name'] or '',
+                cr['challenger_team_id'],
+                cr['challenger_team_name'] or '',
+                cr['rater_sid'], cr['rater_name'] or '',
+                cr['rater_team_id'],
+                cr['rater_team_name'] or '',
+                cr['score'], cr['created_at'],
+            ])
+        for i, row in enumerate(cr_rows, 2):
+            for col, val in enumerate(row, 1):
+                ws6.cell(row=i, column=col, value=val)
+        set_col_widths(ws6, cr_headers, cr_rows)
 
         # ── save ──
         # Save the workbook to an in-memory buffer
