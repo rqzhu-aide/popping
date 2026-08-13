@@ -5,9 +5,9 @@ Each week, submit one discussion question by creating a file in your GitHub repo
 ## Examples
 
 See these example files in this folder for the exact format:
-- [`week-1-question.md`](week-1-question.md) — open-ended with LaTeX
-- [`week-2-question.md`](week-2-question.md) — with R code
-- [`week-3-question.md`](week-3-question.md) — with Python code
+- [`week-01-question.md`](week-01-question.md), open-ended with LaTeX
+- [`week-02-question.md`](week-02-question.md), with R code
+- [`week-03-question.md`](week-03-question.md), with Python code
 
 ### Open-ended with LaTeX
 
@@ -87,16 +87,16 @@ What would happen if we set `alpha = 1.0`?
 | **Content length** | Max 200 words (excluding code blocks and math). |
 | **Question types** | Open-ended or multiple choice. For multiple choice, include a lead-in sentence (e.g. "Choose the correct statement:") followed by A/B/C/D options. |
 | **LaTeX** | Allowed: `$inline$` and `$$display$$`. No custom macros (`\newcommand`, `\def`, `\renewcommand`). Use standard commands only. |
-| **Code blocks** | Fenced blocks with language tag (` ```r ` or ` ```python `). Code is displayed only — **no code will be executed**. |
+| **Code blocks** | Fenced blocks with language tag (` ```r ` or ` ```python `). Code is displayed only, **no code will be executed**. |
 | **No** | No images, no external links, no HTML tags, no JavaScript. |
 | **Language** | English only. Proofread for typos. |
 | **Academic integrity** | Submit your own work. Questions should be original. |
 
 ## How to Submit
 
-1. Create a folder called `discussion/` in your own GitHub repository — keep this folder for the entire semester
-2. Create a file named `week-N-question.md` (replace N with the week number, e.g. `week-3-question.md`)
+1. Create a folder called `discussion/` in your own GitHub repository, keep this folder for the entire semester
+2. Create a file named `week-NN-question.md` using a two-digit week number, such as `week-03-question.md`
 3. Add your question block (following the format above) to this file
 4. Push to your GitHub repository
 
-Submissions will be automatically validated using `validate-question.py`. The instructor will collect all submissions using their AI agent by **Saturday 11:59 PM** and select questions for the upcoming week's discussion.
+Submissions will be automatically validated using `validate-question.py`. Submit each file by **Sunday at 11:59 PM Central Time**, unless the course page gives a different date.

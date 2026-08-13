@@ -3,7 +3,7 @@
 
 Usage:
     python validate-question.py <question-file.md>
-    python validate-question.py classes/432fall2026/week-1-questions.md
+    python validate-question.py discussion/week-01-question.md
 
 Checks:
     - Required fields: id, title, author
