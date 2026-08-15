@@ -262,6 +262,7 @@ def test_legacy_database_is_available_then_migrated_on_login(catalog_env):
     _write_config(catalog_env, slug)
     db_path = _write_database(catalog_env, slug)
     with sqlite3.connect(db_path) as db:
+        db.execute("DROP TABLE schema_migrations")
         db.execute("DROP TABLE teammate_thumbs")
         db.execute("DROP TABLE presentation_ratings")
         db.execute("ALTER TABLE students DROP COLUMN is_active")
@@ -579,3 +580,88 @@ def test_poll_duration_cache_is_bounded(catalog_env):
         assert len(cache) <= app_module.POLL_DURATION_CACHE_LIMIT
     finally:
         cache.clear()
+
+@pytest.mark.parametrize(
+    "state_update, params",
+    (
+        ("phase = 'discussion'", ()),
+        ("phase = 'setup', presentation_created_at = CURRENT_TIMESTAMP", ()),
+        (
+            "phase = 'setup', active_challenges_json = ?",
+            ('[{"challenge_key":"old"}]',),
+        ),
+    ),
+)
+def test_pending_schema_upgrade_with_active_session_is_unavailable(
+    catalog_env,
+    monkeypatch,
+    state_update,
+    params,
+):
+    slug = "active_schema_upgrade"
+    _write_config(catalog_env, slug)
+    db_path = _write_database(catalog_env, slug)
+    with sqlite3.connect(db_path) as db:
+        db.execute(f"UPDATE course_state SET {state_update}", params)
+
+    monkeypatch.setattr(database, "SCHEMA_VERSION", "1.1.0")
+    monkeypatch.setattr(
+        database, "SCHEMA_VERSION_HISTORY", ("1.0.0", "1.1.0")
+    )
+    monkeypatch.setattr(
+        database,
+        "_SCHEMA_MIGRATIONS",
+        {("1.0.0", "1.1.0"): lambda _db: None},
+    )
+    app_module._clear_course_availability_cache(slug)
+
+    assert app_module._course_availability(slug)["status"] == "invalid"
+    assert app_module.app.test_client().get("/healthz").status_code == 503
+
+def test_safe_pending_schema_health_reports_actual_database_version(
+    catalog_env,
+    monkeypatch,
+):
+    slug = "safe_schema_upgrade"
+    _write_config(catalog_env, slug)
+    _write_database(catalog_env, slug)
+    monkeypatch.setattr(database, "SCHEMA_VERSION", "1.1.0")
+    monkeypatch.setattr(
+        database, "SCHEMA_VERSION_HISTORY", ("1.0.0", "1.1.0")
+    )
+    monkeypatch.setattr(
+        database,
+        "_SCHEMA_MIGRATIONS",
+        {("1.0.0", "1.1.0"): lambda _db: None},
+    )
+    monkeypatch.setattr(app_module, "SCHEMA_VERSION", "1.1.0")
+    app_module._clear_course_availability_cache(slug)
+
+    response = app_module.app.test_client().get("/healthz")
+
+    assert response.status_code == 200
+    assert response.get_json() == {
+        "status": "ok",
+        "courses_checked": 1,
+        "website_version": app_module.public_version(app_module.APP_VERSION),
+        "database_schema_version": "v1.0.0",
+        "schema_migration_pending": True,
+        "course_database_schema_versions": {slug: "v1.0.0"},
+    }
+
+def test_unadoptable_legacy_database_is_not_ready(catalog_env):
+    slug = "unadoptable_legacy"
+    _write_config(catalog_env, slug)
+    db_path = _write_database(catalog_env, slug)
+    with sqlite3.connect(db_path) as db:
+        db.execute("DROP TABLE schema_migrations")
+        db.execute(
+            "UPDATE course_state SET presentation_history = '{broken'"
+        )
+
+    app_module._clear_course_availability_cache(slug)
+
+    assert app_module._course_availability(slug)["status"] == "invalid"
+    response = app_module.app.test_client().get("/healthz")
+    assert response.status_code == 503
+    assert response.get_json() == {"status": "unavailable"}

@@ -1,30 +1,32 @@
 # Known Issues and Improvement Backlog
 
-Last reviewed: 2026-07-27
+Last reviewed: 2026-08-14
 
 ## Current status
 
 There are no known P1 or P2 functional defects in the current working tree.
 
-The previously listed workflow, export, migration, polling, timer, and demo
-issues have been repaired and removed from this backlog. The full automated
-suite passes, including:
+The full automated suite passes. Current coverage includes:
 
 - 80 students making an initial full poll and sustained compact polls
 - 60 students submitting presentation ratings concurrently
-- a rating arriving before the deadline but waiting for the database lock
+- 60 students submitting and replaying challenger ratings concurrently
+- presentation and challenger ratings arriving before a close cutoff
 - transient presence-write and demo-marker failures
+- retry and read-back behavior after interrupted vote responses
 - stable discussion-question visibility across edits
-- current-week exports and a separate unknown-week legacy export
+- current-week presentation, challenge, and teammate-thumb exports
+- case-insensitive roster identity protection
+- safe discard confirmation for saved presentation and challenger ratings
 
 ## P3: Production-equivalent load validation is not automated
 
 **Why this remains**
 
-The automated load tests use concurrent Flask test clients against an isolated
-SQLite database. They exercise the main request, presence, polling, and rating
-paths, but they do not reproduce Render's three Gunicorn workers, persistent
-disk latency, or a real school network.
+The automated suite uses concurrent Flask test clients against isolated SQLite
+databases. The optional local real-HTTP harness adds multiple application
+processes and sustained sessions, but it still does not reproduce Render's
+Gunicorn workers, persistent-disk latency, TLS proxy, or a school network.
 
 This is an operational validation gap, not a confirmed application defect.
 
@@ -50,3 +52,33 @@ non-sensitive course database:
 - CPU, memory, and disk latency remain within the selected Render plan
 
 Do not run this test against the active production class service.
+
+## P3: Equation formatting still uses one external CDN
+
+MathJax is pinned and loads asynchronously, so a blocked CDN cannot blank the
+site. The page now shows a plain-language warning and the class controls still
+work, but equations may remain as raw notation on a network that blocks
+jsDelivr.
+
+Self-host the pinned MathJax browser bundle if fully offline equation rendering
+is required.
+
+## P3: Broad login abuse can rotate submitted IDs
+
+The login throttle now serializes concurrent attempts for the same course,
+role, submitted identity, and source. A deliberate client can still rotate
+submitted IDs to avoid that per-identity limit.
+
+A low application-wide source limit could lock out a class whose students
+share one campus network address. Add this protection at a trusted network edge,
+or add a trusted-proxy-aware source limit calibrated with real campus traffic.
+
+## P3: Off-site backups are not scheduled automatically
+
+`scripts/backup-course.py` creates and verifies a complete bundle containing the
+database plus persistent weekly questions and appendix files at a destination
+outside the live data directory.
+
+The repository does not choose a storage provider or configure credentials,
+encryption, retention, or scheduling. Configure those operationally, and
+periodically verify a retained bundle and rehearse a non-production restore.

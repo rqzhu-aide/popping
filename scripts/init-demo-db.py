@@ -4,7 +4,7 @@
 Creates a self-contained 'demo' course with:
   - 1 instructor (the web demo bypasses login)
   - 2 unassigned students and 2 teams
-  - Sample questions read from classes/demo/week1/index.md
+  - Sample questions read from classes/demo/week-1-questions.md
   - Course state in 'setup' phase
 
 Usage:
@@ -21,6 +21,11 @@ from contextlib import contextmanager
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCHEMA = os.path.join(BASE_DIR, 'popping.sql')
+if BASE_DIR not in sys.path:
+    sys.path.insert(0, BASE_DIR)
+
+from database import migrate_schema_connection, upgrade_schema_connection
+from question_catalog import read_week_questions
 
 
 def resolve_data_dir():
@@ -37,7 +42,7 @@ DATA_DIR = resolve_data_dir()
 DB_DIR = os.path.join(DATA_DIR, 'demo')
 DB_PATH = os.path.join(DB_DIR, 'popping.db')
 LOCK_PATH = os.path.join(DB_DIR, '.demo-init-lock.sqlite3')
-DEMO_SEED_VERSION = 2
+DEMO_SEED_VERSION = 3
 
 _RESET_TABLES = (
     'discussion_responses',
@@ -204,35 +209,25 @@ def _populate(conn):
             (course_id, sid, name, 'demo', None)
         )
 
-    # Read questions from classes/demo/week1/index.md
-    import re
-    week_dir = os.path.join(BASE_DIR, 'classes', 'demo', 'week1')
-    index_path = os.path.join(week_dir, 'index.md')
-    questions = []
-    if os.path.exists(index_path):
-        with open(index_path, 'r', encoding='utf-8') as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                m = re.match(r'^(\d+)\.\s+(.+)$', line)
-                if m:
-                    qnum = int(m.group(1))
-                    title = m.group(2).strip()
-                    questions.append({'num': qnum, 'title': title})
-    else:
-        # Fallback: inline questions if folder doesn't exist
-        questions = [
-            {'num': 1, 'title': 'Bagging vs Boosting'},
-            {'num': 2, 'title': 'Bias-Variance Decomposition'},
-            {'num': 3, 'title': 'Gradient Boosting Parameters'},
-            {'num': 4, 'title': 'Regularization Analysis'},
-        ]
+    question_path = os.path.join(
+        BASE_DIR, 'classes', 'demo', 'week-1-questions.md'
+    )
+    questions = read_week_questions(question_path, week_num=1)
 
     for q in questions:
         conn.execute(
-            "INSERT INTO questions (course_id, question_num, question_text, title, week_num) VALUES (?, ?, ?, ?, ?)",
-            (course_id, q['num'], q['title'][:200], q['title'], 1)
+            """INSERT INTO questions
+               (course_id, question_num, question_text, title, content,
+                week_num, source_key)
+               VALUES (?, ?, ?, ?, ?, 1, ?)""",
+            (
+                course_id,
+                q['num'],
+                q['title'][:200],
+                q['title'],
+                q['content'],
+                q['source_key'],
+            )
         )
 
     # Course state — start in setup
@@ -271,6 +266,7 @@ def _build_candidate(path):
         conn.execute('PRAGMA foreign_keys = ON')
         with open(SCHEMA, encoding='utf-8') as f:
             conn.executescript(f.read())
+        upgrade_schema_connection(conn)
         q_count = _populate(conn)
         conn.commit()
     except Exception:
@@ -307,11 +303,7 @@ def _reset_demo_db():
         conn.execute('PRAGMA busy_timeout = 30000')
         conn.execute('PRAGMA foreign_keys = ON')
         conn.execute('BEGIN IMMEDIATE')
-        if conn.execute('PRAGMA user_version').fetchone()[0] < DEMO_SEED_VERSION:
-            if BASE_DIR not in sys.path:
-                sys.path.insert(0, BASE_DIR)
-            from database import _ensure_schema_locked
-            _ensure_schema_locked(conn)
+        migrate_schema_connection(conn)
 
         existing_tables = {
             row[0] for row in conn.execute(
@@ -328,6 +320,23 @@ def _reset_demo_db():
         _validate_demo_connection(conn, require_seeded_shape=True)
         conn.commit()
         return q_count
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def _upgrade_existing_demo_schema():
+    """Adopt or migrate an existing demo without resetting its seed data."""
+    conn = sqlite3.connect(DB_PATH, timeout=30)
+    conn.row_factory = sqlite3.Row
+    try:
+        conn.execute('PRAGMA busy_timeout = 30000')
+        conn.execute('PRAGMA foreign_keys = ON')
+        conn.execute('BEGIN IMMEDIATE')
+        migrate_schema_connection(conn)
+        conn.commit()
     except Exception:
         conn.rollback()
         raise
@@ -363,6 +372,7 @@ def init_demo_db(ensure_only=False):
                     q_count = _reset_demo_db()
                     action = 'upgraded'
                 else:
+                    _upgrade_existing_demo_schema()
                     q_count = _validate_demo_db(
                         DB_PATH, require_seeded_shape=False
                     )

@@ -17,7 +17,6 @@ COLORS = [
     '#eab308', '#dc2626', '#2563eb', '#059669', '#d97706'
 ]
 SLUG_RE = re.compile(r'^[A-Za-z0-9_-]+$')
-PRESENTATION_HTML_RE = re.compile(r'^q\d+\.html$')
 MAX_TEAM_POOL_SIZE = 100
 BACKUP_RETENTION = 3
 OFFLINE_CONFIRMATION = 'SERVICE STOPPED'
@@ -50,7 +49,14 @@ SCHEMA_PATH = os.path.join(PROJECT_ROOT, 'popping.sql')
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-from question_catalog import read_presentation_index, validate_question_catalog
+from database import (
+    upgrade_schema_connection,
+    validate_data_version_schema,
+    validate_legacy_adoption_candidate,
+    validate_schema_compatibility,
+)
+from question_catalog import read_week_questions, validate_question_catalog
+from versioning import SCHEMA_VERSION
 
 
 def build_team_rows(config):
@@ -94,8 +100,10 @@ def build_team_rows(config):
 
 
 def read_presentation_question_index(config_dir, week_num):
-    index_path = os.path.join(config_dir, f'week{week_num}', 'index.md')
-    return read_presentation_index(index_path) or []
+    question_path = os.path.join(config_dir, f'week-{week_num}-questions.md')
+    if not os.path.isfile(question_path):
+        return []
+    return read_week_questions(question_path, week_num=week_num)
 
 
 def load_course_config(config_dir):
@@ -149,41 +157,19 @@ def course_defaults(config, team_rows):
 
 def validate_initial_question_catalog(config_dir, week_num=1):
     """Validate any initial-week material while allowing a blank new course."""
-    discussion_path = os.path.join(
+    question_path = os.path.join(
         config_dir, f'week-{week_num}-questions.md'
     )
-    week_dir = os.path.join(config_dir, f'week{week_num}')
-    index_path = os.path.join(week_dir, 'index.md')
-    discussion_present = os.path.exists(discussion_path)
-    presentation_present = os.path.exists(index_path)
-    if os.path.exists(week_dir) and not os.path.isdir(week_dir):
-        presentation_present = True
-    elif os.path.isdir(week_dir):
-        try:
-            presentation_present = presentation_present or any(
-                PRESENTATION_HTML_RE.fullmatch(name)
-                for name in os.listdir(week_dir)
-            )
-        except OSError as exc:
-            raise ValueError(
-                f"Could not inspect question catalog week {week_num}: {exc}"
-            ) from exc
-
-    if not discussion_present and not presentation_present:
+    if not os.path.exists(question_path):
         return None
 
     week = validate_question_catalog(
         config_dir, weeks=[week_num]
     ).get_week(week_num)
-    sections = []
-    if discussion_present and week:
-        sections.append(week.discussion)
-    if presentation_present and week:
-        sections.append(week.presentation)
-    if week and sections and all(section.ready for section in sections):
+    if week and week.ready:
         return week
     issues = [] if not week else [
-        issue.message for section in sections for issue in section.issues
+        issue.message for issue in week.discussion.issues
     ]
     detail = f": {issues[0]}" if issues else ''
     raise ValueError(f"Question catalog week {week_num} is not ready{detail}")
@@ -205,6 +191,7 @@ def build_candidate_database(
         conn.execute('PRAGMA foreign_keys=ON')
         with open(SCHEMA_PATH, 'r', encoding='utf-8-sig') as f:
             conn.executescript(f.read())
+        upgrade_schema_connection(conn)
 
         instructor_id = conn.execute(
             "INSERT INTO instructors (username, name, pin) VALUES (?, ?, ?)",
@@ -239,14 +226,17 @@ def build_candidate_database(
         for question in read_presentation_question_index(config_dir, 1):
             conn.execute(
                 """INSERT INTO questions
-                   (course_id, question_num, question_text, title, week_num)
-                   VALUES (?, ?, ?, ?, ?)""",
+                   (course_id, question_num, question_text, title, content,
+                    week_num, source_key)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
                 (
                     course_id,
                     question['num'],
                     question['title'][:200],
                     question['title'],
+                    question['content'],
                     1,
+                    question['source_key'],
                 ),
             )
         conn.commit()
@@ -254,7 +244,7 @@ def build_candidate_database(
         conn.close()
 
 
-def validate_course_database(path, expected_slug):
+def validate_course_database(path, expected_slug, require_current_version=False):
     if not os.path.isfile(path):
         raise ValueError(f"Database file not found: {path}")
     conn = sqlite3.connect(path)
@@ -292,6 +282,18 @@ def validate_course_database(path, expected_slug):
                     f"Database table {table} is missing required column(s): "
                     + ', '.join(missing_columns)
                 )
+
+        recorded_version = validate_schema_compatibility(
+            conn, allow_unversioned=not require_current_version
+        )
+        if require_current_version and recorded_version != SCHEMA_VERSION:
+            raise RuntimeError(
+                f"Replacement database must use schema version {SCHEMA_VERSION}"
+            )
+        if recorded_version is None:
+            validate_legacy_adoption_candidate(conn)
+        else:
+            validate_data_version_schema(conn)
 
         courses = conn.execute(
             'SELECT id, slug, instructor_id FROM courses'
@@ -467,7 +469,9 @@ def main(argv=None):
             display_name,
             pin,
         )
-        validate_course_database(temporary_path, config['slug'])
+        validate_course_database(
+            temporary_path, config['slug'], require_current_version=True
+        )
 
         backup_path = None
         if os.path.exists(db_path):

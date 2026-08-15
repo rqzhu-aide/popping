@@ -69,7 +69,7 @@ def test_valid_catalog_reports_each_section_ready(tmp_path):
     assert report.as_dict()["weeks"][0]["ready"] is True
 
 
-def test_catalog_reports_discussion_and_presentation_separately(tmp_path):
+def test_catalog_uses_one_file_for_both_phase_readiness(tmp_path):
     (tmp_path / "week-2-questions.md").write_text(
         "---\nid: available-discussion\n"
         "title: Available discussion\n---\n\nDiscuss this.\n",
@@ -80,9 +80,10 @@ def test_catalog_reports_discussion_and_presentation_separately(tmp_path):
     week = report.get_week(2)
 
     assert week.discussion.ready is True
-    assert week.presentation.ready is False
-    assert _codes(week.presentation) == {"presentation_index_missing"}
-    assert report.ready is False
+    assert week.presentation.ready is True
+    assert week.discussion.count == week.presentation.count == 1
+    assert week.discussion.path == week.presentation.path
+    assert report.ready is True
 
 
 def test_discussion_rejects_invalid_and_duplicate_ids_and_titles(tmp_path):
@@ -251,13 +252,13 @@ def test_catalog_accepts_utf8_bom_question_sources(tmp_path):
     assert report.get_week(1).presentation.count == 1
 
 
-def test_discovery_uses_discussion_files_and_presentation_directories(tmp_path):
+def test_discovery_uses_only_canonical_weekly_files(tmp_path):
     (tmp_path / "week-2-questions.md").write_text("placeholder", encoding="utf-8")
     (tmp_path / "week4").mkdir()
     (tmp_path / "week-0-questions.md").write_text("ignored", encoding="utf-8")
     (tmp_path / "weekx").mkdir()
 
-    assert discover_catalog_weeks(tmp_path) == (2, 4)
+    assert discover_catalog_weeks(tmp_path) == (2,)
 
 
 def test_explicit_weeks_must_be_positive_integers(tmp_path):
@@ -265,17 +266,16 @@ def test_explicit_weeks_must_be_positive_integers(tmp_path):
         validate_question_catalog(tmp_path, weeks=[1, 0])
 
 
-def test_checked_in_course_exposes_missing_presentation_weeks():
+def test_checked_in_course_uses_each_week_file_for_both_phases():
     course_dir = PROJECT_ROOT / "classes" / "432fall2026"
 
     report = validate_question_catalog(course_dir)
 
     assert tuple(week.week for week in report.weeks) == (1, 2, 3)
-    assert report.get_week(1).ready is True
-    assert report.get_week(2).discussion.ready is True
-    assert report.get_week(2).presentation.ready is False
-    assert report.get_week(3).discussion.ready is True
-    assert report.get_week(3).presentation.ready is False
+    assert report.ready is True
+    for week in report.weeks:
+        assert week.ready is True
+        assert week.discussion == week.presentation
 
 
 def test_submission_validator_rejects_duplicate_ids_and_titles(tmp_path):

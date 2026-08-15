@@ -26,7 +26,7 @@ slug: "$SLUG"
 name: "$NAME"
 code: "$CODE"
 semester: "$SEMESTER"
-active: true
+active: false
 team_pool_size: 20
 max_teams: 6
 max_members_per_team: 10
@@ -66,6 +66,12 @@ echo ""
 echo "Course folder created: $CLASS_DIR"
 echo ""
 echo "Next steps:"
-echo "  1. cd $CLASS_DIR"
-echo "  2. bash init-db.sh"
-echo "     (this will prompt for instructor credentials)"
+echo "  Local: initialize the database, change active to true, then run the app."
+echo "  Render:"
+echo "  1. Commit and deploy this course while active remains false."
+echo "  2. Initialize its database with:"
+echo "       cd $CLASS_DIR"
+echo "       bash init-db.sh"
+echo "     (on Render, run those commands in Render Shell)"
+echo "  3. Change active to true in $CLASS_DIR/course.yaml."
+echo "  4. Commit and deploy again to publish the course."

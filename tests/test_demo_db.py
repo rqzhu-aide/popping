@@ -78,8 +78,25 @@ def _assert_seed_shape(path, expected_slug='demo'):
                FROM course_state'''
         ).fetchone()
         assert tuple(state) == ('setup', 2, 2)
-        assert connection.execute('SELECT COUNT(*) FROM questions').fetchone()[0] >= 1
-        assert connection.execute('PRAGMA user_version').fetchone()[0] == 2
+        questions = connection.execute(
+            '''SELECT question_num, title, content, source_key
+               FROM questions ORDER BY question_num'''
+        ).fetchall()
+        assert [row['question_num'] for row in questions] == [1, 2, 3, 4]
+        assert [row['source_key'] for row in questions] == [
+            'week-1-q-bagging-vs-boosting',
+            'week-1-q-bias-variance-decomposition',
+            'week-1-q-gradient-boosting-parameters',
+            'week-1-q-regularization-analysis',
+        ]
+        assert [row['title'] for row in questions] == [
+            'Bagging vs Boosting',
+            'Bias-Variance Decomposition',
+            'Gradient Boosting Parameters',
+            'Regularization Analysis',
+        ]
+        assert all(row['content'] for row in questions)
+        assert connection.execute('PRAGMA user_version').fetchone()[0] == 3
     finally:
         connection.close()
 
@@ -165,7 +182,7 @@ class TestCliDemoSeed:
         finally:
             connection.close()
 
-    def test_ensure_upgrades_old_seed_to_two_students(self, tmp_path):
+    def test_ensure_upgrades_version_one_seed_to_current_shape(self, tmp_path):
         assert _run_init(tmp_path).returncode == 0
         db_path = tmp_path / 'demo' / 'popping.db'
         connection = _open_db(db_path)
@@ -178,6 +195,24 @@ class TestCliDemoSeed:
         connection.close()
 
         result = _run_init(tmp_path, '--ensure')
+        assert result.returncode == 0, result.stderr
+        _assert_seed_shape(db_path)
+
+    def test_ensure_migrates_version_two_legacy_question_rows(self, tmp_path):
+        assert _run_init(tmp_path).returncode == 0
+        db_path = tmp_path / 'demo' / 'popping.db'
+        connection = _open_db(db_path)
+        connection.execute(
+            """UPDATE questions
+               SET source_key = 'presentation:1:' || question_num,
+                   content = NULL"""
+        )
+        connection.execute('PRAGMA user_version = 2')
+        connection.commit()
+        connection.close()
+
+        result = _run_init(tmp_path, '--ensure')
+
         assert result.returncode == 0, result.stderr
         _assert_seed_shape(db_path)
 

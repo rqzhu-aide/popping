@@ -119,6 +119,13 @@ def test_real_demo_course_yaml_matches_small_private_seed():
     assert course.get('max_members_per_team') == 2
 
 
+def test_demo_guidance_does_not_claim_tabs_have_separate_roles():
+    template = (PROJECT_ROOT / 'templates' / 'demo.html').read_text(encoding='utf-8')
+    assert 'Open in another tab' not in template
+    assert 'Tabs in the same browser share one sign-in session' in template
+    assert 'one regular and one private browsing window' in template
+
+
 class TestPrivateDemoEntry:
     def test_landing_is_read_only_until_start(self, demo_env):
         client = app_module.app.test_client()
@@ -212,19 +219,26 @@ class TestPrivateDemoEntry:
 
         bank = instructor.get('/api/discussion_questions')
         assert bank.status_code == 200
-        titles = {item['title'] for item in bank.get_json()['questions']}
-        assert {'Why Ensemble?', 'Tuning Gradient Boosting'}.issubset(titles)
+        discussion_titles = {
+            item['title'] for item in bank.get_json()['questions']
+            if item['source'] == 'bank'
+        }
         presentation_titles = set()
         connection = sqlite3.connect(db_path)
         try:
             presentation_titles = {
                 row[0] for row in connection.execute(
-                    "SELECT title FROM questions WHERE source_key LIKE 'presentation:1:%'"
+                    "SELECT title FROM questions WHERE source_key LIKE 'week-1-q-%'"
                 ).fetchall()
             }
         finally:
             connection.close()
-        assert 'Bagging vs Boosting' in presentation_titles
+        assert discussion_titles == presentation_titles == {
+            'Bagging vs Boosting',
+            'Bias-Variance Decomposition',
+            'Gradient Boosting Parameters',
+            'Regularization Analysis',
+        }
 
     def test_invalid_and_legacy_role_urls_do_not_create_shared_demo(
             self, demo_env):
@@ -517,7 +531,7 @@ class TestTwoStudentWorkflow:
         connection = sqlite3.connect(db_path)
         try:
             question_id = connection.execute(
-                "SELECT id FROM questions WHERE source_key = 'presentation:1:1'"
+                "SELECT id FROM questions WHERE source_key = 'week-1-q-bagging-vs-boosting'"
             ).fetchone()[0]
         finally:
             connection.close()

@@ -103,7 +103,16 @@ def test_initializer_honors_data_dir_and_validates_new_database(
             "SELECT max_teams, max_members_per_team FROM course_state"
         ).fetchone() == (2, 4)
         assert db.execute("SELECT COUNT(*) FROM teams").fetchone()[0] == 3
-        assert db.execute("SELECT COUNT(*) FROM questions").fetchone()[0] == 2
+        question = db.execute(
+            """SELECT question_num, title, content, source_key
+               FROM questions"""
+        ).fetchone()
+        assert question == (
+            1,
+            "First discussion question",
+            "Discuss the first question.",
+            "week-1-q-discussion-1",
+        )
     finally:
         db.close()
     assert list(db_path.parent.glob(".popping-candidate-*.tmp.db")) == []
@@ -289,12 +298,15 @@ def test_initializer_caps_team_pool_at_100(
         init_course_db_module.build_team_rows(config)
 
 
-def test_initializer_rejects_incomplete_question_catalog_before_writing_database(
+def test_initializer_rejects_invalid_canonical_catalog_before_writing_database(
     init_course_db_module, course_config, tmp_path, monkeypatch
 ):
     data_dir = tmp_path / "data"
     monkeypatch.setenv("DATA_DIR", str(data_dir))
-    (course_config / "week1" / "q02.html").unlink()
+    (course_config / "week-1-questions.md").write_text(
+        "---\ntitle: Missing stable id\n---\n\nDiscuss this.\n",
+        encoding="utf-8",
+    )
 
     result = run_initializer(
         init_course_db_module,
@@ -354,7 +366,7 @@ def test_initializer_validates_only_material_that_exists(
     assert_valid_course_db(data_dir / "safe101" / "popping.db")
 
 
-def test_initializer_accepts_valid_presentation_material_without_discussion(
+def test_initializer_ignores_legacy_presentation_material_without_canonical_file(
     init_course_db_module, course_config, tmp_path, monkeypatch
 ):
     data_dir = tmp_path / "data"
@@ -368,23 +380,25 @@ def test_initializer_accepts_valid_presentation_material_without_discussion(
         ["teacher", "Test Teacher"],
     )
 
+    db_path = data_dir / "safe101" / "popping.db"
     assert result == 0
-    db = sqlite3.connect(data_dir / "safe101" / "popping.db")
+    assert_valid_course_db(db_path)
+    db = sqlite3.connect(db_path)
     try:
-        assert db.execute("SELECT COUNT(*) FROM questions").fetchone()[0] == 2
+        assert db.execute("SELECT COUNT(*) FROM questions").fetchone()[0] == 0
     finally:
         db.close()
 
 
-def test_initializer_accepts_utf8_bom_in_config_and_index(
+def test_initializer_accepts_utf8_bom_in_config_and_canonical_questions(
     init_course_db_module, course_config, tmp_path, monkeypatch
 ):
     data_dir = tmp_path / "data"
     monkeypatch.setenv("DATA_DIR", str(data_dir))
     config_path = course_config / "course.yaml"
     config_path.write_bytes(b"\xef\xbb\xbf" + config_path.read_bytes())
-    index_path = course_config / "week1" / "index.md"
-    index_path.write_bytes(b"\xef\xbb\xbf" + index_path.read_bytes())
+    question_path = course_config / "week-1-questions.md"
+    question_path.write_bytes(b"\xef\xbb\xbf" + question_path.read_bytes())
 
     result = run_initializer(
         init_course_db_module,
@@ -396,7 +410,14 @@ def test_initializer_accepts_utf8_bom_in_config_and_index(
     assert result == 0
     db = sqlite3.connect(data_dir / "safe101" / "popping.db")
     try:
-        assert db.execute("SELECT COUNT(*) FROM questions").fetchone()[0] == 2
+        question = db.execute(
+            """SELECT title, content, source_key FROM questions"""
+        ).fetchone()
+        assert question == (
+            "First discussion question",
+            "Discuss the first question.",
+            "week-1-q-discussion-1",
+        )
     finally:
         db.close()
 

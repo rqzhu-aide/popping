@@ -12,6 +12,17 @@ DROP TABLE IF EXISTS students;
 DROP TABLE IF EXISTS teams;
 DROP TABLE IF EXISTS courses;
 DROP TABLE IF EXISTS instructors;
+DROP TABLE IF EXISTS schema_migrations;
+
+CREATE TABLE schema_migrations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    schema_version TEXT NOT NULL UNIQUE,
+    applied_by_app_version TEXT NOT NULL,
+    applied_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+INSERT INTO schema_migrations (schema_version, applied_by_app_version)
+VALUES ('1.0.0', '1.0.0');
 
 CREATE TABLE instructors (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -108,6 +119,8 @@ CREATE TABLE course_state (
     poll_active INTEGER DEFAULT 0,
     poll_question_key TEXT,
     poll_started_at TIMESTAMP,
+    poll_closed_at TIMESTAMP,
+    challenge_ratings_closed_at TIMESTAMP,
     presentation_history TEXT DEFAULT '[]',
     roster_version INTEGER DEFAULT 0,
     session_key INTEGER DEFAULT 0,
@@ -150,6 +163,7 @@ CREATE TABLE presentation_ratings (
     question_title TEXT,
     rater_team_id INTEGER,
     rater_team_name TEXT,
+    data_version TEXT NOT NULL DEFAULT '1.0.0',
     q1_developed INTEGER CHECK(q1_developed >= 1 AND q1_developed <= 5),
     q2_easy INTEGER CHECK(q2_easy >= 1 AND q2_easy <= 5),
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -163,6 +177,8 @@ CREATE TABLE presentation_ratings (
 
 CREATE INDEX idx_ratings_presentation
     ON presentation_ratings(course_id, question_key);
+CREATE INDEX idx_ratings_session
+    ON presentation_ratings(course_id, session_key);
 
 CREATE TABLE teammate_thumbs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -178,6 +194,7 @@ CREATE TABLE teammate_thumbs (
     grader_team_name TEXT,
     recipient_team_id INTEGER,
     recipient_team_name TEXT,
+    data_version TEXT NOT NULL DEFAULT '1.0.0',
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (course_id) REFERENCES courses (id) ON DELETE CASCADE,
@@ -226,6 +243,7 @@ CREATE TABLE challenge_rounds (
     presenting_team_name TEXT,
     question_id INTEGER,
     question_title TEXT,
+    data_version TEXT NOT NULL DEFAULT '1.0.0',
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (course_id) REFERENCES courses (id) ON DELETE CASCADE,
     FOREIGN KEY (challenger_id) REFERENCES students (id) ON DELETE CASCADE,
@@ -266,6 +284,7 @@ CREATE TABLE challenge_ratings (
     rater_name TEXT,
     rater_team_id INTEGER,
     rater_team_name TEXT,
+    data_version TEXT NOT NULL DEFAULT '1.0.0',
     score INTEGER CHECK(score >= 1 AND score <= 5),
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (course_id) REFERENCES courses (id) ON DELETE CASCADE,
@@ -278,10 +297,14 @@ CREATE TABLE challenge_ratings (
 
 CREATE INDEX idx_challenge_rounds_pres
     ON challenge_rounds(course_id, presentation_key);
+CREATE INDEX idx_challenge_rounds_session
+    ON challenge_rounds(course_id, session_key);
 CREATE INDEX idx_challenge_hands_pres
     ON challenge_hands(course_id, presentation_key);
 CREATE INDEX idx_challenge_ratings_challenge
     ON challenge_ratings(course_id, challenge_key);
+CREATE INDEX idx_challenge_ratings_session
+    ON challenge_ratings(course_id, session_key);
 CREATE INDEX idx_challenge_ratings_export_week
     ON challenge_ratings(course_id, week_num);
 

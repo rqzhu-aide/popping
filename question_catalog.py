@@ -450,6 +450,120 @@ def validate_discussion_week(course_dir, week_num):
     )
 
 
+def validate_week_question_file(path):
+    """Validate one already-resolved canonical weekly question file."""
+    question_path = Path(path)
+    match = DISCUSSION_FILE_PATTERN.fullmatch(question_path.name)
+    if not match:
+        issue = _issue(
+            "discussion_file_name_invalid",
+            "Weekly question filename must use week-N-questions.md",
+            question_path,
+        )
+        return CatalogSectionStatus(
+            False, 0, str(question_path), (issue,)
+        )
+    return validate_discussion_week(
+        question_path.parent, int(match.group(1))
+    )
+
+
+def parse_week_questions(
+        text, source_path="<weekly questions>", week_num=None,
+        max_questions=None):
+    """Parse and strictly validate one canonical weekly Markdown file."""
+    if not isinstance(text, str) or not text.strip():
+        raise QuestionParseError("Weekly question file is empty")
+
+    try:
+        entries = parse_question_blocks(text)
+    except QuestionParseError:
+        raise
+    if max_questions is not None and len(entries) > max_questions:
+        raise QuestionParseError(
+            f"A weekly file may contain at most {max_questions} questions"
+        )
+
+    path = Path(source_path)
+    resolved_week = week_num
+    if resolved_week is None:
+        match = DISCUSSION_FILE_PATTERN.fullmatch(path.name)
+        resolved_week = int(match.group(1)) if match else None
+
+    questions = []
+    seen_ids = set()
+    seen_titles = set()
+    for position, (frontmatter, body) in enumerate(entries, 1):
+        try:
+            metadata = yaml.safe_load(frontmatter) or {}
+        except yaml.YAMLError as exc:
+            raise QuestionParseError(
+                f"Question {position} has invalid frontmatter"
+            ) from exc
+        if not isinstance(metadata, dict):
+            raise QuestionParseError(
+                f"Question {position} frontmatter must be a mapping"
+            )
+
+        title = metadata.get("title")
+        title_error = _title_error(title)
+        if title_error:
+            raise QuestionParseError(
+                f"Question {position}: {title_error}"
+            )
+        title = title.strip()
+        normalized_title = " ".join(title.split()).casefold()
+        if normalized_title in seen_titles:
+            raise QuestionParseError(
+                f"Question {position} has a duplicate title"
+            )
+        seen_titles.add(normalized_title)
+
+        question_id = metadata.get("id")
+        if (not isinstance(question_id, str)
+                or not DISCUSSION_ID_PATTERN.fullmatch(question_id.strip())):
+            raise QuestionParseError(
+                f"Question {position} has an invalid or missing stable id"
+            )
+        question_id = question_id.strip()
+        normalized_id = question_id.casefold()
+        if normalized_id in seen_ids:
+            raise QuestionParseError(
+                f"Question {position} has a duplicate stable id"
+            )
+        seen_ids.add(normalized_id)
+
+        content = body.strip()
+        if not content:
+            raise QuestionParseError(
+                f"Question {position} has no content"
+            )
+        source_key = (
+            f"week-{resolved_week}-q-{question_id}"
+            if resolved_week is not None else f"q-{question_id}"
+        )
+        questions.append({
+            "id": question_id,
+            "num": position,
+            "title": title,
+            "content": content,
+            "source_key": source_key,
+        })
+    return questions
+
+
+def read_week_questions(path, week_num=None, max_questions=None):
+    """Read one canonical UTF-8 weekly file and return validated questions."""
+    question_path = Path(path)
+    text, read_issue = _read_utf8(question_path, "discussion_file")
+    if read_issue:
+        raise QuestionParseError(read_issue.message)
+    return parse_week_questions(
+        text, source_path=question_path, week_num=week_num,
+        max_questions=max_questions,
+    )
+
+
 def parse_presentation_index(text):
     """Parse 'N. Question title' entries from a presentation index.md."""
     questions = []
@@ -586,21 +700,23 @@ def validate_presentation_week(course_dir, week_num):
     )
 
 
-def discover_catalog_weeks(course_dir):
-    """Discover week numbers from discussion files and presentation folders."""
+def discover_catalog_weeks(course_dir, fallback_dir=None):
+    """Discover canonical weekly Markdown files across primary and fallback."""
     course_path = Path(course_dir)
-    if not course_path.is_dir():
+    fallback_path = Path(fallback_dir) if fallback_dir is not None else None
+    roots = [
+        path for path in (course_path, fallback_path)
+        if path is not None and path.is_dir()
+    ]
+    if not roots:
         raise ValueError(f"Course directory does not exist: {course_path}")
 
     weeks = set()
-    for child in course_path.iterdir():
-        discussion_match = DISCUSSION_FILE_PATTERN.fullmatch(child.name)
-        if child.is_file() and discussion_match:
-            weeks.add(int(discussion_match.group(1)))
-            continue
-        presentation_match = PRESENTATION_DIR_PATTERN.fullmatch(child.name)
-        if child.is_dir() and presentation_match:
-            weeks.add(int(presentation_match.group(1)))
+    for root in roots:
+        for child in root.iterdir():
+            match = DISCUSSION_FILE_PATTERN.fullmatch(child.name)
+            if child.is_file() and match:
+                weeks.add(int(match.group(1)))
     return tuple(sorted(week for week in weeks if week > 0))
 
 
@@ -614,17 +730,24 @@ def _normalize_weeks(weeks: Iterable[int]):
 
 
 def validate_question_catalog(
-        course_dir: Union[str, Path], weeks: Optional[Iterable[int]] = None):
-    """Validate all discovered weeks or an explicit set of selectable weeks."""
+        course_dir: Union[str, Path], weeks: Optional[Iterable[int]] = None,
+        fallback_dir: Optional[Union[str, Path]] = None):
+    """Validate the one effective weekly source used by both class phases."""
     course_path = Path(course_dir)
-    selected_weeks = discover_catalog_weeks(course_path) \
+    fallback_path = Path(fallback_dir) if fallback_dir is not None else None
+    selected_weeks = discover_catalog_weeks(course_path, fallback_path) \
         if weeks is None else _normalize_weeks(weeks)
-    statuses = tuple(
-        WeekCatalogStatus(
+
+    statuses = []
+    for week in selected_weeks:
+        filename = f"week-{week}-questions.md"
+        primary = course_path / filename
+        fallback = fallback_path / filename if fallback_path else None
+        resolved = primary if primary.exists() else (fallback or primary)
+        section = validate_week_question_file(resolved)
+        statuses.append(WeekCatalogStatus(
             week=week,
-            discussion=validate_discussion_week(course_path, week),
-            presentation=validate_presentation_week(course_path, week),
-        )
-        for week in selected_weeks
-    )
-    return QuestionCatalogReport(str(course_path), statuses)
+            discussion=section,
+            presentation=section,
+        ))
+    return QuestionCatalogReport(str(course_path), tuple(statuses))
