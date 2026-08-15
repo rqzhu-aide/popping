@@ -65,6 +65,7 @@ function makeSession(routes, options = {}) {
     const dashboardEl = makeElement('dashboard');
     dashboardEl.dataset = {
         phase: options.phase || 'discussion',
+        sessionKey: String(options.sessionKey ?? 4),
         you: 'S1',
         teamId: options.myTeamId == null ? '' : String(options.myTeamId),
     };
@@ -74,6 +75,7 @@ function makeSession(routes, options = {}) {
         'team-section': makeElement('team-section'),
         'team-grading-section': makeElement('team-grading-section'),
         'poll-section': makeElement('poll-section'),
+        'challenge-section': makeElement('challenge-section'),
         'poll-pulse': makeElement('poll-pulse'),
         'poll-pulse-text': makeElement('poll-pulse-text'),
         'rating-status': makeElement('rating-status'),
@@ -211,6 +213,7 @@ const fail500 = { status: 500, data: {} };
 
 const discussionState = {
     phase: 'discussion',
+    session_key: 4,
     discussion_week: 1,
     discussion_questions_version: 2,
     roster_version: 7,
@@ -220,6 +223,7 @@ const discussionState = {
 
 const competitionState = {
     phase: 'competition',
+    session_key: 4,
     roster_version: 7,
     teams_locked: false,
     my_team: { id: 1, name: 'Team 1' },
@@ -261,7 +265,7 @@ async function scenarioRosterRetriesWithBackoff() {
             ok({ changed: false, state_version: 4, poll_interval: 1000 }),
         ]],
         ['/api/discussion_questions', [ok({ version: 2, questions: [] })]],
-        ['/api/my_responses', [ok({ phase: 'discussion', thumb_recipient_ids: [] })]],
+        ['/api/my_responses', [ok({ phase: 'discussion', session_key: 4, thumb_recipient_ids: [] })]],
         ['/api/teams', [fail500, ok([{ id: 1, name: 'Team 1', color: '#abc', members: [] }])]],
     ]);
     await session.drain();
@@ -301,7 +305,7 @@ async function scenarioDiscussionQuestionsRetry() {
     const session = makeSession([
         pollRoute(),
         ['/api/discussion_questions', [fail500, ok({ version: 2, questions: [] })]],
-        ['/api/my_responses', [ok({ phase: 'discussion', thumb_recipient_ids: [] })]],
+        ['/api/my_responses', [ok({ phase: 'discussion', session_key: 4, thumb_recipient_ids: [] })]],
         ['/api/teams', [ok([])]],
     ]);
     await session.drain();
@@ -326,7 +330,7 @@ async function scenarioMyResponsesRetry() {
     const session = makeSession([
         pollRoute(),
         ['/api/discussion_questions', [ok({ version: 2, questions: [] })]],
-        ['/api/my_responses', [fail500, ok({ phase: 'discussion', thumb_recipient_ids: [] })]],
+        ['/api/my_responses', [fail500, ok({ phase: 'discussion', session_key: 4, thumb_recipient_ids: [] })]],
         ['/api/teams', [ok([])]],
     ]);
     await session.drain();
@@ -348,11 +352,96 @@ async function scenarioMyResponsesRetry() {
     console.error('PASS my-responses retry');
 }
 
+async function scenarioAmbiguousThumbWaitsForMatchingReadback() {
+    const session = makeSession([
+        pollRoute(),
+        ['/api/discussion_questions', [ok({ version: 2, questions: [] })]],
+        ['/api/my_responses', [
+            ok({ phase: 'discussion', session_key: 4, thumb_recipient_ids: [] }),
+            ok({ phase: 'discussion', session_key: 4, thumb_recipient_ids: ['S2'] }),
+        ]],
+        ['/api/teams', [ok([])]],
+    ]);
+    vm.runInContext(
+        "_unconfirmedThumbVotes.set('S2', true);" +
+        "responseNeedsRefresh = true;",
+        session.sandbox
+    );
+    await session.drain();
+
+    assert.strictEqual(
+        vm.runInContext("_unconfirmedThumbVotes.has('S2')", session.sandbox),
+        true,
+        'a stale mismatch must keep the thumb unconfirmed'
+    );
+    assert.strictEqual(
+        vm.runInContext('responseNeedsRefresh', session.sandbox),
+        true,
+        'a stale mismatch must keep saved-response retry pending'
+    );
+
+    session.fetchLog.length = 0;
+    session.advance(1500);
+    await session.pollOnce();
+    await session.drain();
+
+    assert.strictEqual(
+        countFetches(session.fetchLog, '/api/my_responses'),
+        1,
+        'the next compact poll should retry ambiguous thumb read-back'
+    );
+    assert.strictEqual(
+        vm.runInContext('_unconfirmedThumbVotes.size', session.sandbox),
+        0,
+        'a matching database read should confirm and clear the thumb'
+    );
+    assert.strictEqual(
+        vm.runInContext('responseNeedsRefresh', session.sandbox),
+        false,
+        'matching read-back should stop the saved-response retry'
+    );
+    console.error('PASS ambiguous thumb read-back retry');
+}
+
+async function scenarioPersistentThumbMismatchCannotBlockReload() {
+    const session = makeSession([
+        pollRoute(),
+        ['/api/discussion_questions', [ok({ version: 2, questions: [] })]],
+        ['/api/my_responses', [
+            ok({ phase: 'discussion', session_key: 4, thumb_recipient_ids: [] }),
+        ]],
+        ['/api/teams', [ok([])]],
+    ]);
+    vm.runInContext(
+        "_unconfirmedThumbVotes.set('S2', true);" +
+        "_unconfirmedThumbSessionKey = 4;" +
+        "responseNeedsRefresh = true;" +
+        "queueDashboardReload({ phase: 'discussion', session_key: 4 });",
+        session.sandbox
+    );
+    await session.drain();
+    assert.strictEqual(
+        session.getReloadCount(),
+        0,
+        'the first mismatch should remain inside the read-back grace'
+    );
+
+    session.advance(6000);
+    await session.pollOnce();
+    await session.drain();
+    assert.strictEqual(
+        session.getReloadCount(),
+        1,
+        'a retry completion after the grace must proceed with the reload'
+    );
+    console.error('PASS persistent thumb mismatch reload deadline');
+}
+
 async function scenarioSteadyHealthySession() {
     const session = makeSession([
         pollRoute(),
         ['/api/discussion_questions', [ok({ version: 2, questions: [] })]],
-        ['/api/my_responses', [ok({ phase: 'discussion', thumb_recipient_ids: [] })]],
+        ['/api/my_responses', [ok({ phase: 'discussion', session_key: 4, thumb_recipient_ids: [] })]],
         ['/api/teams', [ok([])]],
     ]);
     await session.drain();
@@ -379,7 +468,7 @@ async function scenarioDelayedSyncsDoNotOverlapOrBlockPolling() {
         }]],
         ['/api/my_responses', [{
             defer: 'responses',
-            response: ok({ phase: 'discussion', thumb_recipient_ids: [] }),
+            response: ok({ phase: 'discussion', session_key: 4, thumb_recipient_ids: [] }),
         }]],
         ['/api/teams', [{
             defer: 'roster',
@@ -465,7 +554,7 @@ async function scenarioStaleDiscussionResultCannotOverwriteNewContext() {
             }),
         ]],
         ['/api/my_responses', [
-            ok({ phase: 'discussion', thumb_recipient_ids: [] }),
+            ok({ phase: 'discussion', session_key: 4, thumb_recipient_ids: [] }),
         ]],
         ['/api/teams', [ok([])]],
     ]);
@@ -531,7 +620,8 @@ async function scenarioCompactPollClosePreservesDraftWarning() {
     );
 
     vm.runInContext(
-        'ratingDraftDirty = true; pollSelections = { q1: 4, q2: 3 };',
+        'ratingDraftDirty = true; pollSelections = { q1: 4, q2: 3 };' +
+            'activeChallengeRatingsOpen = true;',
         session.sandbox
     );
     session.advance(1500);
@@ -546,6 +636,18 @@ async function scenarioCompactPollClosePreservesDraftWarning() {
         vm.runInContext('ratingPollOpenForTimer', session.sandbox),
         false,
         'compact close signal should close the timer rating state'
+    );
+    assert.strictEqual(
+        vm.runInContext('activeChallengeRatingsOpen', session.sandbox),
+        false,
+        'compact close signal should close challenge rating controls'
+    );
+    assert.strictEqual(
+        vm.runInContext(
+            'lastReceivedState.challenge_ratings_open', session.sandbox
+        ),
+        false,
+        'compact close signal should update the challenge state snapshot'
     );
     assert.strictEqual(
         vm.runInContext('ratingDraftDirty', session.sandbox),
@@ -576,6 +678,65 @@ async function scenarioCompactPollClosePreservesDraftWarning() {
     );
     console.error('PASS compact poll close draft preservation');
 }
+
+async function scenarioPresentationEndClearsChallengePanel() {
+    const waitingState = {
+        ...competitionState,
+        active_team: null,
+        active_question: null,
+        poll_active: false,
+        poll_question_key: null,
+        poll_remaining: 0,
+        active_challenges: [],
+        challenge_ratings_open: false,
+    };
+    const session = makeSession([
+        ['/api/poll', [
+            ok({
+                changed: true,
+                state_version: 10,
+                state: competitionState,
+                poll_interval: 1000,
+            }),
+            ok({
+                changed: true,
+                state_version: 11,
+                state: waitingState,
+                poll_interval: 1000,
+            }),
+        ]],
+        ['/api/my_responses', [ok({
+            phase: 'competition',
+            presentation_key: 'presentation-1',
+            rating: null,
+            challenge_ratings: {},
+            challenge_hand_raised: false,
+        })]],
+        ['/api/teams', [ok([])]],
+    ], { phase: 'competition', myTeamId: 1 });
+    await session.drain();
+    assert.strictEqual(
+        session.elementsById['challenge-section'].style.display,
+        'block',
+        'active presentation should show challenge controls'
+    );
+
+    session.advance(1500);
+    await session.pollOnce();
+    assert.strictEqual(
+        session.elementsById['challenge-section'].style.display,
+        'none',
+        'ended presentation must hide stale challenge controls'
+    );
+    assert.strictEqual(
+        vm.runInContext('activeChallengePresentationKey', session.sandbox),
+        null,
+        'ended presentation must clear the prior challenge context'
+    );
+    console.error('PASS presentation end clears challenge panel');
+}
+
+
 
 async function scenarioIntentionalDemoNavigationStopsStalePoll() {
     const session = makeSession([
@@ -617,10 +778,13 @@ async function scenarioIntentionalDemoNavigationStopsStalePoll() {
     await scenarioRosterRetriesWithBackoff();
     await scenarioDiscussionQuestionsRetry();
     await scenarioMyResponsesRetry();
+    await scenarioAmbiguousThumbWaitsForMatchingReadback();
+    await scenarioPersistentThumbMismatchCannotBlockReload();
     await scenarioSteadyHealthySession();
     await scenarioDelayedSyncsDoNotOverlapOrBlockPolling();
     await scenarioStaleDiscussionResultCannotOverwriteNewContext();
     await scenarioCompactPollClosePreservesDraftWarning();
+    await scenarioPresentationEndClearsChallengePanel();
     await scenarioIntentionalDemoNavigationStopsStalePoll();
     console.error('All poll-retry scenarios passed.');
 })().catch(error => {

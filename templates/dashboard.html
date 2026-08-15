@@ -5,6 +5,7 @@
 {% block content %}
 <div class="dashboard" data-phase="{{ state.phase }}" data-you="{{ student.student_id }}"
      data-course-slug="{{ course.slug }}"
+     data-session-key="{{ state.session_key or 0 }}"
      data-team-id="{{ team.id if team else '' }}"
      data-teams-locked="{{ 1 if teams_locked else 0 }}"
      data-max-teams="{{ max_teams if max_teams is defined else teams|length }}"
@@ -58,7 +59,7 @@
         <p id="rating-prompt" class="hint" style="margin-bottom:12px;"></p>
         <div class="poll-pulse" id="poll-pulse" style="display:none;">
             <span class="pulse-dot"></span>
-            <span id="poll-pulse-text">⏱ 30s left to rate!</span>
+            <span id="poll-pulse-text">⏱ Rating open</span>
         </div>
         <div class="poll-section" id="poll-section" style="display:none;">
             <div class="poll-card">
@@ -82,7 +83,9 @@
                 </div>
             </div>
             <button class="btn btn-primary" id="btn-submit-rating" onclick="submitRating()">Submit Rating</button>
-            <p id="rating-status" class="rating-status" style="display:none; margin-top:10px; font-weight:600; color:var(--success-text);"></p>
+            <p id="rating-status" class="rating-status" role="status"
+               aria-live="polite" aria-atomic="true"
+               style="display:none; margin-top:10px; font-weight:600; color:var(--success-text);"></p>
         </div>
     </section>
 

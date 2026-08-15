@@ -25,8 +25,25 @@
             options: { ignoreHtmlClass: 'no-math' },
             chtml: { displayAlign: 'left' }
         };
+        function showMathJaxLoadWarning() {
+            function showWarning() {
+                if (document.getElementById('mathjax-load-warning')) return;
+                const warning = document.createElement('div');
+                warning.id = 'mathjax-load-warning';
+                warning.className = 'flash flash-warning';
+                warning.setAttribute('role', 'status');
+                warning.textContent = 'Math formatting could not load. Questions and controls still work, but equations may appear as plain notation.';
+                const main = document.querySelector('main.container');
+                if (main) main.prepend(warning);
+            }
+            if (document.readyState === 'loading') {
+                document.addEventListener('DOMContentLoaded', showWarning, { once: true });
+            } else {
+                showWarning();
+            }
+        }
     </script>
-    <script id="MathJax-script" async src="https://cdn.jsdelivr.net/npm/mathjax@3.2.2/es5/tex-mml-chtml.js" integrity="sha384-Wuix6BuhrWbjDBs24bXrjf4ZQ5aFeFWBuKkFekO2t8xFU0iNaLQfp2K6/1Nxveei" crossorigin="anonymous"></script>
+    <script id="MathJax-script" async src="https://cdn.jsdelivr.net/npm/mathjax@3.2.2/es5/tex-mml-chtml.js" integrity="sha384-Wuix6BuhrWbjDBs24bXrjf4ZQ5aFeFWBuKkFekO2t8xFU0iNaLQfp2K6/1Nxveei" crossorigin="anonymous" onerror="showMathJaxLoadWarning()"></script>
     {% endblock %}
 </head>
 <body>
@@ -100,6 +117,14 @@
             </div>
         </div>
     </div>
+    {% endif %}
+
+    {% if session.student_id %}
+    <div id="student-vote-status" class="request-progress-status"
+         role="status" aria-live="polite" aria-atomic="true"></div>
+    {% elif session.instructor_id and session.slug %}
+    <div id="instructor-save-status" class="request-progress-status"
+         role="status" aria-live="polite" aria-atomic="true"></div>
     {% endif %}
 
     <main class="container">

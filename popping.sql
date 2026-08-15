@@ -108,6 +108,8 @@ CREATE TABLE course_state (
     poll_active INTEGER DEFAULT 0,
     poll_question_key TEXT,
     poll_started_at TIMESTAMP,
+    poll_closed_at TIMESTAMP,
+    challenge_ratings_closed_at TIMESTAMP,
     presentation_history TEXT DEFAULT '[]',
     roster_version INTEGER DEFAULT 0,
     session_key INTEGER DEFAULT 0,
@@ -163,6 +165,8 @@ CREATE TABLE presentation_ratings (
 
 CREATE INDEX idx_ratings_presentation
     ON presentation_ratings(course_id, question_key);
+CREATE INDEX idx_ratings_session
+    ON presentation_ratings(course_id, session_key);
 
 CREATE TABLE teammate_thumbs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -278,10 +282,14 @@ CREATE TABLE challenge_ratings (
 
 CREATE INDEX idx_challenge_rounds_pres
     ON challenge_rounds(course_id, presentation_key);
+CREATE INDEX idx_challenge_rounds_session
+    ON challenge_rounds(course_id, session_key);
 CREATE INDEX idx_challenge_hands_pres
     ON challenge_hands(course_id, presentation_key);
 CREATE INDEX idx_challenge_ratings_challenge
     ON challenge_ratings(course_id, challenge_key);
+CREATE INDEX idx_challenge_ratings_session
+    ON challenge_ratings(course_id, session_key);
 CREATE INDEX idx_challenge_ratings_export_week
     ON challenge_ratings(course_id, week_num);
 

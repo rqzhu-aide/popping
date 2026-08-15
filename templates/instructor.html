@@ -26,7 +26,9 @@
      data-poll-active="{{ 1 if state.poll_active else 0 }}"
      data-poll-started="{{ state.poll_started_at or '' }}"
      data-poll-remaining="{{ state.poll_remaining or 0 }}"
-     data-poll-duration="{{ POLL_DURATION if POLL_DURATION is defined else 30 }}">
+     data-poll-duration="{{ POLL_DURATION if POLL_DURATION is defined else 40 }}"
+     data-ratings-settling="{{ 1 if state.ratings_settling else 0 }}"
+     data-ratings-settling-remaining="{{ state.ratings_settling_remaining or 0 }}">
     <header class="dash-header">
         <div>
             <h1>{{ course.name }}</h1>
@@ -101,6 +103,51 @@
     <!-- ===== SETUP PHASE ===== -->
     {% if state.phase == 'setup' %}
 
+    {% if not session.get('is_demo') %}
+    <section class="card" id="weekly-question-upload-card">
+        <h2>Weekly Questions</h2>
+        <p class="hint" id="weekly-question-upload-help">
+            Upload one Markdown file for a lecture week. Discussion and Presentation will use the exact same questions, in the same order.
+        </p>
+        <div class="weekly-question-upload-form">
+            <div class="weekly-question-upload-field weekly-question-week-field">
+                <label for="weekly-question-week">Week</label>
+                <input type="number" id="weekly-question-week" min="1" step="1"
+                       value="{{ state.discussion_week or 1 }}" inputmode="numeric">
+            </div>
+            <div class="weekly-question-upload-field weekly-question-file-field">
+                <label for="weekly-question-file">Question file</label>
+                <input type="file" id="weekly-question-file"
+                       accept=".md,text/markdown,text/plain"
+                       aria-describedby="weekly-question-upload-help">
+            </div>
+            <button type="button" class="btn btn-secondary"
+                    id="btn-preview-question-upload"
+                    onclick="previewWeeklyQuestionUpload()">Preview Upload</button>
+        </div>
+        <div class="weekly-question-upload-preview"
+             id="weekly-question-upload-preview" hidden
+             aria-live="polite">
+            <h3 id="weekly-question-upload-preview-title"></h3>
+            <p>
+                These questions will become the common question set for both
+                Discussion and Presentation. Existing appendix questions are kept.
+            </p>
+            <ol id="weekly-question-upload-preview-list"></ol>
+            <p class="weekly-question-replace-warning">
+                Confirming replaces the existing base question file for this week.
+            </p>
+            <div class="modal-actions">
+                <button type="button" class="btn btn-secondary"
+                        onclick="cancelWeeklyQuestionUpload()">Cancel</button>
+                <button type="button" class="btn btn-danger"
+                        id="btn-confirm-question-upload"
+                        onclick="confirmWeeklyQuestionUpload()">Confirm Replacement</button>
+            </div>
+        </div>
+    </section>
+    {% endif %}
+
     <section class="card">
         <div class="card-header-row">
             <h2>Team and Members</h2>
@@ -154,15 +201,25 @@
             <div class="filter-group">
                 <span class="filter-label">Filter by team</span>
                 <div class="filter-dropdown" id="team-filter-dropdown">
-                    <button class="filter-btn" onclick="toggleTeamFilter(event)">
+                    <button type="button" class="filter-btn" id="team-filter-trigger"
+                            aria-controls="team-filter-menu" aria-expanded="false"
+                            onclick="toggleTeamFilter(event)">
                         <span id="team-filter-label">All</span> ▾
                     </button>
-                    <div class="team-picker filter-picker" id="team-filter-menu" style="display:none;">
-                        <div class="team-picker-item" onclick="setTeamFilter('', 'All')">All</div>
+                    <div class="team-picker filter-picker" id="team-filter-menu"
+                         role="group" aria-label="Team filter options" style="display:none;">
+                        <div class="team-picker-item" role="button" tabindex="0"
+                             onclick="setTeamFilter('', 'All')"
+                             onkeydown="teamFilterOptionKeydown(event, '', 'All')">All</div>
                         {% for t in teams[:max_teams] %}
-                        <div class="team-picker-item" style="border-left:3px solid {{ t.color }}" onclick="setTeamFilter({{ t.id }}, {{ t.name | tojson }})">{{ t.name }}</div>
+                        <div class="team-picker-item" role="button" tabindex="0"
+                             style="border-left:3px solid {{ t.color }}"
+                             onclick="setTeamFilter({{ t.id }}, {{ t.name | tojson }})"
+                             onkeydown="teamFilterOptionKeydown(event, {{ t.id }}, {{ t.name | tojson }})">{{ t.name }}</div>
                         {% endfor %}
-                        <div class="team-picker-item" onclick="setTeamFilter('none', 'Unassigned')">Unassigned</div>
+                        <div class="team-picker-item" role="button" tabindex="0"
+                             onclick="setTeamFilter('none', 'Unassigned')"
+                             onkeydown="teamFilterOptionKeydown(event, 'none', 'Unassigned')">Unassigned</div>
                     </div>
                 </div>
             </div>
@@ -194,7 +251,6 @@
     <section class="card">
         <h2>Discussion Questions</h2>
         <p class="hint">All questions below are visible to students. Hide a question to remove it from student screens.</p>
-        <p class="participation-count" id="thumb-participation" aria-live="polite">Loading participation...</p>
         <div class="disc-questions-list" id="disc-questions-list">
             <p class="loading">Loading questions...</p>
         </div>
@@ -210,6 +266,14 @@
         </div>
     </section>
 
+    <section class="card" id="discussion-participation-panel">
+        <h2>Teammate Thumbs-Up Activity</h2>
+        <p class="participation-count" id="thumb-participation"
+           aria-live="polite">Loading participation...</p>
+        <ul class="thumb-team-progress" id="thumb-team-progress"
+            aria-label="Thumb participation by team" hidden></ul>
+    </section>
+
     <!-- ===== COMPETITION PHASE ===== -->
     {% elif state.phase == 'competition' %}
 
@@ -217,7 +281,7 @@
         <h2>🎯 Group Presentation</h2>
         {% if not state.presentation_catalog_ready %}
         <p class="hint text-warning">
-            Week {{ state.discussion_week or 1 }} has no validated presentation question set. Appendix questions remain available.
+            Week {{ state.discussion_week or 1 }} has no validated weekly question set. Appendix questions remain available.
         </p>
         {% endif %}
         <div class="competition-control">
@@ -272,8 +336,11 @@
             </div>
 
             {# Poll status #}
-            <p class="participation-count" id="poll-count" aria-live="polite">Loading rating activity...</p>
-            <p class="poll-non-raters" id="poll-non-raters" aria-live="polite" style="display:none;"></p>
+            <p class="participation-count" id="poll-count" role="status"
+               aria-live="polite">Loading rating activity...</p>
+            <p class="ratings-settling-status" id="ratings-settling-status"
+               role="status" aria-live="polite" hidden></p>
+
             <div class="poll-status" id="poll-status" style="display:none; margin-top:12px;">
                 <span class="poll-badge">⭐ Poll active</span>
                 <button class="btn btn-sm btn-secondary" onclick="stopPoll()">Stop Poll</button>
@@ -361,19 +428,19 @@
     <section class="card">
         <h2>📊 Session Summary</h2>
         <p><strong>Students who submitted at least one response this session:</strong> {{ end_stats.participants }}</p>
-        {% if end_stats.top_students %}
-        <h4>Top Students (by thumbs-up)</h4>
-        <ul>
-            {% for s in end_stats.top_students %}
-            <li>{{ s.name }}: {{ s.thumbs }} thumbs-up</li>
-            {% endfor %}
-        </ul>
-        {% endif %}
         {% if end_stats.top_teams %}
         <h4>Top Teams (by avg rating)</h4>
         <ul>
             {% for t in end_stats.top_teams %}
             <li>#{{ t.rank }} {{ t.name }}: {{ t.avg_score }} average ({{ t.rating_count }} submitted rating form{% if t.rating_count != 1 %}s{% endif %})</li>
+            {% endfor %}
+        </ul>
+        {% endif %}
+        {% if end_stats.top_challengers %}
+        <h4>Top Challenger (by avg rating)</h4>
+        <ul>
+            {% for c in end_stats.top_challengers %}
+            <li>#{{ c.rank }} {{ c.name }}: {{ c.avg_score }} average ({{ c.rating_count }} submitted rating{% if c.rating_count != 1 %}s{% endif %})</li>
             {% endfor %}
         </ul>
         {% endif %}

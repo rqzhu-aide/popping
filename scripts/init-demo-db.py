@@ -4,7 +4,7 @@
 Creates a self-contained 'demo' course with:
   - 1 instructor (the web demo bypasses login)
   - 2 unassigned students and 2 teams
-  - Sample questions read from classes/demo/week1/index.md
+  - Sample questions read from classes/demo/week-1-questions.md
   - Course state in 'setup' phase
 
 Usage:
@@ -21,6 +21,10 @@ from contextlib import contextmanager
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCHEMA = os.path.join(BASE_DIR, 'popping.sql')
+if BASE_DIR not in sys.path:
+    sys.path.insert(0, BASE_DIR)
+
+from question_catalog import read_week_questions
 
 
 def resolve_data_dir():
@@ -37,7 +41,7 @@ DATA_DIR = resolve_data_dir()
 DB_DIR = os.path.join(DATA_DIR, 'demo')
 DB_PATH = os.path.join(DB_DIR, 'popping.db')
 LOCK_PATH = os.path.join(DB_DIR, '.demo-init-lock.sqlite3')
-DEMO_SEED_VERSION = 2
+DEMO_SEED_VERSION = 3
 
 _RESET_TABLES = (
     'discussion_responses',
@@ -204,35 +208,25 @@ def _populate(conn):
             (course_id, sid, name, 'demo', None)
         )
 
-    # Read questions from classes/demo/week1/index.md
-    import re
-    week_dir = os.path.join(BASE_DIR, 'classes', 'demo', 'week1')
-    index_path = os.path.join(week_dir, 'index.md')
-    questions = []
-    if os.path.exists(index_path):
-        with open(index_path, 'r', encoding='utf-8') as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                m = re.match(r'^(\d+)\.\s+(.+)$', line)
-                if m:
-                    qnum = int(m.group(1))
-                    title = m.group(2).strip()
-                    questions.append({'num': qnum, 'title': title})
-    else:
-        # Fallback: inline questions if folder doesn't exist
-        questions = [
-            {'num': 1, 'title': 'Bagging vs Boosting'},
-            {'num': 2, 'title': 'Bias-Variance Decomposition'},
-            {'num': 3, 'title': 'Gradient Boosting Parameters'},
-            {'num': 4, 'title': 'Regularization Analysis'},
-        ]
+    question_path = os.path.join(
+        BASE_DIR, 'classes', 'demo', 'week-1-questions.md'
+    )
+    questions = read_week_questions(question_path, week_num=1)
 
     for q in questions:
         conn.execute(
-            "INSERT INTO questions (course_id, question_num, question_text, title, week_num) VALUES (?, ?, ?, ?, ?)",
-            (course_id, q['num'], q['title'][:200], q['title'], 1)
+            """INSERT INTO questions
+               (course_id, question_num, question_text, title, content,
+                week_num, source_key)
+               VALUES (?, ?, ?, ?, ?, 1, ?)""",
+            (
+                course_id,
+                q['num'],
+                q['title'][:200],
+                q['title'],
+                q['content'],
+                q['source_key'],
+            )
         )
 
     # Course state — start in setup

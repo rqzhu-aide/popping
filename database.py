@@ -6,6 +6,9 @@ from flask import g
 import config
 
 SLUG_RE = re.compile(r'^[A-Za-z0-9_-]+$')
+SQLITE_BUSY_TIMEOUT_SECONDS = 8
+SQLITE_BUSY_TIMEOUT_MS = SQLITE_BUSY_TIMEOUT_SECONDS * 1000
+SQLITE_BUSY_RETRY_AFTER_SECONDS = 2
 
 # Process-local cache: slugs whose schema has already been verified/migrated.
 # Without this, ensure_schema() runs ~10 PRAGMA queries on every API call.
@@ -17,6 +20,19 @@ _schema_check_locks_guard = threading.Lock()
 def _schema_lock_for(slug):
     with _schema_check_locks_guard:
         return _schema_check_locks.setdefault(slug, threading.Lock())
+
+
+def is_sqlite_busy_error(error):
+    """Return whether an OperationalError represents lock contention."""
+    error_code = getattr(error, 'sqlite_errorcode', None)
+    primary_error_code = (
+        error_code & 0xFF if isinstance(error_code, int) else None
+    )
+    if primary_error_code in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED):
+        return True
+    message = str(error).casefold()
+    return ('database is locked' in message or
+            'database table is locked' in message)
 
 
 def validate_slug(slug):
@@ -32,29 +48,22 @@ def get_db(slug):
         db_path = os.path.join(config.DATA_DIR, slug, 'popping.db')
         if not os.path.exists(db_path):
             raise RuntimeError(f"Database not found for course: {slug}")
-        # Let ordinary writes wait on lock contention.
-        conn = sqlite3.connect(db_path, timeout=30)
+        # Bound each ordinary SQLite lock wait below the browser's 15-second
+        # request deadline. Persistent contention can then surface as a
+        # retryable 503 instead of one 30-second lock wait.
+        conn = sqlite3.connect(db_path, timeout=SQLITE_BUSY_TIMEOUT_SECONDS)
         conn.row_factory = sqlite3.Row
         # WAL mode persists. Check before requesting it because repeating the
         # write form of this pragma on concurrent requests can itself need a
         # database lock. A busy connection can retry the upgrade later.
-        conn.execute("PRAGMA busy_timeout=30000")
+        conn.execute(f"PRAGMA busy_timeout={SQLITE_BUSY_TIMEOUT_MS}")
         conn.execute("PRAGMA foreign_keys=ON")
         journal_mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
         if str(journal_mode).lower() != "wal":
             try:
                 conn.execute("PRAGMA journal_mode=WAL")
             except sqlite3.OperationalError as exc:
-                error_code = getattr(exc, "sqlite_errorcode", None)
-                primary_error_code = (
-                    error_code & 0xFF
-                    if isinstance(error_code, int)
-                    else None
-                )
-                if primary_error_code not in (
-                    sqlite3.SQLITE_BUSY,
-                    sqlite3.SQLITE_LOCKED,
-                ):
+                if not is_sqlite_busy_error(exc):
                     conn.close()
                     raise
         setattr(g, db_key, conn)
@@ -139,6 +148,13 @@ def _ensure_schema_locked(db):
         db.execute('ALTER TABLE course_state ADD COLUMN poll_question_key TEXT')
     if 'poll_started_at' not in cs_cols:
         db.execute('ALTER TABLE course_state ADD COLUMN poll_started_at TIMESTAMP')
+    if 'poll_closed_at' not in cs_cols:
+        db.execute('ALTER TABLE course_state ADD COLUMN poll_closed_at TIMESTAMP')
+    if 'challenge_ratings_closed_at' not in cs_cols:
+        db.execute(
+            'ALTER TABLE course_state '
+            'ADD COLUMN challenge_ratings_closed_at TIMESTAMP'
+        )
     if 'presentation_history' not in cs_cols:
         db.execute("ALTER TABLE course_state ADD COLUMN presentation_history TEXT DEFAULT '[]'")
     if 'roster_version' not in cs_cols:
@@ -259,10 +275,14 @@ def _ensure_schema_locked(db):
 
     db.execute('''CREATE INDEX IF NOT EXISTS idx_challenge_rounds_pres
                   ON challenge_rounds(course_id, presentation_key)''')
+    db.execute('''CREATE INDEX IF NOT EXISTS idx_challenge_rounds_session
+                  ON challenge_rounds(course_id, session_key)''')
     db.execute('''CREATE INDEX IF NOT EXISTS idx_challenge_hands_pres
                   ON challenge_hands(course_id, presentation_key)''')
     db.execute('''CREATE INDEX IF NOT EXISTS idx_challenge_ratings_challenge
                   ON challenge_ratings(course_id, challenge_key)''')
+    db.execute('''CREATE INDEX IF NOT EXISTS idx_challenge_ratings_session
+                  ON challenge_ratings(course_id, session_key)''')
     db.execute('''CREATE INDEX IF NOT EXISTS idx_challenge_ratings_export_week
                   ON challenge_ratings(course_id, week_num)''')
 
@@ -415,6 +435,8 @@ def _ensure_schema_locked(db):
                   ON teammate_thumbs(course_id, week_num)''')
     db.execute('''CREATE INDEX IF NOT EXISTS idx_ratings_presentation
                   ON presentation_ratings(course_id, question_key)''')
+    db.execute('''CREATE INDEX IF NOT EXISTS idx_ratings_session
+                  ON presentation_ratings(course_id, session_key)''')
     db.execute('''CREATE INDEX IF NOT EXISTS idx_ratings_export_week
                   ON presentation_ratings(course_id, week_num)''')
 

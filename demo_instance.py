@@ -14,11 +14,11 @@ import uuid
 from contextlib import contextmanager
 from pathlib import Path
 
-from question_catalog import read_presentation_index
+from question_catalog import read_week_questions
 
 
 DEMO_INSTANCE_RE = re.compile(r'^demo_[0-9a-f]{32}$')
-DEMO_SEED_VERSION = 2
+DEMO_SEED_VERSION = 3
 DEMO_INSTANCE_TTL_SECONDS = 2 * 60 * 60
 MAX_DEMO_INSTANCES = 4
 MAX_EXPIRED_REMOVALS_PER_START = 8
@@ -86,15 +86,9 @@ def _demo_lifecycle_lock(data_dir, timeout=0.0):
         connection.close()
 
 
-def _read_presentation_questions(classes_dir):
-    index_path = os.path.join(classes_dir, 'demo', 'week1', 'index.md')
-    questions = [
-        (question['num'], question['title'])
-        for question in read_presentation_index(index_path) or []
-    ]
-    if not questions:
-        questions = [(1, 'Demo Presentation Question')]
-    return questions
+def _read_week_questions(classes_dir):
+    question_path = os.path.join(classes_dir, 'demo', 'week-1-questions.md')
+    return read_week_questions(question_path, week_num=1)
 
 
 def _populate_demo(conn, slug, classes_dir):
@@ -134,12 +128,20 @@ def _populate_demo(conn, slug, classes_dir):
             (course_id, student_id, name),
         )
 
-    for number, title in _read_presentation_questions(classes_dir):
+    for question in _read_week_questions(classes_dir):
         conn.execute(
             '''INSERT INTO questions
-               (course_id, question_num, question_text, title, week_num, source_key)
-               VALUES (?, ?, ?, ?, 1, ?)''',
-            (course_id, number, title[:200], title, f'presentation:1:{number}'),
+               (course_id, question_num, question_text, title, content,
+                week_num, source_key)
+               VALUES (?, ?, ?, ?, ?, 1, ?)''',
+            (
+                course_id,
+                question['num'],
+                question['title'][:200],
+                question['title'],
+                question['content'],
+                question['source_key'],
+            ),
         )
 
     conn.execute(

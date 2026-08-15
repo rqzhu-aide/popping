@@ -54,6 +54,20 @@ flask --app app run
 
 Open http://127.0.0.1:5000
 
+## Interactive Classroom Simulator
+
+To observe the instructor workflow with 40 synthetic students, use the
+isolated local simulator. The instructor remains under human control while
+the script drives only student actions.
+
+```powershell
+python -m pip install -r requirements-load-test.txt
+python scripts\simulate_classroom.py
+```
+
+See [SIMULATED_CLASSROOM.md](SIMULATED_CLASSROOM.md) for credentials, expected
+counts, controls, and safety limits.
+
 ## Course Folder Structure
 
 After creating a course, you get:
@@ -62,14 +76,54 @@ After creating a course, you get:
 classes/432fall2026/
 ├── course.yaml          # Course metadata (name, code, active teams, etc.)
 ├── init-db.sh           # Script to reset/reinitialize this course's DB
-├── week-1-questions.md  # Discussion questions
-└── week1/               # Pre-rendered presentation questions
+└── week-1-questions.md  # Bundled questions for both classroom phases
 
 data/432fall2026/
-└── popping.db           # The SQLite database (created by init-db.sh)
+├── popping.db           # The SQLite database (created by init-db.sh)
+└── questions/           # Instructor-uploaded weekly files, when present
+    └── week-1-questions.md
 ```
 
+### Weekly Question File
+
+Before class, upload one UTF-8 Markdown file from the instructor Setup page.
+Select a positive week number and choose a `.md` file. Bundled fallback files
+use the name `week-N-questions.md`, where `N` is the week number. The discussion
+phase and group presentation phase read the exact same ordered set from this
+file. The presentation index is the parsed file order, so there is no
+separate `index.md` or `qNN.html` source.
+
+Each question is one YAML-frontmatter block followed by its Markdown content:
+
+```markdown
+---
+id: bagging-vs-boosting
+title: "Bagging vs Boosting"
+---
+
+Explain the key differences between bagging and boosting.
+
+---
+id: bias-variance
+title: "Bias-Variance Decomposition"
+---
+
+Explain how the number of trees affects random-forest variance.
+```
+
+Question order is the block order. Each `id` must be unique and stable, and
+each `title` must be unique within the file. The upload is previewed before it
+is confirmed. A confirmed upload is saved under
+`data/{slug}/questions/week-N-questions.md` and overrides the bundled file with
+the same name under `classes/{slug}/`. Legacy `weekN/index.md` and `qNN.html`
+files are ignored.
+
 ### To Reset a Course (change instructor password, wipe student data)
+
+Stop every Flask or Gunicorn worker before resetting an existing course, then
+restart the service after the script finishes. On Render, suspend the web
+service first. Do not run the reset while students or instructors are using the
+site.
 
 ```bash
 cd classes/432fall2026
@@ -133,10 +187,12 @@ popping/
 │   └── 432fall2026/
 │       ├── course.yaml
 │       ├── init-db.sh
-│       └── week1/
+│       └── week-1-questions.md
 ├── data/                   # Runtime SQLite databases (not committed)
 │   └── 432fall2026/
-│       └── popping.db
+│       ├── popping.db
+│       └── questions/
+│           └── week-1-questions.md
 ├── static/
 │   ├── css/style.css
 │   └── js/app.js
@@ -149,7 +205,10 @@ popping/
     └── dashboard.html
 ```
 
-> On Render with a mounted disk, the actual SQLite databases live under `/data/{slug}/popping.db` (persistent), while the course configs (`course.yaml`, `init-db.sh`, and question files) stay in the git repo under `classes/{slug}/`.
+> On Render with a mounted disk, the SQLite database and instructor-uploaded
+> question files live under `/data/{slug}/` and persist across deploys. Course
+> configs and bundled fallback question files stay in the git repo under
+> `classes/{slug}/`.
 
 ## User Flow
 
@@ -191,7 +250,7 @@ Edit the `teams` array in `classes/{slug}/course.yaml`, then run `bash init-db.s
 
 ### Tuning the Rating Window
 
-By default each presentation rating poll stays open for **30 seconds**. Add an optional `poll_duration` field to `course.yaml` to change it for a course (clamped to 5–300 seconds):
+By default each presentation rating poll stays open for **40 seconds**. Add an optional `poll_duration` field to `course.yaml` to change it for a course (clamped to 5 to 300 seconds):
 
 ```yaml
 poll_duration: 45
@@ -199,17 +258,60 @@ poll_duration: 45
 
 This is read live (no `init-db.sh` needed), so you can lengthen it for a harder question or a larger class mid-session.
 
+When the timer expires or the instructor selects **Stop Poll**, student rating
+controls close immediately. The server then allows three seconds for requests
+that already arrived to finish committing. During that short interval, the
+instructor sees **Saving final ratings...** and presentation-changing controls
+stay disabled. The same close protects active challenger ratings.
+
 ### Adding Students
 
-Use the instructor panel, or insert directly into the course database:
+Use **Upload Student Roster** or the student-management controls in the
+instructor panel. Do not add students with the `sqlite3` command-line tool.
+
+### Safe Database Maintenance
+
+Never edit, replace, initialize, or restore a course's `popping.db` while the
+web service is running. The running workers keep database connections open, so
+changing the file underneath them can cause failed requests, stale data, or
+data loss.
+
+For an initialization, reset, or restore:
+
+1. Stop all local Flask or Gunicorn processes. On Render, suspend the web
+   service and wait for all workers to stop.
+2. Run the appropriate command. For a restore from the repository root, use:
 
 ```bash
-sqlite3 data/432fall2026/popping.db
+python scripts/restore-course-db.py 432fall2026 /path/to/backup.db
 ```
 
-```sql
-INSERT INTO students (course_id, student_id, name, pin) VALUES (1, 'netid123', 'Alice', '1234');
+3. Restart the service and verify instructor and student login before class.
+
+The initialization and restore scripts ask you to confirm that the service is
+stopped. That confirmation is a safety check, not a substitute for actually
+stopping every worker.
+
+### Complete Off-Disk Backups
+
+Create a verified course bundle in an explicitly supplied directory outside
+`DATA_DIR`:
+
+```bash
+python scripts/backup-course.py create 432fall2026 /path/on/another-disk/popping-backups
 ```
+
+The bundle contains a consistent SQLite snapshot, persistent uploaded question
+and appendix files, and a SHA-256 manifest. Verify any retained copy with:
+
+```bash
+python scripts/backup-course.py verify /path/to/popping-432fall2026-YYYYMMDDTHHMMSSZ.zip
+```
+
+The tool does not provide encryption or upload to a storage provider. Because
+the database contains plaintext PINs, use an encrypted or access-controlled
+destination. See [BACKUP_AND_RECOVERY.md](BACKUP_AND_RECOVERY.md) for bundle
+contents, exact recovery steps, and the remaining provider-specific setup.
 
 ## Data Isolation
 
@@ -220,4 +322,4 @@ INSERT INTO students (course_id, student_id, name, pin) VALUES (1, 'netid123', '
 
 ## License
 
-AGPLv3 — see [LICENSE](LICENSE) (GNU Affero General Public License v3.0).
+AGPLv3. See [LICENSE](LICENSE) (GNU Affero General Public License v3.0).

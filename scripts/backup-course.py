@@ -1,0 +1,482 @@
+#!/usr/bin/env python3
+"""Create and verify a complete, provider-neutral course backup bundle."""
+
+import argparse
+from contextlib import closing
+from datetime import datetime, timezone
+import hashlib
+import json
+import os
+from pathlib import Path, PurePosixPath
+import re
+import shutil
+import sqlite3
+import sys
+import tempfile
+import zipfile
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+SLUG_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+BUNDLE_FORMAT = "popping-course-backup-v1"
+MANIFEST_NAME = "manifest.json"
+DATABASE_NAME = "popping.db"
+PERSISTENT_DIRECTORIES = ("questions", "appendix")
+DEFAULT_LOCK_TIMEOUT_SECONDS = 30.0
+
+
+class BackupError(RuntimeError):
+    """An actionable backup or verification failure."""
+
+
+def validate_slug(slug):
+    if not isinstance(slug, str) or not SLUG_RE.fullmatch(slug):
+        raise BackupError(
+            "Course slug may contain only letters, numbers, underscores, "
+            "and hyphens"
+        )
+    return slug
+
+
+def resolve_data_dir():
+    configured = os.environ.get("DATA_DIR")
+    if configured:
+        return Path(configured).expanduser().resolve()
+    render_data = Path("/data")
+    if render_data.is_dir():
+        return render_data.resolve()
+    return (PROJECT_ROOT / "data").resolve()
+
+
+def _is_within(path, parent):
+    path_text = os.path.normcase(str(Path(path).resolve()))
+    parent_text = os.path.normcase(str(Path(parent).resolve()))
+    try:
+        return os.path.commonpath([path_text, parent_text]) == parent_text
+    except ValueError:
+        return False
+
+
+def resolve_destination(destination, data_dir):
+    destination = Path(destination).expanduser().resolve()
+    if _is_within(destination, data_dir):
+        raise BackupError(
+            "Backup destination must be outside DATA_DIR so the live data "
+            "disk and its backup cannot fail together"
+        )
+    if destination.exists() and not destination.is_dir():
+        raise BackupError(f"Backup destination is not a directory: {destination}")
+    destination.mkdir(parents=True, exist_ok=True)
+    if not destination.is_dir():
+        raise BackupError(f"Could not create backup destination: {destination}")
+    return destination
+
+
+def _sha256_file(path):
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _database_course_slug(path):
+    uri = Path(path).resolve().as_uri() + "?mode=ro"
+    try:
+        with closing(sqlite3.connect(uri, uri=True)) as db:
+            integrity = [row[0] for row in db.execute("PRAGMA integrity_check")]
+            if integrity != ["ok"]:
+                raise BackupError(
+                    "SQLite integrity check failed: " + "; ".join(integrity)
+                )
+            row = db.execute("SELECT slug FROM courses LIMIT 1").fetchone()
+            foreign_key_issues = db.execute("PRAGMA foreign_key_check").fetchall()
+            if foreign_key_issues:
+                raise BackupError(
+                    "SQLite foreign key check failed for "
+                    f"{len(foreign_key_issues)} row(s)"
+                )
+    except sqlite3.Error as exc:
+        raise BackupError(f"Could not validate SQLite snapshot: {exc}") from exc
+    if not row or not row[0]:
+        raise BackupError("SQLite snapshot has no course record")
+    return str(row[0])
+
+
+def _persistent_source_files(course_dir):
+    files = []
+    for directory_name in PERSISTENT_DIRECTORIES:
+        source_root = course_dir / directory_name
+        if not source_root.exists():
+            continue
+        if source_root.is_symlink() or not source_root.is_dir():
+            raise BackupError(
+                f"Persistent path must be a regular directory: {source_root}"
+            )
+        for current_root, directory_names, file_names in os.walk(source_root):
+            current_root = Path(current_root)
+            for directory in directory_names:
+                candidate = current_root / directory
+                if candidate.is_symlink():
+                    raise BackupError(
+                        f"Symbolic links are not allowed in backups: {candidate}"
+                    )
+            for filename in file_names:
+                candidate = current_root / filename
+                if candidate.is_symlink() or not candidate.is_file():
+                    raise BackupError(
+                        f"Only regular files may be backed up: {candidate}"
+                    )
+                relative = candidate.relative_to(course_dir)
+                files.append((candidate, relative))
+    return sorted(files, key=lambda item: item[1].as_posix())
+
+
+def _copy_persistent_files(course_dir, staging_dir):
+    copied = []
+    source_files = _persistent_source_files(course_dir)
+    for source, relative in source_files:
+        target = staging_dir / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, target)
+        copied.append({
+            "path": relative.as_posix(),
+            "size": target.stat().st_size,
+            "sha256": _sha256_file(target),
+        })
+
+    after = _persistent_source_files(course_dir)
+    before_names = [relative.as_posix() for _source, relative in source_files]
+    after_names = [relative.as_posix() for _source, relative in after]
+    if before_names != after_names:
+        raise BackupError(
+            "Persistent question files changed during backup; run it again"
+        )
+    for source, relative in after:
+        expected = next(item for item in copied if item["path"] == relative.as_posix())
+        if source.stat().st_size != expected["size"] or (
+            _sha256_file(source) != expected["sha256"]
+        ):
+            raise BackupError(
+                f"Persistent file changed during backup: {relative.as_posix()}"
+            )
+    return copied
+
+
+def _sqlite_snapshot(source_path, target_path):
+    try:
+        with closing(sqlite3.connect(str(source_path))) as source:
+            with closing(sqlite3.connect(str(target_path))) as target:
+                source.backup(target)
+    except sqlite3.Error as exc:
+        raise BackupError(f"Could not create SQLite snapshot: {exc}") from exc
+
+
+def _next_archive_path(destination, slug, created_at):
+    stamp = created_at.strftime("%Y%m%dT%H%M%SZ")
+    counter = 1
+    while True:
+        suffix = "" if counter == 1 else f"-{counter}"
+        candidate = destination / f"popping-{slug}-{stamp}{suffix}.zip"
+        try:
+            descriptor = os.open(
+                candidate,
+                os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+                0o600,
+            )
+        except FileExistsError:
+            counter += 1
+            continue
+        os.close(descriptor)
+        return candidate
+
+
+def _write_archive(staging_dir, manifest, temporary_archive):
+    manifest_path = staging_dir / MANIFEST_NAME
+    manifest_path.write_text(
+        json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    with zipfile.ZipFile(
+        temporary_archive, "w", compression=zipfile.ZIP_DEFLATED
+    ) as archive:
+        archive.write(manifest_path, MANIFEST_NAME)
+        for item in manifest["files"]:
+            archive.write(staging_dir / item["path"], item["path"])
+
+
+def _safe_archive_name(name):
+    path = PurePosixPath(name)
+    return (
+        bool(name)
+        and "\\" not in name
+        and not path.is_absolute()
+        and all(part not in ("", ".", "..") for part in path.parts)
+    )
+
+
+def verify_archive(archive_path):
+    archive_path = Path(archive_path).expanduser().resolve()
+    if not archive_path.is_file():
+        raise BackupError(f"Backup archive not found: {archive_path}")
+
+    with tempfile.TemporaryDirectory(prefix="popping-backup-verify-") as temporary:
+        database_path = Path(temporary) / DATABASE_NAME
+        try:
+            with zipfile.ZipFile(archive_path, "r") as archive:
+                names = archive.namelist()
+                if len(names) != len(set(names)):
+                    raise BackupError("Backup archive contains duplicate paths")
+                if not all(_safe_archive_name(name) for name in names):
+                    raise BackupError("Backup archive contains an unsafe path")
+                if MANIFEST_NAME not in names:
+                    raise BackupError("Backup archive has no manifest.json")
+                manifest_info = archive.getinfo(MANIFEST_NAME)
+                if manifest_info.file_size > 1024 * 1024:
+                    raise BackupError("Backup manifest is unexpectedly large")
+                try:
+                    manifest = json.loads(archive.read(MANIFEST_NAME))
+                except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                    raise BackupError(f"Backup manifest is invalid: {exc}") from exc
+                if not isinstance(manifest, dict):
+                    raise BackupError("Backup manifest must be a JSON object")
+                if manifest.get("format") != BUNDLE_FORMAT:
+                    raise BackupError("Backup archive format is not supported")
+                slug = validate_slug(manifest.get("course_slug"))
+                timestamp = manifest.get("created_at_utc")
+                if not isinstance(timestamp, str) or not timestamp.endswith("Z"):
+                    raise BackupError("Backup manifest has no valid UTC timestamp")
+                try:
+                    datetime.fromisoformat(timestamp[:-1] + "+00:00")
+                except ValueError as exc:
+                    raise BackupError(
+                        "Backup manifest has no valid UTC timestamp"
+                    ) from exc
+                if manifest.get("database_integrity") != "ok" or (
+                    manifest.get("database_foreign_key_check") != "ok"
+                ):
+                    raise BackupError(
+                        "Backup manifest does not record successful database checks"
+                    )
+                files = manifest.get("files")
+                if not isinstance(files, list) or not files:
+                    raise BackupError("Backup manifest has no files")
+
+                expected_names = {MANIFEST_NAME}
+                seen_paths = set()
+                database_found = False
+                for item in files:
+                    if not isinstance(item, dict):
+                        raise BackupError(
+                            "Backup manifest contains an invalid file entry"
+                        )
+                    path = item.get("path")
+                    if not isinstance(path, str) or not _safe_archive_name(path):
+                        raise BackupError(
+                            "Backup manifest contains an unsafe file path"
+                        )
+                    parts = PurePosixPath(path).parts
+                    if path != DATABASE_NAME and parts[0] not in PERSISTENT_DIRECTORIES:
+                        raise BackupError(
+                            f"Backup manifest contains an unexpected path: {path}"
+                        )
+                    if path in seen_paths:
+                        raise BackupError(
+                            f"Backup manifest repeats file path: {path}"
+                        )
+                    declared_size = item.get("size")
+                    declared_digest = item.get("sha256")
+                    if not isinstance(declared_size, int) or declared_size < 0:
+                        raise BackupError(
+                            f"Backup manifest has an invalid size for {path}"
+                        )
+                    if not isinstance(declared_digest, str) or not re.fullmatch(
+                        r"[0-9a-f]{64}", declared_digest
+                    ):
+                        raise BackupError(
+                            f"Backup manifest has an invalid checksum for {path}"
+                        )
+                    seen_paths.add(path)
+                    expected_names.add(path)
+                    digest = hashlib.sha256()
+                    actual_size = 0
+                    target = database_path.open("wb") if path == DATABASE_NAME else None
+                    try:
+                        try:
+                            source = archive.open(path, "r")
+                        except KeyError as exc:
+                            raise BackupError(
+                                f"Backup archive is missing {path}"
+                            ) from exc
+                        with source:
+                            for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                                actual_size += len(chunk)
+                                digest.update(chunk)
+                                if target is not None:
+                                    target.write(chunk)
+                    finally:
+                        if target is not None:
+                            target.close()
+                    if actual_size != declared_size:
+                        raise BackupError(
+                            f"Backup file size does not match: {path}"
+                        )
+                    if digest.hexdigest() != declared_digest:
+                        raise BackupError(
+                            f"Backup checksum does not match: {path}"
+                        )
+                    if path == DATABASE_NAME:
+                        database_found = True
+
+                if set(names) != expected_names:
+                    raise BackupError("Backup archive contains unlisted files")
+                if not database_found:
+                    raise BackupError("Backup archive has no popping.db snapshot")
+            archived_slug = _database_course_slug(database_path)
+        except BackupError:
+            raise
+        except (OSError, RuntimeError, zipfile.BadZipFile) as exc:
+            raise BackupError(f"Could not read backup archive: {exc}") from exc
+
+    if archived_slug != slug:
+        raise BackupError(
+            "Backup database course slug does not match its manifest"
+        )
+    return manifest
+
+def create_backup(slug, destination, lock_timeout=DEFAULT_LOCK_TIMEOUT_SECONDS):
+    slug = validate_slug(slug)
+    data_dir = resolve_data_dir()
+    course_dir = (data_dir / slug).resolve()
+    database_path = course_dir / DATABASE_NAME
+    if not database_path.is_file():
+        raise BackupError(f"Course database not found: {database_path}")
+    requested_destination = Path(destination).expanduser().resolve()
+    if _is_within(requested_destination, course_dir):
+        raise BackupError(
+            "Backup destination must be outside DATA_DIR and the resolved live "
+            "course data directory"
+        )
+    destination = resolve_destination(requested_destination, data_dir)
+
+    created_at = datetime.now(timezone.utc)
+    final_archive = None
+    temporary_archive = None
+    with tempfile.TemporaryDirectory(
+        prefix=".popping-course-backup-", dir=destination
+    ) as temporary:
+        staging_dir = Path(temporary)
+        snapshot_path = staging_dir / DATABASE_NAME
+        try:
+            with closing(sqlite3.connect(
+                str(database_path), timeout=float(lock_timeout), isolation_level=None
+            )) as lock:
+                lock.execute(f"PRAGMA busy_timeout = {int(float(lock_timeout) * 1000)}")
+                lock.execute("BEGIN IMMEDIATE")
+                try:
+                    _sqlite_snapshot(database_path, snapshot_path)
+                    persistent_files = _copy_persistent_files(
+                        course_dir, staging_dir
+                    )
+                finally:
+                    lock.rollback()
+        except sqlite3.OperationalError as exc:
+            if "locked" in str(exc).casefold() or "busy" in str(exc).casefold():
+                raise BackupError(
+                    "Course database stayed busy; retry when classroom activity is quiet"
+                ) from exc
+            raise BackupError(f"Could not lock course database: {exc}") from exc
+
+        archived_slug = _database_course_slug(snapshot_path)
+        if archived_slug != slug:
+            raise BackupError(
+                f"Database belongs to course {archived_slug}, not {slug}"
+            )
+        database_item = {
+            "path": DATABASE_NAME,
+            "size": snapshot_path.stat().st_size,
+            "sha256": _sha256_file(snapshot_path),
+        }
+        manifest = {
+            "format": BUNDLE_FORMAT,
+            "created_at_utc": created_at.isoformat().replace("+00:00", "Z"),
+            "course_slug": slug,
+            "database_integrity": "ok",
+            "database_foreign_key_check": "ok",
+            "files": [database_item, *persistent_files],
+        }
+
+        handle = tempfile.NamedTemporaryFile(
+            prefix=".popping-course-backup-",
+            suffix=".tmp.zip",
+            dir=destination,
+            delete=False,
+        )
+        temporary_archive = Path(handle.name)
+        handle.close()
+        try:
+            _write_archive(staging_dir, manifest, temporary_archive)
+            verify_archive(temporary_archive)
+            final_archive = _next_archive_path(destination, slug, created_at)
+            installed = False
+            try:
+                os.replace(temporary_archive, final_archive)
+                installed = True
+            finally:
+                if not installed:
+                    final_archive.unlink(missing_ok=True)
+            temporary_archive = None
+        finally:
+            if temporary_archive and temporary_archive.exists():
+                temporary_archive.unlink()
+    return final_archive
+
+
+def build_parser():
+    parser = argparse.ArgumentParser(
+        description="Create or verify a complete Popping course backup bundle."
+    )
+    commands = parser.add_subparsers(dest="command", required=True)
+    create = commands.add_parser("create", help="create a verified backup ZIP")
+    create.add_argument("course_slug")
+    create.add_argument(
+        "destination",
+        help="directory outside DATA_DIR, such as an external or synced drive",
+    )
+    create.add_argument(
+        "--lock-timeout",
+        type=float,
+        default=DEFAULT_LOCK_TIMEOUT_SECONDS,
+        help="seconds to wait for current database writes (default: 30)",
+    )
+    verify = commands.add_parser("verify", help="verify a backup ZIP")
+    verify.add_argument("archive")
+    return parser
+
+
+def main(argv=None):
+    args = build_parser().parse_args(argv)
+    try:
+        if args.command == "create":
+            if args.lock_timeout < 0:
+                raise BackupError("Lock timeout cannot be negative")
+            archive = create_backup(
+                args.course_slug, args.destination, args.lock_timeout
+            )
+            print(f"Verified backup created: {archive}")
+        else:
+            manifest = verify_archive(args.archive)
+            print(
+                "Backup verified: "
+                f"{args.archive} ({manifest['course_slug']}, "
+                f"{len(manifest['files'])} files)"
+            )
+        return 0
+    except BackupError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

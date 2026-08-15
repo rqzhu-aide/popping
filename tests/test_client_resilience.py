@@ -19,7 +19,7 @@ def test_all_browser_api_requests_use_one_bounded_json_helper():
     assert source.count("fetch(") == 1
     assert "const REQUEST_TIMEOUT_MS = 15000;" in source
     assert "const UPLOAD_TIMEOUT_MS = 30000;" in source
-    assert source.count("UPLOAD_TIMEOUT_MS") == 3
+    assert source.count("UPLOAD_TIMEOUT_MS") == 5
     assert "new AbortController()" in helper
     assert "signal: controller.signal" in helper
     assert helper.index("await fetch(") < helper.index("await res.json()")
@@ -52,6 +52,41 @@ def test_discussion_question_cards_use_stable_keys():
     assert "#${i + 1}" not in source
 
 
+def test_instructor_vote_progress_uses_compact_counts():
+    """Live presentation and challenge progress omit individual names."""
+    source = (PROJECT_ROOT / "static" / "js" / "app.js").read_text(
+        encoding="utf-8"
+    )
+
+    assert "`${count} out of ${eligible} students voted`" in source
+    assert "`${submitted} out of ${eligible} students voted`" in source
+    assert "poll_non_raters" not in source
+    assert "poll_online_eligible_count" not in source
+    assert "thumb_online_eligible_count" not in source
+    assert "challenge_rating_counts" not in source
+    assert "online_eligible_count" not in source
+    assert "active in last 3 minutes" not in source
+    assert "Still to rate:" not in source
+    assert 'class="challenge-active-details"' in source
+    challenge_renderer = source[
+        source.index("function renderInstructorChallenge"):
+        source.index("window.selectChallenger")
+    ]
+    assert "Challenge rating:" not in challenge_renderer
+    assert "flex-wrap:wrap" not in challenge_renderer
+
+    css = (PROJECT_ROOT / "static" / "css" / "style.css").read_text(
+        encoding="utf-8"
+    )
+    assert ".challenge-active-row {" in css
+    assert "display: flex;" in css
+    assert ".challenge-active-details {" in css
+    assert "flex: 1;" in css
+    assert "min-width: 0;" in css
+    assert ".challenge-active-row .challenge-mutating-btn {" in css
+    assert "flex: 0 0 auto;" in css
+
+
 def test_week_selector_offers_preview_before_commit():
     """Instructors can preview a week's questions via the ?week= param and
     only commit through the explicit "Use this week" action."""
@@ -66,6 +101,38 @@ def test_week_selector_offers_preview_before_commit():
     assert "window.usePreviewedWeek" in source
 
 
+def test_weekly_question_upload_previews_then_resends_same_file_on_confirm():
+    """The Setup upload validates first, then resends the same File object
+    with the preview token before replacing the common weekly question bank."""
+    source = (PROJECT_ROOT / "static" / "js" / "app.js").read_text(
+        encoding="utf-8"
+    )
+    template = (PROJECT_ROOT / "templates" / "instructor.html").read_text(
+        encoding="utf-8"
+    )
+
+    assert source.count("'/api/upload_questions'") == 2
+    assert "window.previewWeeklyQuestionUpload" in source
+    assert "window.confirmWeeklyQuestionUpload" in source
+    assert "formData.append('week', String(week));" in source
+    assert "pending.file, pending.week, pending.token" in source
+    assert "formData.append('confirm', 'true');" in source
+    assert "formData.append('preview_token', token);" in source
+    assert "appendInstructorStateForm(formData);" in source
+    assert "const trackInstructorSave = beginInstructorSave();" in source
+    assert "finishInstructorSave(trackInstructorSave, confirmedSuccess);" in source
+    assert "Discussion and Presentation will use these exact ${count} questions" in source
+
+    card_position = template.index('id="weekly-question-upload-card"')
+    demo_guard = template.rfind(
+        "{% if not session.get('is_demo') %}", 0, card_position
+    )
+    assert demo_guard >= 0
+    assert 'accept=".md,text/markdown,text/plain"' in template
+    assert 'id="weekly-question-upload-preview" hidden' in template
+    assert "Discussion and Presentation will use the exact same questions" in template
+
+
 def test_question_load_surfaces_server_error_message():
     """A 422 from /api/discussion_questions shows the server's error text
     instead of only the generic refresh hint."""
@@ -78,16 +145,22 @@ def test_question_load_surfaces_server_error_message():
 
 
 def test_student_table_page_size_and_picker_guard():
-    """The student table page size is selectable/persisted, and the 10s
-    auto-refresh skips the tbody re-render while a team-picker is open."""
+    """The student table page size is selectable/persisted, and the 5s
+    auto-refresh skips only an open per-student assignment picker."""
     source = (PROJECT_ROOT / "static" / "js" / "app.js").read_text(
+        encoding="utf-8"
+    )
+    template = (PROJECT_ROOT / "templates" / "instructor.html").read_text(
         encoding="utf-8"
     )
 
     assert "per_page: studentPerPage" in source
     assert "popping-student-per-page" in source
     assert "window.setStudentPerPage" in source
-    assert "!document.querySelector('.team-picker')" in source
+    assert 'class="team-picker filter-picker"' in template
+    assert "!document.querySelector('.team-picker:not(.filter-picker)')" in source
+    assert "!document.querySelector('.team-picker')" not in source
+    assert "Date.now() - _lastStudentTableRefresh >= 5000" in source
 
 
 def test_history_list_tracks_poll_and_empty_team_labels():
@@ -304,7 +377,8 @@ def test_presentation_transitions_reconcile_blocks_in_place():
     for handler in ("window.startPresentation", "window.nextPresentation",
                     "window.cancelPresentation"):
         start = source.index(handler)
-        body = source[start:start + 1500]
+        end = source.index("\n};", start) + len("\n};")
+        body = source[start:end]
         assert "window.instructorPollOnce()" in body, handler
         # Reload stays only as the no-poll-loop fallback.
         assert body.count("window.location.reload();") == 1, handler
@@ -321,3 +395,11 @@ def test_mathjax_cdn_is_pinned_with_sri():
     assert "mathjax@3/" not in base
     assert 'integrity="sha384-' in base
     assert 'crossorigin="anonymous"' in base
+
+
+def test_mathjax_cdn_failure_has_a_plain_text_fallback_notice():
+    """A blocked school-network CDN must not fail silently."""
+    base = (PROJECT_ROOT / "templates" / "base.html").read_text(encoding="utf-8")
+    assert 'onerror="showMathJaxLoadWarning()"' in base
+    assert "id = 'mathjax-load-warning'" in base
+    assert "Questions and controls still work" in base

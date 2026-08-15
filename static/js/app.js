@@ -1,10 +1,13 @@
 const REQUEST_TIMEOUT_MS = 15000;
 const UPLOAD_TIMEOUT_MS = 30000;
+const VOTE_RETRY_OPTIONS = Object.freeze({ retryVoteOnce: true });
 let pageNavigationInProgress = false;
+let forcedPageNavigationInProgress = false;
 
 function redirectToSessionEnded() {
     if (pageNavigationInProgress) return;
     pageNavigationInProgress = true;
+    forcedPageNavigationInProgress = true;
     window.location.href = '/?session=ended';
 }
 
@@ -30,58 +33,142 @@ async function fetchJSONWithTimeout(url, options = {}, timeoutMs = REQUEST_TIMEO
     }
 }
 
-async function postJSON(url, body) {
-    let result;
+let _instructorSaveCount = 0;
+let _instructorSaveFailed = false;
+let _instructorSaveStatusTimer = null;
+
+function beginInstructorSave() {
+    const status = document.getElementById('instructor-save-status');
+    if (!status) return false;
+    if (_instructorSaveCount === 0) _instructorSaveFailed = false;
+    _instructorSaveCount += 1;
+    if (_instructorSaveStatusTimer) {
+        window.clearTimeout(_instructorSaveStatusTimer);
+        _instructorSaveStatusTimer = null;
+    }
+    status.dataset.visible = 'true';
+    status.dataset.state = 'saving';
+    status.textContent = 'Saving';
+    return true;
+}
+
+function finishInstructorSave(tracked, success) {
+    if (!tracked) return;
+    if (!success) _instructorSaveFailed = true;
+    _instructorSaveCount = Math.max(0, _instructorSaveCount - 1);
+    if (_instructorSaveCount > 0) return;
+    const status = document.getElementById('instructor-save-status');
+    if (!status) return;
+    if (_instructorSaveFailed) {
+        status.textContent = '';
+        delete status.dataset.state;
+        delete status.dataset.visible;
+        return;
+    }
+    status.dataset.visible = 'true';
+    status.dataset.state = 'saved';
+    status.textContent = 'Saved';
+    _instructorSaveStatusTimer = window.setTimeout(() => {
+        status.textContent = '';
+        delete status.dataset.state;
+        delete status.dataset.visible;
+        _instructorSaveStatusTimer = null;
+    }, 2500);
+}
+
+function busyRetryDelayMs(data) {
+    const seconds = Number(data?.retry_after);
+    if (!Number.isFinite(seconds) || seconds <= 0) return null;
+    return Math.round(Math.min(5, Math.max(1, seconds)) * 1000);
+}
+
+async function postJSON(url, body, options = {}) {
+    const trackInstructorSave = beginInstructorSave();
+    let confirmedSuccess = false;
+    const serializedBody = JSON.stringify(body);
+    const maxAttempts = options.retryVoteOnce === true ? 2 : 1;
+    let networkOutcomeUnknown = false;
     try {
-        result = await fetchJSONWithTimeout(url, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(body)
-        });
-    } catch (error) {
-        return {
-            success: false,
-            error: 'Could not confirm the change because of a network error. Refresh to check.',
-            _network_error: true,
-            _status: 0
-        };
+        for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+            let result;
+            try {
+                result = await fetchJSONWithTimeout(url, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: serializedBody
+                });
+            } catch (error) {
+                networkOutcomeUnknown = true;
+                if (attempt === 0 && maxAttempts === 2) {
+                    await new Promise(resolve =>
+                        window.setTimeout(resolve, 2000));
+                    continue;
+                }
+                return {
+                    success: false,
+                    error: 'Could not confirm the change because of a network error. Refresh to check.',
+                    _network_error: true,
+                    _status: 0
+                };
+            }
+            const { res, data } = result;
+            if (res.status === 401) {
+                redirectToSessionEnded();
+                return { success: false, error: 'Session expired' };
+            }
+            data._status = res.status;
+            if (!res.ok && !data.error) data.error = 'Request failed';
+            const retryDelay = busyRetryDelayMs(data);
+            if (attempt === 0 && maxAttempts === 2 &&
+                    res.status === 503 && retryDelay !== null) {
+                await new Promise(resolve => window.setTimeout(resolve, retryDelay));
+                continue;
+            }
+            confirmedSuccess = res.ok && data.success === true;
+            if (!confirmedSuccess && networkOutcomeUnknown) {
+                data._network_error = true;
+                data.error =
+                    'Could not confirm the vote because the connection was interrupted.';
+            }
+            return data;
+        }
+    } finally {
+        finishInstructorSave(trackInstructorSave, confirmedSuccess);
     }
-    const { res, data } = result;
-    if (res.status === 401) {
-        redirectToSessionEnded();
-        return { success: false, error: 'Session expired' };
-    }
-    data._status = res.status;
-    if (!res.ok && !data.error) data.error = 'Request failed';
-    return data;
 }
 
 async function deleteJSON(url, body = {}) {
-    let result;
+    const trackInstructorSave = beginInstructorSave();
+    let confirmedSuccess = false;
     try {
-        result = await fetchJSONWithTimeout(url, {
-            method: 'DELETE',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(body)
-        });
-    } catch (error) {
-        return {
-            success: false,
-            error: 'Could not confirm the change because of a network error. Refresh to check.',
-            _network_error: true,
-            _status: 0
-        };
+        let result;
+        try {
+            result = await fetchJSONWithTimeout(url, {
+                method: 'DELETE',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body)
+            });
+        } catch (error) {
+            return {
+                success: false,
+                error: 'Could not confirm the change because of a network error. Refresh to check.',
+                _network_error: true,
+                _status: 0
+            };
+        }
+        const { res, data } = result;
+        if (res.status === 401) {
+            redirectToSessionEnded();
+            return { success: false, error: 'Session expired' };
+        }
+        data._status = res.status;
+        if (!res.ok && !data.error) data.error = 'Request failed';
+        confirmedSuccess = res.ok && data.success === true;
+        return data;
+    } finally {
+        finishInstructorSave(trackInstructorSave, confirmedSuccess);
     }
-    const { res, data } = result;
-    if (res.status === 401) {
-        redirectToSessionEnded();
-        return { success: false, error: 'Session expired' };
-    }
-    data._status = res.status;
-    if (!res.ok && !data.error) data.error = 'Request failed';
-    return data;
 }
-
 function escapeHtmlValue(value) {
     const div = document.createElement('div');
     div.textContent = value == null ? '' : String(value);
@@ -348,6 +435,8 @@ window.cancelRosterUpload = closeRosterPreview;
 window.confirmRosterUpload = async function() {
     if (!pendingRosterUpload) return;
     const btn = document.getElementById('btn-confirm-roster-upload');
+    const trackInstructorSave = beginInstructorSave();
+    let confirmedSuccess = false;
     if (btn) { btn.disabled = true; btn.textContent = 'Replacing...'; }
     try {
         const formData = new FormData();
@@ -373,14 +462,207 @@ window.confirmRosterUpload = async function() {
             return;
         }
         showToast(`Roster replaced: ${data.added} added, ${data.updated} updated, ${data.removed || 0} removed.`, 'success');
+        confirmedSuccess = true;
         closeRosterPreview();
         window.location.reload();
     } catch (error) {
         showToast('Network error while replacing the roster', 'error');
     } finally {
+        finishInstructorSave(trackInstructorSave, confirmedSuccess);
         if (btn) { btn.disabled = false; btn.textContent = 'Replace Roster'; }
     }
 };
+
+/* ===== WEEKLY QUESTION UPLOAD ===== */
+
+let pendingWeeklyQuestionUpload = null;
+
+function clearWeeklyQuestionUploadPreview(resetFile = false) {
+    pendingWeeklyQuestionUpload = null;
+    const preview = document.getElementById('weekly-question-upload-preview');
+    if (preview) preview.hidden = true;
+    const title = document.getElementById('weekly-question-upload-preview-title');
+    if (title) title.textContent = '';
+    const list = document.getElementById('weekly-question-upload-preview-list');
+    if (list) list.innerHTML = '';
+    if (resetFile) {
+        const fileInput = document.getElementById('weekly-question-file');
+        if (fileInput) fileInput.value = '';
+    }
+}
+
+window.cancelWeeklyQuestionUpload = function() {
+    clearWeeklyQuestionUploadPreview(false);
+};
+
+function weeklyQuestionUploadForm(file, week, token = null) {
+    const formData = new FormData();
+    formData.append('file', file);
+    formData.append('week', String(week));
+    if (token) {
+        formData.append('confirm', 'true');
+        formData.append('preview_token', token);
+    }
+    appendInstructorStateForm(formData);
+    return formData;
+}
+
+function showWeeklyQuestionUploadPreview(file, requestedWeek, data) {
+    const week = Number(data.week) || requestedWeek;
+    const questions = Array.isArray(data.questions) ? data.questions : [];
+    const count = Number(data.question_count) || questions.length;
+    pendingWeeklyQuestionUpload = {
+        file,
+        week,
+        token: data.preview_token
+    };
+
+    const title = document.getElementById('weekly-question-upload-preview-title');
+    if (title) {
+        title.textContent = `Week ${week}: ${count} question${count === 1 ? '' : 's'}`;
+    }
+    const list = document.getElementById('weekly-question-upload-preview-list');
+    if (list) {
+        list.innerHTML = questions.map(question => {
+            const id = escapeHtmlValue(question?.id || '');
+            const questionTitle = escapeHtmlValue(question?.title || 'Untitled');
+            return `<li>${id ? `<code>${id}</code>: ` : ''}${questionTitle}</li>`;
+        }).join('');
+    }
+    const preview = document.getElementById('weekly-question-upload-preview');
+    if (preview) preview.hidden = false;
+    document.getElementById('btn-confirm-question-upload')?.focus();
+}
+
+window.previewWeeklyQuestionUpload = async function() {
+    const weekInput = document.getElementById('weekly-question-week');
+    const fileInput = document.getElementById('weekly-question-file');
+    const button = document.getElementById('btn-preview-question-upload');
+    const week = Number(weekInput?.value);
+    const file = fileInput?.files?.[0];
+    if (!Number.isInteger(week) || week < 1) {
+        showToast('Enter a positive lecture week number', 'warning');
+        weekInput?.focus();
+        return;
+    }
+    if (!file) {
+        showToast('Choose a Markdown question file', 'warning');
+        fileInput?.focus();
+        return;
+    }
+    if (!file.name.toLowerCase().endsWith('.md')) {
+        showToast('Weekly questions must be uploaded as a .md file', 'warning');
+        return;
+    }
+
+    clearWeeklyQuestionUploadPreview(false);
+    if (button) {
+        button.disabled = true;
+        button.textContent = 'Validating...';
+    }
+    try {
+        const { res, data } = await fetchJSONWithTimeout(
+            '/api/upload_questions',
+            { method: 'POST', body: weeklyQuestionUploadForm(file, week) },
+            UPLOAD_TIMEOUT_MS
+        );
+        if (res.status === 401) {
+            redirectToSessionEnded();
+            return;
+        }
+        if (res.ok && data.requires_confirmation && data.preview_token) {
+            showWeeklyQuestionUploadPreview(file, week, data);
+            return;
+        }
+        data._status = res.status;
+        showInstructorMutationError(data, 'Could not validate the weekly question file');
+    } catch (error) {
+        showToast(
+            error?.name === 'AbortError'
+                ? 'Question upload preview timed out. Please try again.'
+                : 'Network error while validating the weekly questions',
+            'error'
+        );
+    } finally {
+        if (button) {
+            button.disabled = false;
+            button.textContent = 'Preview Upload';
+        }
+    }
+};
+
+window.confirmWeeklyQuestionUpload = async function() {
+    if (!pendingWeeklyQuestionUpload) return;
+    const pending = pendingWeeklyQuestionUpload;
+    const confirmButton = document.getElementById('btn-confirm-question-upload');
+    const previewButton = document.getElementById('btn-preview-question-upload');
+    const trackInstructorSave = beginInstructorSave();
+    let confirmedSuccess = false;
+    if (confirmButton) {
+        confirmButton.disabled = true;
+        confirmButton.textContent = 'Replacing...';
+    }
+    if (previewButton) previewButton.disabled = true;
+    try {
+        const { res, data } = await fetchJSONWithTimeout(
+            '/api/upload_questions',
+            {
+                method: 'POST',
+                body: weeklyQuestionUploadForm(
+                    pending.file, pending.week, pending.token
+                )
+            },
+            UPLOAD_TIMEOUT_MS
+        );
+        if (res.status === 401) {
+            redirectToSessionEnded();
+            return;
+        }
+        if (!res.ok || !data.success) {
+            data._status = res.status;
+            showInstructorMutationError(data, 'Weekly question replacement failed');
+            return;
+        }
+
+        confirmedSuccess = true;
+        const week = Number(data.week) || pending.week;
+        const count = Number(data.question_count) || 0;
+        clearWeeklyQuestionUploadPreview(true);
+        const weekInput = document.getElementById('weekly-question-week');
+        if (weekInput) weekInput.value = String(week);
+        await initWeekSelector().catch(() => null);
+        const weekSelect = document.getElementById('setup-week-select');
+        if (weekSelect && Array.from(weekSelect.options).some(
+                option => option.value === String(week))) {
+            weekSelect.value = String(week);
+        }
+        showToast(
+            `Week ${week} uploaded. Discussion and Presentation will use these exact ${count} questions. Select Apply Week when ready.`,
+            'success'
+        );
+    } catch (error) {
+        showToast(
+            error?.name === 'AbortError'
+                ? 'Question replacement timed out. Refresh the question list before trying again.'
+                : 'Could not confirm the question replacement because of a network error',
+            'error'
+        );
+    } finally {
+        finishInstructorSave(trackInstructorSave, confirmedSuccess);
+        if (confirmButton) {
+            confirmButton.disabled = false;
+            confirmButton.textContent = 'Confirm Replacement';
+        }
+        if (previewButton) previewButton.disabled = false;
+    }
+};
+
+['weekly-question-week', 'weekly-question-file'].forEach(id => {
+    document.getElementById(id)?.addEventListener(
+        id === 'weekly-question-file' ? 'change' : 'input',
+        () => clearWeeklyQuestionUploadPreview(false)
+    );
+});
 
 /* ===== STUDENT DASHBOARD ===== */
 const PHASE_LABELS = {
@@ -404,15 +686,262 @@ let lastKnownStateVersion = null;  // lets the server skip _compute_state when u
 let activePollOpen = false;
 let ratingPollOpenForTimer = false;  // presentation timer shows "time's up" instead of alarm while a rating poll is open
 let ratingSubmissionInProgress = false;
+let unconfirmedPresentationRating = null;
 let ratingDraftDirty = false;
 let _responseRequestId = 0;
 let responseNeedsRefresh = false;
+let _studentVoteInFlight = 0;
+let _studentVoteBatchFailure = null;
+let _studentVoteKnownFailure = false;
+let _studentVoteLastSuccess = 'Vote submitted';
+let _studentVoteStatusTimer = null;
+const _unconfirmedThumbVotes = new Map();
+const _unconfirmedChallengeRatings = new Map();
+let _allowAutomaticVoteNavigation = false;
+let _pendingDashboardReloadPhase = null;
+let _pendingDashboardReloadSessionKey = null;
+let _pendingDashboardReloadStartedAt = 0;
+let _unconfirmedThumbSessionKey = null;
+const DASHBOARD_RELOAD_READBACK_GRACE_MS = 5000;
+const _unconfirmedVoteWarningKey =
+    'popping-unconfirmed-teammate-vote-warning';
+const _unsavedVoteDraftWarningKey =
+    'popping-unsaved-rating-draft-warning';
 
+function setStudentVoteStatus(message, state) {
+    const status = document.getElementById('student-vote-status');
+    if (!status) return;
+    if (_studentVoteStatusTimer) {
+        window.clearTimeout(_studentVoteStatusTimer);
+        _studentVoteStatusTimer = null;
+    }
+    status.dataset.visible = 'true';
+    status.dataset.state = state;
+    status.textContent = message;
+    if (state === 'submitted') {
+        _studentVoteStatusTimer = window.setTimeout(() => {
+            status.textContent = '';
+            delete status.dataset.state;
+            delete status.dataset.visible;
+            _studentVoteStatusTimer = null;
+        }, 4000);
+    }
+}
+
+function beginStudentVote() {
+    if (_studentVoteInFlight === 0 &&
+            _unconfirmedThumbVotes.size === 0 &&
+            _unconfirmedChallengeRatings.size === 0 &&
+            !unconfirmedPresentationRating) {
+        _studentVoteBatchFailure = null;
+        _studentVoteKnownFailure = false;
+        _studentVoteLastSuccess = 'Vote submitted';
+    }
+    _studentVoteInFlight += 1;
+    setStudentVoteStatus('Submitting your vote ...', 'submitting');
+}
+
+function finishStudentVote(
+        success, successMessage, failureMessage, unconfirmed = false) {
+    if (success) {
+        _studentVoteLastSuccess = successMessage || 'Vote submitted';
+    } else {
+        const message = failureMessage ||
+            'Vote not submitted. Please try again.';
+        if (!unconfirmed) _studentVoteKnownFailure = true;
+        if (!_studentVoteBatchFailure || !unconfirmed) {
+            _studentVoteBatchFailure = message;
+        }
+    }
+    _studentVoteInFlight = Math.max(0, _studentVoteInFlight - 1);
+    if (_studentVoteInFlight > 0) {
+        setStudentVoteStatus('Submitting your vote ...', 'submitting');
+        return;
+    }
+    if (_studentVoteBatchFailure) {
+        setStudentVoteStatus(_studentVoteBatchFailure, 'error');
+    } else {
+        setStudentVoteStatus(_studentVoteLastSuccess, 'submitted');
+    }
+}
+
+function confirmSuccessfulThumbVote(recipientId, retryingUnconfirmed) {
+    _unconfirmedThumbVotes.delete(String(recipientId));
+    if (_unconfirmedThumbVotes.size === 0) {
+        _unconfirmedThumbSessionKey = null;
+    }
+    if (retryingUnconfirmed && _unconfirmedThumbVotes.size === 0 &&
+            !_studentVoteKnownFailure) {
+        _studentVoteBatchFailure = null;
+    }
+}
+
+function reconcileUnconfirmedThumbVotes(selectedRecipientIds) {
+    if (_studentVoteInFlight > 0 || _unconfirmedThumbVotes.size === 0) return;
+    const pending = Array.from(_unconfirmedThumbVotes.entries());
+    const confirmed = pending.every(([recipientId, selected]) =>
+        selectedRecipientIds.has(recipientId) === selected
+    );
+    if (!confirmed) {
+        responseNeedsRefresh = true;
+        if (!_studentVoteKnownFailure) {
+            setStudentVoteStatus(
+                'Could not confirm your vote. Click the thumb again to retry.',
+                'submitting'
+            );
+        }
+        return false;
+    }
+    _unconfirmedThumbVotes.clear();
+    _unconfirmedThumbSessionKey = null;
+    if (_studentVoteKnownFailure) return true;
+    const successMessage = pending.length === 1 && pending[0][1] === false
+        ? 'Vote removed' : 'Vote submitted';
+    setStudentVoteStatus(successMessage, 'submitted');
+    return true;
+}
+
+function rememberStudentVoteWarnings(outcomeUnknown, hasUnsavedDraft) {
+    try {
+        if (outcomeUnknown) {
+            sessionStorage.setItem(_unconfirmedVoteWarningKey, '1');
+        }
+        if (hasUnsavedDraft) {
+            sessionStorage.setItem(_unsavedVoteDraftWarningKey, '1');
+        }
+    } catch (error) {}
+}
+
+function normalizedSessionKey(source) {
+    const value = Number(source?.session_key);
+    return Number.isInteger(value) && value >= 0 ? value : 0;
+}
+
+function discardOldSessionThumbUncertainty(state) {
+    if (_unconfirmedThumbVotes.size === 0) {
+        _unconfirmedThumbSessionKey = null;
+        return false;
+    }
+    const currentSessionKey = normalizedSessionKey(state);
+    if (_unconfirmedThumbSessionKey == null ||
+            _unconfirmedThumbSessionKey === currentSessionKey) {
+        return false;
+    }
+    _unconfirmedThumbVotes.clear();
+    _unconfirmedThumbSessionKey = null;
+    rememberStudentVoteWarnings(true, false);
+    setStudentVoteStatus(
+        'Could not confirm a vote from the previous session. Ask the instructor to verify it.',
+        'error'
+    );
+    return true;
+}
+
+function queueDashboardReload(state) {
+    const phase = state?.phase || null;
+    const sessionKey = normalizedSessionKey(state);
+    if (_pendingDashboardReloadPhase !== phase ||
+            _pendingDashboardReloadSessionKey !== sessionKey) {
+        _pendingDashboardReloadStartedAt = Date.now();
+    }
+    _pendingDashboardReloadPhase = phase;
+    _pendingDashboardReloadSessionKey = sessionKey;
+}
+
+function completePendingDashboardReload() {
+    if (!_pendingDashboardReloadPhase || _studentVoteInFlight > 0 ||
+            ratingSubmissionInProgress) {
+        return false;
+    }
+    const pendingThumbsMatchTargetSession =
+        _unconfirmedThumbVotes.size > 0 &&
+        (_unconfirmedThumbSessionKey == null ||
+         _unconfirmedThumbSessionKey === _pendingDashboardReloadSessionKey);
+    if (_pendingDashboardReloadPhase === 'discussion' &&
+            pendingThumbsMatchTargetSession &&
+            Date.now() - _pendingDashboardReloadStartedAt <
+                DASHBOARD_RELOAD_READBACK_GRACE_MS) {
+        responseNeedsRefresh = true;
+        window.requestDashboardPoll?.();
+        return false;
+    }
+    const outcomeUnknown = _unconfirmedThumbVotes.size > 0 ||
+        _unconfirmedChallengeRatings.size > 0 ||
+        Boolean(unconfirmedPresentationRating);
+    const hasUnsavedDraft = ratingDraftDirty ||
+        challengeRatingDrafts.size > 0;
+    rememberStudentVoteWarnings(outcomeUnknown, hasUnsavedDraft);
+    _allowAutomaticVoteNavigation = true;
+    window.location.reload();
+    return true;
+}
+
+window.addEventListener('beforeunload', event => {
+    if (_allowAutomaticVoteNavigation) return;
+    const outcomeUnknown = _studentVoteInFlight > 0 ||
+        ratingSubmissionInProgress ||
+        Boolean(unconfirmedPresentationRating) ||
+        _unconfirmedThumbVotes.size > 0 ||
+        _unconfirmedChallengeRatings.size > 0;
+    const hasUnsavedDraft = ratingDraftDirty ||
+        challengeRatingDrafts.size > 0;
+    if (!outcomeUnknown && !hasUnsavedDraft) return;
+    rememberStudentVoteWarnings(outcomeUnknown, hasUnsavedDraft);
+    // A 401 means this page can no longer recover. Preserve the warning for
+    // the landing page without leaving the expired page permanently stopped.
+    if (forcedPageNavigationInProgress) return;
+    event.preventDefault();
+    event.returnValue = '';
+});
+
+try {
+    if (document.getElementById('student-vote-status')) {
+        const hasUnconfirmedVote =
+            sessionStorage.getItem(_unconfirmedVoteWarningKey) === '1';
+        const hasUnsavedDraft =
+            sessionStorage.getItem(_unsavedVoteDraftWarningKey) === '1';
+        if (hasUnconfirmedVote) {
+            sessionStorage.removeItem(_unconfirmedVoteWarningKey);
+        }
+        if (hasUnsavedDraft) {
+            sessionStorage.removeItem(_unsavedVoteDraftWarningKey);
+        }
+        if (hasUnconfirmedVote || hasUnsavedDraft) {
+            let message;
+            if (hasUnconfirmedVote && hasUnsavedDraft) {
+                message = (
+                    'Could not confirm one earlier vote, and another selected ' +
+                    'rating was not submitted. Ask the instructor to verify ' +
+                    'the uncertain vote.'
+                );
+            } else if (hasUnconfirmedVote) {
+                message = (
+                    'Could not confirm your earlier vote. ' +
+                    'Ask the instructor to verify it.'
+                );
+            } else {
+                message = (
+                    'Your selected rating was not submitted before ' +
+                    'the activity changed.'
+                );
+            }
+            setStudentVoteStatus(message, 'error');
+        }
+    }
+} catch (error) {}
 // --- Challenge feature state ---
 let challengeHandRaised = false;
 let challengeRatings = {}; // { challenge_key: selected_score }
+let savedChallengeRatings = {}; // confirmed server values for this presentation
+let activeChallengePresentationKey = null;
+let activeChallengeRatingsOpen = false;
+const challengeRatingDrafts = new Set();
+const challengeRatingSubmissions = new Map(); // challenge_key -> presentation_key
+const _activeChallengeIdentities = new Map();
 let lastReceivedState = null; // latest state snapshot for the raise-hand toggle
 let _challengeToggleInFlight = false;
+let challengeHandConfirmationPending = null;
+// { presentationKey, desiredRaised } while server outcome is uncertain
 let _lastChallengeCardsSig = null;
 
 const dashboard = document.querySelector('.dashboard');
@@ -513,12 +1042,23 @@ if (dashboard) {
     function responseSyncContext(state) {
         if (!state) return null;
         if (state.phase === 'discussion') {
-            return `discussion:${state.discussion_week}`;
+            return 'discussion:' + normalizedSessionKey(state) + ':' +
+                (Number(state.discussion_week) || 1);
         }
         if (state.phase === 'competition' && state.poll_question_key) {
-            return `competition:${state.poll_question_key}`;
+            const challengeKeys = (state.active_challenges || [])
+                .map(challenge => String(challenge.challenge_key))
+                .sort()
+                .join(',');
+            return 'competition:' + state.poll_question_key +
+                '|challenges=' + challengeKeys;
         }
         return null;
+    }
+
+    function responsePrimaryContext(context) {
+        if (!context) return null;
+        return context.split('|challenges=', 1)[0];
     }
 
     function queueRosterSync(state) {
@@ -551,14 +1091,17 @@ if (dashboard) {
     }
 
     function queueResponsesSync(state) {
+        discardOldSessionThumbUncertainty(state);
         const context = responseSyncContext(state);
         const contextChanged = context !== _responseContext;
         if (contextChanged) {
+        const primaryContextChanged = responsePrimaryContext(context) !==
+            responsePrimaryContext(_responseContext);
             _responseContext = context;
             ++_responseRequestId;
             _responsesRetryFailures = 0;
             _responsesRetryAt = 0;
-            resetResponseControls();
+            if (primaryContextChanged) resetResponseControls();
             responseNeedsRefresh = Boolean(context);
         }
         if (!context) {
@@ -644,8 +1187,9 @@ if (dashboard) {
     }
 
     function runResponsesSync() {
+        discardStalePresentationUncertainty(_lastState);
         if (!responseNeedsRefresh || !_lastState ||
-                Date.now() < _responsesRetryAt) {
+                _studentVoteInFlight > 0 || Date.now() < _responsesRetryAt) {
             return Promise.resolve(false);
         }
         if (_responsesSyncInFlight) return _responsesSyncInFlight;
@@ -658,8 +1202,16 @@ if (dashboard) {
                     state, requestedContext, requestId
                 );
                 if (applied && requestedContext === _responseContext) {
-                    responseNeedsRefresh = false;
-                    _responsesRetryFailures = 0;
+                    responseNeedsRefresh = _unconfirmedThumbVotes.size > 0 ||
+                        _unconfirmedChallengeRatings.size > 0 ||
+                        Boolean(unconfirmedPresentationRating) ||
+                        Boolean(challengeHandConfirmationPending);
+                    _responsesRetryFailures = responseNeedsRefresh
+                        ? Math.min(_responsesRetryFailures + 1, 5) : 0;
+                    _responsesRetryAt = responseNeedsRefresh
+                        ? Date.now() +
+                            secondaryRetryDelay(_responsesRetryFailures)
+                        : 0;
                 }
                 return applied;
             } catch (e) {
@@ -676,7 +1228,8 @@ if (dashboard) {
                 if (_responsesSyncInFlight === request) {
                     _responsesSyncInFlight = null;
                 }
-                if (responseNeedsRefresh &&
+                const reloadStarted = completePendingDashboardReload();
+                if (!reloadStarted && responseNeedsRefresh &&
                         (requestedContext !== _responseContext ||
                          requestId !== _responseRequestId)) {
                     requestImmediatePoll();
@@ -704,6 +1257,14 @@ if (dashboard) {
         ratingPollOpenForTimer = false;
         stopPollPulse();
         updateRatingControlAvailability();
+        activeChallengeRatingsOpen = false;
+        if (lastReceivedState) {
+            lastReceivedState.challenge_ratings_open = false;
+            renderChallengeUI(lastReceivedState);
+        }
+        if (_lastState && _lastState !== lastReceivedState) {
+            _lastState.challenge_ratings_open = false;
+        }
 
         const draftLostWithWindow =
             ratingDraftDirty && !!lastRatedPresentationKey;
@@ -934,6 +1495,13 @@ if (dashboard) {
     }
 
     function resetResponseControls() {
+        if (unconfirmedPresentationRating) {
+            unconfirmedPresentationRating = null;
+            setStudentVoteStatus(
+                'Could not confirm an earlier rating. Ask the instructor to verify it.',
+                'error'
+            );
+        }
         document.querySelectorAll('.thumb-btn').forEach(btn => {
             btn.classList.remove('active-green');
             btn.setAttribute('aria-pressed', 'false');
@@ -1000,7 +1568,8 @@ if (dashboard) {
         // any single posted question, so availability follows the phase.
         document.querySelectorAll('.thumb-btn').forEach(btn => {
             btn.dataset.thumbsAvailable = thumbsAvailable ? '1' : '0';
-            btn.disabled = !thumbsAvailable || btn.dataset.saving === '1';
+            btn.disabled = !thumbsAvailable ||
+                btn.dataset.submitting === '1';
             if (thumbsAvailable) {
                 if (btn.title === 'Thumbs are only available during the discussion phase') {
                     btn.removeAttribute('title');
@@ -1030,29 +1599,71 @@ if (dashboard) {
             return false;
         }
         if (inDiscussion) {
-            if (data.phase !== 'discussion') return false;
+            if (data.phase !== 'discussion' ||
+                    normalizedSessionKey(data) !== normalizedSessionKey(state)) {
+                return false;
+            }
             const selected = new Set((data.thumb_recipient_ids || []).map(String));
+            const ambiguityResolved =
+                reconcileUnconfirmedThumbVotes(selected);
             document.querySelectorAll(
                 '.teammate-card[data-student-id] .thumb-btn'
             ).forEach(btn => {
                 const card = btn.closest('.teammate-card');
-                const isSelected = selected.has(
-                    String(card?.dataset.studentId || '')
+                const recipientId = String(card?.dataset.studentId || '');
+                const confirmedSelected = selected.has(recipientId);
+                const checking = _unconfirmedThumbVotes.has(recipientId);
+                const displayedSelected = checking
+                    ? _unconfirmedThumbVotes.get(recipientId)
+                    : confirmedSelected;
+                btn.dataset.confirmedSelected =
+                    confirmedSelected ? '1' : '0';
+                btn.classList.toggle('active-green', displayedSelected);
+                btn.setAttribute(
+                    'aria-pressed',
+                    displayedSelected ? 'true' : 'false'
                 );
-                btn.classList.toggle('active-green', isSelected);
-                btn.setAttribute('aria-pressed', isSelected ? 'true' : 'false');
+                if (checking) {
+                    btn.dataset.checking = '1';
+                    btn.title =
+                        'Vote not confirmed. Click again to retry.';
+                } else {
+                    delete btn.dataset.checking;
+                    if (btn.title ===
+                            'Vote not confirmed. Click again to retry.') {
+                        btn.removeAttribute('title');
+                    }
+                }
+                btn.disabled = btn.dataset.thumbsAvailable !== '1' ||
+                    btn.dataset.submitting === '1';
             });
+            if (ambiguityResolved) completePendingDashboardReload();
         } else if (presentationKey) {
             if (data.phase !== 'competition' ||
                     data.presentation_key !== presentationKey) {
                 return false;
             }
+
             if (data.rating) {
                 const serverSelections = {
                     q1: Number(data.rating.q1_developed) || 0,
                     q2: Number(data.rating.q2_easy) || 0
                 };
                 savedPollSelections = { ...serverSelections };
+                const pending = unconfirmedPresentationRating;
+                if (pending &&
+                        pending.presentationKey === presentationKey &&
+                        pending.q1 === serverSelections.q1 &&
+                        pending.q2 === serverSelections.q2) {
+                    unconfirmedPresentationRating = null;
+                    if (_unconfirmedChallengeRatings.size === 0 &&
+                            _unconfirmedThumbVotes.size === 0 &&
+                            _studentVoteInFlight === 0 &&
+                            !_studentVoteKnownFailure) {
+                        _studentVoteBatchFailure = null;
+                        setStudentVoteStatus('Vote submitted', 'submitted');
+                    }
+                }
                 if (!ratingDraftDirty) {
                     pollSelections = { ...serverSelections };
                     setStarRowValue('q1', pollSelections.q1);
@@ -1077,6 +1688,7 @@ if (dashboard) {
                     showRatingDraftStatus();
                 }
             }
+            applySavedChallengeResponses(data, presentationKey);
         }
         return true;
     }
@@ -1091,6 +1703,7 @@ if (dashboard) {
         // from cheap changed:false poll cycles.
         _lastState = state;
         lastReceivedState = state;
+        discardOldSessionThumbUncertainty(state);
 
         // The dashboard's activity controls are rendered server-side for the
         // current phase and team. Reload once when either changes so students
@@ -1099,11 +1712,15 @@ if (dashboard) {
         const initialLocked = dashboard.dataset.teamsLocked === '1';
         const initialMaxTeams = dashboard.dataset.maxTeams ? Number(dashboard.dataset.maxTeams) : null;
         const initialMaxMembers = dashboard.dataset.maxMembers ? Number(dashboard.dataset.maxMembers) : null;
+        const initialSessionKey = Number(dashboard.dataset.sessionKey || 0);
         const configChanged = Boolean(state.teams_locked) !== initialLocked ||
             (initialMaxTeams != null && state.max_teams != null && Number(state.max_teams) !== initialMaxTeams) ||
             (initialMaxMembers != null && state.max_members != null && Number(state.max_members) !== initialMaxMembers);
-        if (state.phase !== dashboard.dataset.phase || currentTeamId !== MY_TEAM_ID || configChanged) {
-            window.location.reload();
+        const sessionChanged = normalizedSessionKey(state) !== initialSessionKey;
+        if (state.phase !== dashboard.dataset.phase || currentTeamId !== MY_TEAM_ID ||
+                configChanged || sessionChanged) {
+            queueDashboardReload(state);
+            completePendingDashboardReload();
             return true;
         }
 
@@ -1168,7 +1785,7 @@ if (dashboard) {
                 savedPollSelections = null;
                 ratingDraftDirty = false;
                 // Reset star visuals
-                document.querySelectorAll('.star').forEach(s => {
+                document.querySelectorAll('#poll-section .star').forEach(s => {
                     s.classList.remove('active');
                     s.textContent = '☆';
                     s.setAttribute('aria-pressed', 'false');
@@ -1221,6 +1838,7 @@ if (dashboard) {
                     lastRenderedQuestionKey = null;
                     lastKnownQuestionId = null;
                     lastKnownQuestionRevision = null;
+                    renderChallengeUI(state);
                     return;
                 }
 
@@ -1283,7 +1901,7 @@ if (dashboard) {
                         (canRate || draftLostWithWindow) ? 'block' : 'none';
                 }
 
-                // Pulsing 30s poll countdown (non-presenting teams only)
+                // Pulsing configured poll countdown (non-presenting teams only)
                 if (canRate && Number(state.poll_remaining) > 0) {
                     startPollPulse(state.poll_remaining);
                 } else {
@@ -1317,16 +1935,11 @@ if (dashboard) {
         ).join('');
     }
 
-    window.submitPeerGrade = async function(recipientId, selected) {
-        try {
-            const data = await postJSON('/api/grade_peer', {
-                recipient_id: recipientId,
-                selected
-            });
-            return data && data.success;
-        } catch (e) {
-            return false;
-        }
+    window.submitPeerGrade = function(recipientId, selected) {
+        return postJSON('/api/grade_peer', {
+            recipient_id: recipientId,
+            selected
+        }, VOTE_RETRY_OPTIONS);
     };
 
     // --- teammate cards: circle layout + free drag ---
@@ -1542,23 +2155,92 @@ if (dashboard) {
         if (btn.disabled) return;
         ++_responseRequestId;
         responseNeedsRefresh = true;
-        const wasSelected = btn.classList.contains('active-green');
-        const selected = !wasSelected;
+        const retryingUnconfirmed =
+            btn.dataset.checking === '1' &&
+            _unconfirmedThumbVotes.has(String(recipientId));
+        const wasSelected = retryingUnconfirmed
+            ? btn.dataset.confirmedSelected === '1'
+            : btn.classList.contains('active-green');
+        const selected = retryingUnconfirmed
+            ? _unconfirmedThumbVotes.get(String(recipientId))
+            : !wasSelected;
+        btn.dataset.confirmedSelected = wasSelected ? '1' : '0';
+        if (!retryingUnconfirmed) {
+            _unconfirmedThumbVotes.delete(String(recipientId));
+        }
+        delete btn.dataset.checking;
+        if (btn.title === 'Vote not confirmed. Click again to retry.') {
+            btn.removeAttribute('title');
+        }
+        beginStudentVote();
         btn.classList.toggle('active-green', selected);
         btn.setAttribute('aria-pressed', selected ? 'true' : 'false');
-        btn.dataset.saving = '1';
+        btn.dataset.submitting = '1';
+        btn.setAttribute('aria-busy', 'true');
         btn.disabled = true;
-        const ok = await submitPeerGrade(recipientId, selected);
-        ++_responseRequestId;
-        responseNeedsRefresh = true;
-        delete btn.dataset.saving;
-        btn.disabled = btn.dataset.thumbsAvailable !== '1';
-        if (!ok) {
+        let success = false;
+        let failureMessage = 'Vote not submitted. Please try again.';
+        let unconfirmed = false;
+        try {
+            const data = await submitPeerGrade(recipientId, selected);
+            success = data?.success === true;
+            if (success) {
+                confirmSuccessfulThumbVote(
+                    recipientId,
+                    retryingUnconfirmed
+                );
+            } else {
+                if (data?._network_error) {
+                    unconfirmed = true;
+                    const activeSessionKey = normalizedSessionKey(
+                        lastReceivedState || {
+                            session_key: dashboard.dataset.sessionKey
+                        }
+                    );
+                    if (_unconfirmedThumbVotes.size > 0 &&
+                            _unconfirmedThumbSessionKey != null &&
+                            _unconfirmedThumbSessionKey !== activeSessionKey) {
+                        _unconfirmedThumbVotes.clear();
+                        rememberStudentVoteWarnings(true, false);
+                    }
+                    _unconfirmedThumbSessionKey = activeSessionKey;
+                    _unconfirmedThumbVotes.set(String(recipientId), selected);
+                    btn.dataset.checking = '1';
+                    failureMessage = 'Could not confirm your vote. Click the thumb again to retry.';
+                } else if (retryingUnconfirmed) {
+                    unconfirmed = true;
+                    btn.dataset.checking = '1';
+                    failureMessage =
+                        'Could not confirm your vote. Click the thumb again to retry.';
+                } else {
+                    btn.classList.toggle('active-green', wasSelected);
+                    btn.setAttribute('aria-pressed', wasSelected ? 'true' : 'false');
+                }
+                showToast(
+                    data?._network_error ? failureMessage :
+                        (data?.error || failureMessage),
+                    'error'
+                );
+            }
+        } catch (error) {
             btn.classList.toggle('active-green', wasSelected);
             btn.setAttribute('aria-pressed', wasSelected ? 'true' : 'false');
-            showToast('Failed to save. Please try again.', 'error');
+            showToast(failureMessage, 'error');
+        } finally {
+            ++_responseRequestId;
+            responseNeedsRefresh = true;
+            delete btn.dataset.submitting;
+            btn.removeAttribute('aria-busy');
+            btn.disabled = btn.dataset.thumbsAvailable !== '1';
+            finishStudentVote(
+                success,
+                selected ? 'Vote submitted' : 'Vote removed',
+                failureMessage,
+                unconfirmed
+            );
+            if (completePendingDashboardReload()) return;
+            requestImmediatePoll();
         }
-        requestImmediatePoll();
     };
 
     initTeammateCards();
@@ -1589,12 +2271,16 @@ window.confirmDemoReset = function(form) {
     return beginPageNavigation(form);
 };
 
+let rosterMutationInProgress = false;
+
 window.randomAssign = async function(btn) {
     if (!confirm('Assign all remaining students evenly to teams?')) return;
+    if (!beginRosterMutation()) return;
     if (btn) btn.disabled = true;
     try {
         const data = await postJSON('/api/random_assign', instructorStatePayload());
         if (data.success) {
+            applyRosterMutationVersion(data);
             if (Number(data.remaining) > 0) {
                 showToast(`Assigned ${data.assigned || 0}; ${data.remaining} remain unassigned because team capacity is full.`, 'warning');
             } else if (data.assigned === 0) {
@@ -1607,6 +2293,7 @@ window.randomAssign = async function(btn) {
             showInstructorMutationError(data, 'Assignment failed');
         }
     } finally {
+        endRosterMutation();
         if (btn) btn.disabled = false;
     }
 };
@@ -1614,6 +2301,69 @@ window.randomAssign = async function(btn) {
 /* ===== INSTRUCTOR PANEL ===== */
 const instructor = document.querySelector('.instructor[data-slug]');
 const isDemoInstructor = instructor?.dataset.demo === '1';
+let ratingsSettling = false;
+let ratingsSettlingStatusTimer = null;
+
+function applyRatingsSettlingState(source) {
+    if (!source || !Object.prototype.hasOwnProperty.call(
+            source, 'ratings_settling')) return;
+    const wasSettling = ratingsSettling;
+    ratingsSettling = source.ratings_settling === true;
+    const remaining = Math.max(
+        0,
+        Math.ceil(Number(source.ratings_settling_remaining) || 0)
+    );
+    const status = document.getElementById('ratings-settling-status');
+    if (ratingsSettlingStatusTimer && ratingsSettling) {
+        window.clearTimeout(ratingsSettlingStatusTimer);
+        ratingsSettlingStatusTimer = null;
+    }
+    if (status && ratingsSettling) {
+        status.hidden = false;
+        status.dataset.state = 'saving';
+        status.textContent = remaining > 0
+            ? 'Saving final ratings... ' + remaining + 's'
+            : 'Saving final ratings...';
+    } else if (status && wasSettling) {
+        status.hidden = false;
+        status.dataset.state = 'saved';
+        status.textContent =
+            'Final ratings saved. You can continue with the action.';
+        ratingsSettlingStatusTimer = window.setTimeout(() => {
+            status.hidden = true;
+            status.textContent = '';
+            ratingsSettlingStatusTimer = null;
+        }, 3000);
+    } else if (status && !ratingsSettlingStatusTimer) {
+        status.hidden = true;
+    }
+
+    const startButton = document.getElementById('btn-start-poll');
+    if (startButton) {
+        startButton.disabled = ratingsSettling ||
+            startButton.classList.contains('gliding');
+    }
+    const nextButton = document.getElementById('btn-next');
+    if (nextButton) {
+        nextButton.disabled = ratingsSettling || pollGlideAnchor !== null;
+    }
+    document.querySelectorAll('.challenge-mutating-btn').forEach(button => {
+        button.disabled = ratingsSettling;
+    });
+    const cancelButton =
+        document.getElementById('btn-cancel-presentation');
+    if (cancelButton) cancelButton.disabled = ratingsSettling;
+    document.querySelectorAll('.phase-btn').forEach(button => {
+        button.disabled = ratingsSettling;
+    });
+}
+
+function ratingsSettlementBlocksAction() {
+    if (!ratingsSettling) return false;
+    showToast('Saving final ratings. Please wait.', 'warning');
+    return true;
+}
+
 
 function instructorStatePayload(extra = {}) {
     if (!instructor) return extra;
@@ -1627,11 +2377,36 @@ function instructorStatePayload(extra = {}) {
 }
 
 function showInstructorMutationError(data, fallback) {
-    showToast(data?.error || fallback, 'error');
+    applyRatingsSettlingState(data);
+    const settling = data?.ratings_settling === true;
+    showToast(
+        settling ? 'Saving final ratings. Please wait.' :
+            (data?.error || fallback), settling ? 'warning' : 'error');
     if (data?._status === 409 &&
             /stale|changed|another page|reload|no active presentation/i.test(data.error || '')) {
         window.setTimeout(() => window.location.reload(), 500);
     }
+}
+
+function applyRosterMutationVersion(data) {
+    if (!instructor) return false;
+    const version = Number(data?.roster_version);
+    if (!Number.isInteger(version) || version < 0) return false;
+    instructor.dataset.rosterVersion = String(version);
+    return true;
+}
+
+function beginRosterMutation() {
+    if (rosterMutationInProgress) {
+        showToast('Another roster change is still saving. Please wait.', 'warning');
+        return false;
+    }
+    rosterMutationInProgress = true;
+    return true;
+}
+
+function endRosterMutation() {
+    rosterMutationInProgress = false;
 }
 
 // Setup-phase roster mutations (team assign, add/remove student,
@@ -1668,6 +2443,255 @@ function getPresentationKey(state) {
     return state.poll_question_key ||
         (state.presentation_started_at ? `pres-${state.presentation_started_at}` : null);
 }
+function discardStalePresentationUncertainty(state) {
+    const presentationKey = state?.phase === 'competition'
+        ? getPresentationKey(state) : null;
+    let discarded = false;
+    if (unconfirmedPresentationRating &&
+            unconfirmedPresentationRating.presentationKey !== presentationKey) {
+        unconfirmedPresentationRating = null;
+        discarded = true;
+    }
+    for (const [key, pending] of _unconfirmedChallengeRatings.entries()) {
+        if (pending.presentationKey !== presentationKey) {
+            _unconfirmedChallengeRatings.delete(key);
+            discarded = true;
+        }
+    }
+    if (challengeHandConfirmationPending &&
+            challengeHandConfirmationPending.presentationKey !== presentationKey) {
+        challengeHandConfirmationPending = null;
+        discarded = true;
+    }
+    if (discarded) {
+        setStudentVoteStatus(
+            'Could not confirm an action from the earlier presentation. ' +
+            'Ask the instructor to verify it.',
+            'error'
+        );
+    }
+    return discarded;
+}
+
+function challengeSubmissionKey(presentationKey, challengeKey) {
+    return String(presentationKey || '') + ':' + String(challengeKey);
+}
+
+function challengeIsSubmitting(challengeKey) {
+    return challengeRatingSubmissions.get(challengeKey) ===
+        activeChallengePresentationKey;
+}
+
+function resetChallengePresentation(presentationKey) {
+    let lostVoteConfirmation = false;
+    for (const [key, pending] of _unconfirmedChallengeRatings.entries()) {
+        if (pending.presentationKey !== presentationKey) {
+            _unconfirmedChallengeRatings.delete(key);
+            lostVoteConfirmation = true;
+        }
+    }
+    const lostHandConfirmation = Boolean(
+        challengeHandConfirmationPending &&
+        challengeHandConfirmationPending.presentationKey !== presentationKey
+    );
+    if (lostHandConfirmation) challengeHandConfirmationPending = null;
+    activeChallengePresentationKey = presentationKey;
+    challengeHandRaised = false;
+    activeChallengeRatingsOpen = false;
+    challengeRatings = {};
+    savedChallengeRatings = {};
+    challengeRatingDrafts.clear();
+    _activeChallengeIdentities.clear();
+    _lastChallengeCardsSig = null;
+    if (lostVoteConfirmation || lostHandConfirmation) {
+        const message = lostVoteConfirmation && lostHandConfirmation
+            ? 'Could not confirm an earlier vote or hand change. Ask the instructor to verify them.'
+            : lostVoteConfirmation
+                ? 'Could not confirm an earlier vote. Ask the instructor to verify it.'
+                : 'Could not confirm an earlier hand change. Ask the instructor to verify it.';
+        setStudentVoteStatus(message, 'error');
+    }
+}
+
+function reconcileActiveChallengeState(challenges, presentationKey) {
+    const activeKeys = new Set();
+    const nextIdentities = new Map();
+    const replacedKeys = new Set();
+    for (const challenge of challenges || []) {
+        const key = String(challenge.challenge_key);
+        const identity = [
+            challenge.challenger_id,
+            challenge.challenger_team_id,
+            challenge.challenge_num
+        ].join(':');
+        activeKeys.add(key);
+        nextIdentities.set(key, identity);
+        if (_activeChallengeIdentities.has(key) &&
+                _activeChallengeIdentities.get(key) !== identity) {
+            replacedKeys.add(key);
+        }
+    }
+
+    const keep = key => activeKeys.has(key) && !replacedKeys.has(key);
+    for (const key of Object.keys(challengeRatings)) {
+        if (!keep(key)) delete challengeRatings[key];
+    }
+    for (const key of Object.keys(savedChallengeRatings)) {
+        if (!keep(key)) delete savedChallengeRatings[key];
+    }
+    for (const key of Array.from(challengeRatingDrafts)) {
+        if (!keep(String(key))) challengeRatingDrafts.delete(key);
+    }
+
+    let removedUnconfirmed = false;
+    for (const [pendingKey, pending] of
+            _unconfirmedChallengeRatings.entries()) {
+        if (pending.presentationKey === presentationKey &&
+                !keep(String(pending.challengeKey))) {
+            _unconfirmedChallengeRatings.delete(pendingKey);
+            removedUnconfirmed = true;
+        }
+    }
+
+    _activeChallengeIdentities.clear();
+    for (const [key, identity] of nextIdentities.entries()) {
+        _activeChallengeIdentities.set(key, identity);
+    }
+    if (removedUnconfirmed) {
+        const message = (
+            'Your earlier challenge vote is no longer part of the activity ' +
+            'because the challenger was cleared.'
+        );
+        _studentVoteBatchFailure = message;
+        _studentVoteKnownFailure = true;
+        setStudentVoteStatus(message, 'error');
+    }
+    return activeKeys;
+}
+
+function updateChallengeRatingCard(challengeKey) {
+    const card = Array.from(document.querySelectorAll('.challenge-card'))
+        .find(item => item.dataset.challengeKey === challengeKey);
+    if (!card) return;
+    const score = Number(challengeRatings[challengeKey]) || 0;
+    const savedScore = Number(savedChallengeRatings[challengeKey]) || 0;
+    const submitting = challengeIsSubmitting(challengeKey);
+    const pendingKey = challengeSubmissionKey(
+        activeChallengePresentationKey,
+        challengeKey
+    );
+    const unconfirmed = _unconfirmedChallengeRatings.has(pendingKey);
+    card.querySelectorAll('.challenge-stars .star').forEach(star => {
+        const value = Number(star.dataset.value) || 0;
+        star.disabled = submitting || !activeChallengeRatingsOpen;
+        star.classList.toggle('active', value <= score);
+        star.textContent = value <= score ? '\u2605' : '\u2606';
+        star.setAttribute('aria-pressed', value === score ? 'true' : 'false');
+    });
+    const button = card.querySelector('.challenge-submit-btn');
+    if (button) {
+        button.disabled = submitting || !activeChallengeRatingsOpen;
+        button.setAttribute('aria-busy', submitting ? 'true' : 'false');
+        button.textContent = submitting
+            ? 'Submitting...'
+            : (savedScore ? 'Update Rating' : 'Submit Rating');
+    }
+    const status = card.querySelector('.challenge-rating-status');
+    if (!status) return;
+    status.dataset.state = '';
+    if (submitting) {
+        status.textContent = 'Submitting your vote ...';
+        status.dataset.state = 'submitting';
+    } else if (unconfirmed) {
+        status.textContent = 'Could not confirm your vote. Rechecking...';
+        status.dataset.state = 'error';
+    } else if (!activeChallengeRatingsOpen) {
+        status.textContent = challengeRatingDrafts.has(challengeKey)
+            ? 'Challenge rating closed. Your changes were not submitted.'
+            : savedScore
+            ? 'Challenge rating closed. Your rating: ' +
+                savedScore + '/5 submitted.'
+            : 'Challenge rating closed.';
+        status.dataset.state = 'closed';
+    } else if (challengeRatingDrafts.has(challengeKey)) {
+        status.textContent = 'Changes not submitted.';
+        status.dataset.state = 'draft';
+    } else if (savedScore) {
+        status.textContent = 'Your rating: ' + savedScore + '/5 submitted.';
+        status.dataset.state = 'submitted';
+    } else {
+        status.textContent = '';
+    }
+}
+
+function applySavedChallengeResponses(data, presentationKey) {
+    if (activeChallengePresentationKey !== presentationKey) {
+        resetChallengePresentation(presentationKey);
+    }
+    const pendingHand = challengeHandConfirmationPending;
+    const handConfirmationResolved = Boolean(
+        pendingHand &&
+        pendingHand.presentationKey === presentationKey &&
+        !_challengeToggleInFlight &&
+        typeof data.challenge_hand_raised === 'boolean'
+    );
+    if (!_challengeToggleInFlight &&
+            typeof data.challenge_hand_raised === 'boolean') {
+        challengeHandRaised = data.challenge_hand_raised;
+        if (handConfirmationResolved) {
+            challengeHandConfirmationPending = null;
+        }
+    }
+    const serverRatings = data.challenge_ratings || {};
+    let resolvedUncertainVote = false;
+    const challenges = lastReceivedState?.active_challenges || [];
+    reconcileActiveChallengeState(challenges, presentationKey);
+    for (const challenge of challenges) {
+        const key = String(challenge.challenge_key);
+        const serverScore = Number(serverRatings[key]) || 0;
+        if (serverScore) savedChallengeRatings[key] = serverScore;
+        else delete savedChallengeRatings[key];
+
+        const pendingKey = challengeSubmissionKey(presentationKey, key);
+        const pending = _unconfirmedChallengeRatings.get(pendingKey);
+        if (pending && serverScore === pending.score) {
+            _unconfirmedChallengeRatings.delete(pendingKey);
+            resolvedUncertainVote = true;
+            if (Number(challengeRatings[key]) === serverScore) {
+                challengeRatingDrafts.delete(key);
+            }
+        }
+        if (!challengeRatingDrafts.has(key) &&
+                !challengeIsSubmitting(key)) {
+            if (serverScore) challengeRatings[key] = serverScore;
+            else delete challengeRatings[key];
+        }
+        updateChallengeRatingCard(key);
+    }
+    if (resolvedUncertainVote &&
+            _unconfirmedChallengeRatings.size === 0 &&
+            _studentVoteInFlight === 0 && !_studentVoteKnownFailure) {
+        _studentVoteBatchFailure = null;
+        setStudentVoteStatus('Vote submitted', 'submitted');
+    }
+    if (handConfirmationResolved) {
+        const matchedRequest =
+            challengeHandRaised === pendingHand.desiredRaised;
+        let message;
+        if (matchedRequest) {
+            message = pendingHand.desiredRaised
+                ? 'Hand raise confirmed.'
+                : 'Hand lowered.';
+        } else {
+            message = pendingHand.desiredRaised
+                ? 'Hand raise was not confirmed. Please try again.'
+                : 'Your hand is still raised. Please try lowering it again.';
+        }
+        showToast(message, matchedRequest ? 'success' : 'warning');
+    }
+    if (lastReceivedState) renderChallengeUI(lastReceivedState);
+}
+
 
 function renderChallengeUI(state) {
     const section = document.getElementById('challenge-section');
@@ -1677,14 +2701,17 @@ function renderChallengeUI(state) {
     const hasActive = !!(isCompetition && state.active_team && state.active_question);
     const challenges = state.active_challenges || [];
     const presKey = getPresentationKey(state);
+    if (presKey !== activeChallengePresentationKey) {
+        resetChallengePresentation(presKey);
+    }
+    reconcileActiveChallengeState(challenges, presKey);
 
+    activeChallengeRatingsOpen = hasActive &&
+        state.challenge_ratings_open !== false;
     // Show section if we're in competition with an active presentation
     const showSection = hasActive;
     section.style.display = showSection ? 'block' : 'none';
     if (!showSection) {
-        challengeHandRaised = false;
-        challengeRatings = {};
-        _lastChallengeCardsSig = null;
         return;
     }
 
@@ -1697,11 +2724,18 @@ function renderChallengeUI(state) {
         const status = document.getElementById('raise-hand-status');
         if (btn) {
             btn.textContent = challengeHandRaised ? '✋ Hand Raised (Cancel)' : '🙋 Raise Hand to Challenge';
+            btn.disabled = _challengeToggleInFlight;
+            btn.setAttribute(
+                'aria-busy',
+                _challengeToggleInFlight ? 'true' : 'false'
+            );
             btn.className = challengeHandRaised ? 'btn btn-secondary' : 'btn btn-primary';
             btn.setAttribute('aria-pressed', challengeHandRaised ? 'true' : 'false');
         }
         if (status) {
-            status.textContent = challengeHandRaised ? 'Waiting to be selected...' : '';
+            status.textContent = challengeHandConfirmationPending
+                ? 'Could not confirm. Checking...'
+                : challengeHandRaised ? 'Waiting to be selected...' : '';
         }
     }
 
@@ -1709,7 +2743,12 @@ function renderChallengeUI(state) {
     // destroying star/submit UI every 1s poll cycle)
     const cardsDiv = document.getElementById('challenge-cards');
     if (!cardsDiv) return;
-    const cardsSig = JSON.stringify({ challenges, amPresenting, MY_TEAM_ID });
+    const cardsSig = JSON.stringify({
+        presentationKey: presKey,
+        challenges,
+        amPresenting,
+        MY_TEAM_ID
+    });
     if (cardsSig !== _lastChallengeCardsSig) {
         _lastChallengeCardsSig = cardsSig;
         cardsDiv.innerHTML = '';
@@ -1717,7 +2756,7 @@ function renderChallengeUI(state) {
     for (const ch of challenges) {
         const isMyTeam = MY_TEAM_ID === ch.challenger_team_id;
         const isPresentingTeam = amPresenting;
-        const canRate = !isMyTeam && !isPresentingTeam;
+        const canRate = !noTeam && !isMyTeam && !isPresentingTeam;
 
         const card = document.createElement('div');
         card.className = 'challenge-card';
@@ -1753,28 +2792,43 @@ function renderChallengeUI(state) {
             ratingDiv.appendChild(starRow);
 
             const submitBtn = document.createElement('button');
-            submitBtn.className = 'btn btn-sm btn-primary';
-            submitBtn.textContent = 'Submit';
+            submitBtn.className =
+                'btn btn-sm btn-primary challenge-submit-btn';
+            submitBtn.textContent = 'Submit Rating';
             submitBtn.style.marginLeft = '8px';
             submitBtn.addEventListener('click', () => submitChallengeRating(ch.challenge_key));
             ratingDiv.appendChild(submitBtn);
 
             card.appendChild(ratingDiv);
+            const ratingStatus = document.createElement('span');
+            ratingStatus.className = 'challenge-rating-status';
+            ratingStatus.setAttribute('role', 'status');
+            ratingStatus.setAttribute('aria-live', 'polite');
+            ratingDiv.appendChild(ratingStatus);
+
+        } else if (noTeam) {
+            const note = document.createElement('p');
+            note.className = 'hint';
+            note.textContent = '(You must be assigned to a team to rate challenges)';
+            card.appendChild(note);
         } else if (isMyTeam) {
             const note = document.createElement('p');
             note.className = 'hint';
-            note.textContent = '(Your teammate — you cannot rate this)';
+            note.textContent = '(You cannot rate your teammate)';
             card.appendChild(note);
         } else if (isPresentingTeam) {
             const note = document.createElement('p');
             note.className = 'hint';
-            note.textContent = '(Your team is presenting — you cannot rate challenges)';
+            note.textContent = '(Your team is presenting, so you cannot rate challenges)';
             card.appendChild(note);
         }
 
         cardsDiv.appendChild(card);
     }
     } // end if (cardsSig changed)
+    for (const challenge of challenges) {
+        updateChallengeRatingCard(String(challenge.challenge_key));
+    }
 }
 
 window.toggleRaiseHand = async function() {
@@ -1782,26 +2836,53 @@ window.toggleRaiseHand = async function() {
     const state = lastReceivedState;
     if (!state) return;
     const presKey = getPresentationKey(state);
-    if (!presKey) return;
+    if (!presKey || presKey !== activeChallengePresentationKey) return;
+    const desiredRaised = !challengeHandRaised;
+    ++_responseRequestId;
+    challengeHandConfirmationPending = null;
     _challengeToggleInFlight = true;
+    renderChallengeUI(state);
     try {
-        const endpoint = challengeHandRaised ? '/api/lower_hand' : '/api/raise_hand';
+        const endpoint = desiredRaised ? '/api/raise_hand' : '/api/lower_hand';
         const data = await postJSON(endpoint, { presentation_key: presKey });
         if (data.success) {
-            challengeHandRaised = !challengeHandRaised;
-            renderChallengeUI(state);
+            challengeHandRaised = desiredRaised;
+            responseNeedsRefresh = true;
+            window.requestDashboardPoll?.();
+        } else if (data._network_error) {
+            challengeHandConfirmationPending = {
+                presentationKey: presKey,
+                desiredRaised
+            };
+            responseNeedsRefresh = true;
+            showToast('Could not confirm. Checking...', 'warning');
         } else {
             showToast(data.error || 'Failed', 'error');
         }
     } catch (e) {
-        showToast('Network error', 'error');
+        challengeHandConfirmationPending = {
+            presentationKey: presKey,
+            desiredRaised
+        };
+        responseNeedsRefresh = true;
+        showToast('Could not confirm. Checking...', 'warning');
     } finally {
         _challengeToggleInFlight = false;
+        if (lastReceivedState) renderChallengeUI(lastReceivedState);
+        if (responseNeedsRefresh) window.requestDashboardPoll?.();
     }
 };
 
 function selectChallengeRating(challengeKey, score) {
-    challengeRatings[challengeKey] = score;
+    const key = String(challengeKey);
+    if (!activeChallengeRatingsOpen) return;
+    if (challengeIsSubmitting(key)) return;
+    challengeRatings[key] = score;
+    if (Number(savedChallengeRatings[key]) === Number(score)) {
+        challengeRatingDrafts.delete(key);
+    } else {
+        challengeRatingDrafts.add(key);
+    }
     // Update star display
     const starRow = document.querySelector(`.challenge-stars[data-challenge-key="${challengeKey}"]`);
     if (starRow) {
@@ -1811,29 +2892,97 @@ function selectChallengeRating(challengeKey, score) {
             s.innerHTML = val <= score ? '★' : '☆';
         });
     }
+    updateChallengeRatingCard(key);
 }
 
 window.submitChallengeRating = async function(challengeKey) {
-    const score = challengeRatings[challengeKey];
+    const key = String(challengeKey);
+    const presentationKey = activeChallengePresentationKey;
+    if (!presentationKey || challengeIsSubmitting(key)) return;
+    if (!activeChallengeRatingsOpen) {
+        showToast('Challenge rating closed', 'warning');
+        return;
+    }
+    const isActive = (lastReceivedState?.active_challenges || [])
+        .some(challenge => String(challenge.challenge_key) === key);
+    if (!isActive) {
+        showToast('This challenge is no longer active', 'warning');
+        return;
+    }
+    const score = Number(challengeRatings[key]) || 0;
     if (!score) {
         showToast('Select a rating first', 'warning');
         return;
     }
+
+    const pendingKey = challengeSubmissionKey(presentationKey, key);
+    const retryingUnconfirmed =
+        _unconfirmedChallengeRatings.has(pendingKey);
+    challengeRatingSubmissions.set(key, presentationKey);
+    ++_responseRequestId;
+    beginStudentVote();
+    updateChallengeRatingCard(key);
+
+    let success = false;
+    let unconfirmed = false;
+    let failureMessage = 'Vote not submitted. Please try again.';
     try {
         const data = await postJSON('/api/submit_challenge_rating', {
-            challenge_key: challengeKey,
-            score: score,
-        });
-        if (data.success) {
+            challenge_key: key,
+            score
+        }, VOTE_RETRY_OPTIONS);
+        success = data?.success === true;
+        if (success) {
+            _unconfirmedChallengeRatings.delete(pendingKey);
+            if (retryingUnconfirmed &&
+                    _unconfirmedChallengeRatings.size === 0 &&
+                    _unconfirmedThumbVotes.size === 0 &&
+                    !unconfirmedPresentationRating) {
+                _studentVoteBatchFailure = null;
+                _studentVoteKnownFailure = false;
+            }
+            savedChallengeRatings[key] = score;
+            challengeRatingDrafts.delete(key);
             showToast('Rating submitted', 'success');
+        } else if (data?._network_error) {
+            unconfirmed = true;
+            _unconfirmedChallengeRatings.set(pendingKey, {
+                presentationKey,
+                challengeKey: key,
+                score
+            });
+            failureMessage =
+                'Could not confirm your vote. Rechecking the saved response...';
+            showToast(failureMessage, 'error');
         } else {
-            showToast(data.error || 'Failed to submit', 'error');
+            failureMessage = data?.error || failureMessage;
+            showToast(failureMessage, 'error');
         }
-    } catch (e) {
-        showToast('Network error', 'error');
+    } catch (error) {
+        showToast(failureMessage, 'error');
+    } finally {
+        if (challengeRatingSubmissions.get(key) === presentationKey) {
+            challengeRatingSubmissions.delete(key);
+        }
+        responseNeedsRefresh = true;
+        finishStudentVote(
+            success,
+            'Vote submitted',
+            failureMessage,
+            unconfirmed
+        );
+        updateChallengeRatingCard(key);
+        if (lastReceivedState) {
+            reconcileActiveChallengeState(
+                lastReceivedState.active_challenges || [],
+                activeChallengePresentationKey
+            );
+        }
+        if (!completePendingDashboardReload()) {
+            window.requestDashboardPoll?.();
+        }
     }
 };
-
 // Top challengers on the ended page (sibling of top-teams-display)
 function renderTopChallengers(topChallengers) {
     const chDiv = document.getElementById('top-challengers-display');
@@ -1862,7 +3011,7 @@ function renderInstructorChallenge(state) {
 
     const hands = state.challenge_hands || [];
     const challenges = state.active_challenges || [];
-    const counts = state.challenge_rating_counts || {};
+    const summaries = state.challenge_rating_summaries || {};
 
     // Render raised hands
     const handsDiv = document.getElementById('challenge-hands-list');
@@ -1877,8 +3026,10 @@ function renderInstructorChallenge(state) {
                 row.style.cssText = 'display:flex;align-items:center;gap:8px;margin:4px 0;';
                 row.innerHTML = `<span>${escapeHtml(h.student_name)} (${escapeHtml(h.student_team_name || '')})</span>`;
                 const btn = document.createElement('button');
-                btn.className = 'btn btn-sm btn-primary';
+                btn.className =
+                    'btn btn-sm btn-primary challenge-mutating-btn';
                 btn.textContent = 'Select as Challenger';
+                btn.disabled = ratingsSettling;
                 btn.addEventListener('click', () => selectChallenger(h.student_id));
                 row.appendChild(btn);
                 handsDiv.appendChild(row);
@@ -1894,16 +3045,23 @@ function renderInstructorChallenge(state) {
         } else {
             activeDiv.innerHTML = '';
             for (const ch of challenges) {
-                const count = counts[ch.challenge_key] || 0;
+                const summary = summaries[ch.challenge_key];
+                const submitted = Number(summary?.submitted_count) || 0;
+                const eligible = Number(summary?.eligible_count) || 0;
+                const ratingText =
+                    `${submitted} out of ${eligible} students voted`;
                 const row = document.createElement('div');
                 row.className = 'challenge-active-row';
-                row.style.cssText = 'display:flex;align-items:center;gap:8px;margin:4px 0;padding:4px 8px;background:var(--accent-bg);border-radius:6px;';
-                row.innerHTML = `<strong>Challenger ${ch.challenge_num}:</strong>
+                row.innerHTML = `<span class="challenge-active-details">
+                    <strong>Challenger ${ch.challenge_num}:</strong>
                     ${escapeHtml(ch.challenger_name)} (${escapeHtml(ch.challenger_team_name || '')})
-                    <span class="hint">— ${count} ratings</span>`;
+                    <span class="hint">${ratingText}</span>
+                </span>`;
                 const btn = document.createElement('button');
-                btn.className = 'btn btn-sm btn-danger';
+                btn.className =
+                    'btn btn-sm btn-danger challenge-mutating-btn';
                 btn.textContent = 'Clear';
+                btn.disabled = ratingsSettling;
                 btn.addEventListener('click', () => clearChallenger(ch.challenge_key));
                 row.appendChild(btn);
                 activeDiv.appendChild(row);
@@ -1913,31 +3071,68 @@ function renderInstructorChallenge(state) {
 }
 
 window.selectChallenger = async function(studentId) {
-    const payload = instructorStatePayload();
-    payload.student_id = studentId;
+    if (_instructorActionInFlight || ratingsSettlementBlocksAction()) return;
+    const payload = instructorStatePayload({
+        student_id: studentId
+    });
+    _instructorActionInFlight = true;
     try {
         const data = await postJSON('/api/select_challenger', payload);
         if (!data.success) {
-            showToast(data.error || 'Failed to select challenger', 'error');
+            showInstructorMutationError(
+                data,
+                'Failed to select challenger'
+            );
+        } else {
+            const ratingsClosed = data.challenge_ratings_open === false ||
+                (data.challenge_ratings_open == null &&
+                 lastReceivedState?.challenge_ratings_open === false &&
+                 !lastReceivedState?.poll_active);
+            if (ratingsClosed) {
+                showToast(
+                    'Challenger selected. Start Poll to collect ratings.',
+                    'warning'
+                );
+            }
+            window.instructorPollOnce?.();
         }
-    } catch (e) {
-        showToast('Network error', 'error');
+    } finally {
+        _instructorActionInFlight = false;
     }
 };
-
 window.clearChallenger = async function(challengeKey) {
-    const payload = instructorStatePayload();
-    payload.challenge_key = challengeKey;
+    if (_instructorActionInFlight || ratingsSettlementBlocksAction()) return;
+    const payload = instructorStatePayload({
+        challenge_key: challengeKey
+    });
+    _instructorActionInFlight = true;
     try {
-        const data = await postJSON('/api/clear_challenger', payload);
-        if (!data.success) {
-            showToast(data.error || 'Failed to clear challenger', 'error');
+        let data = await postJSON('/api/clear_challenger', payload);
+        if (data.requires_discard) {
+            const count = Number(
+                data.challenge_rating_count ?? data.rating_count
+            ) || 0;
+            if (!confirm(
+                    'This challenger has ' + count + ' submitted rating' +
+                    (count === 1 ? '' : 's') +
+                    '. Permanently discard them and clear the challenger?')) {
+                return;
+            }
+            data = await postJSON('/api/clear_challenger', {
+                ...payload,
+                discard_ratings: true
+            });
         }
-    } catch (e) {
-        showToast('Network error', 'error');
+        if (!data.success) {
+            showInstructorMutationError(
+                data,
+                'Failed to clear challenger'
+            );
+        }
+    } finally {
+        _instructorActionInFlight = false;
     }
 };
-
 if (instructor) {
     // Match the compact JSON representation used by poll responses before
     // comparing snapshots. Server-rendered attribute whitespace must not
@@ -2002,11 +3197,7 @@ if (instructor) {
                 instructor.dataset.sessionKey,
                 state.session_key
             ) ||
-            differsWhenPresent(
-                'poll_question_key',
-                instructor.dataset.pollQuestionKey,
-                state.poll_question_key
-            ) ||
+
             differsWhenPresent(
                 'discussion_week',
                 instructor.dataset.discussionWeek,
@@ -2027,7 +3218,9 @@ if (instructor) {
     function instructorPresentationChanged(state) {
         const normalized = value => value == null ? '' : String(value);
         return normalized(instructor.dataset.activeTeamId) !== normalized(state.active_team?.id) ||
-            normalized(instructor.dataset.activeQuestionId) !== normalized(state.active_question?.id);
+            normalized(instructor.dataset.activeQuestionId) !== normalized(state.active_question?.id) ||
+            normalized(instructor.dataset.pollQuestionKey) !==
+                normalized(state.poll_question_key);
     }
 
     // Swap the competition card between the idle block (team/question
@@ -2039,10 +3232,20 @@ if (instructor) {
         const idleBlock = document.getElementById('presentation-idle');
         if (!activeBlock || !idleBlock) return false;
         const isActive = Boolean(state.active_team && state.active_question);
+        const nextPresentationKey = state.poll_question_key == null
+            ? '' : String(state.poll_question_key);
+        const nextQuestionId = isActive ? state.active_question.id : null;
+        const nextQuestionRevision = isActive
+            ? (state.active_question.revision || null) : null;
+        const sameKnownQuestion = isActive &&
+            String(_instrKnownQuestionId ?? '') === String(nextQuestionId ?? '') &&
+            String(_instrKnownQuestionRevision ?? '') ===
+                String(nextQuestionRevision ?? '');
         activeBlock.style.display = isActive ? '' : 'none';
         idleBlock.style.display = isActive ? 'none' : '';
         instructor.dataset.activeTeamId = isActive ? String(state.active_team.id) : '';
         instructor.dataset.activeQuestionId = isActive ? String(state.active_question.id) : '';
+        instructor.dataset.pollQuestionKey = nextPresentationKey;
         if (isActive) {
             const teamName = document.getElementById('active-team-name');
             if (teamName) teamName.textContent = state.active_team.name || '';
@@ -2050,11 +3253,18 @@ if (instructor) {
             if (qText) qText.dataset.qnum = state.active_question.id;
             const pollCount = document.getElementById('poll-count');
             if (pollCount) pollCount.textContent = 'Loading rating activity...';
-            lastRenderedQuestionKey = null;
+            if (!sameKnownQuestion) {
+                lastRenderedQuestionKey = null;
+                _instrKnownQuestionId = null;
+                _instrKnownQuestionRevision = null;
+            }
         } else {
             stopCountdownTimer();
             stopPollGlide();
             setTimerExpired(false);
+            lastRenderedQuestionKey = null;
+            _instrKnownQuestionId = null;
+            _instrKnownQuestionRevision = null;
             markPresentedCompQuestionOptions(state.presentation_history);
         }
         return true;
@@ -2135,6 +3345,7 @@ if (instructor) {
             }
             _instrPollFailures = 0;
             const state = data.state;
+            applyRatingsSettlingState(state);
 
             if (state && instructorStructureChanged(state)) {
                 _instrPollStopped = true;
@@ -2164,8 +3375,34 @@ if (instructor) {
             if (participation) {
                 const count = Number(state.thumb_participant_count) || 0;
                 const eligible = Number(state.thumb_eligible_count) || 0;
-                const online = Number(state.thumb_online_eligible_count) || 0;
-                participation.textContent = `Recorded participants: ${count}. Eligible now: ${eligible}; online now: ${online}.`;
+                participation.textContent = `Thumb participation: ${count} out of ${eligible} eligible students participated.`;
+            }
+            const teamProgress = document.getElementById('thumb-team-progress');
+            if (teamProgress && Array.isArray(state.thumb_team_progress)) {
+                const signature = JSON.stringify(state.thumb_team_progress);
+                if (teamProgress.dataset.signature !== signature) {
+                    teamProgress.dataset.signature = signature;
+                    teamProgress.innerHTML = '';
+                    for (const [index, team] of state.thumb_team_progress.entries()) {
+                        const item = document.createElement('li');
+                        const teamName = team.team_name || `Team ${index + 1}`;
+                        const memberCount = Number(team.member_count) || 0;
+                        const eligibleCount = Number(team.eligible_count) || 0;
+                        if (memberCount === 0) {
+                            item.textContent = `${teamName}: No students`;
+                        } else if (eligibleCount <= 0) {
+                            item.textContent = `${teamName}: Not eligible`;
+                        } else {
+                            const thumbCount = Number(team.thumb_count) || 0;
+                            const participantCount = Number(team.participant_count) || 0;
+                            const thumbLabel = thumbCount === 1 ? 'thumb' : 'thumbs';
+                            const studentLabel = eligibleCount === 1 ? 'student' : 'students';
+                            item.textContent = `${teamName}: ${thumbCount} ${thumbLabel} | ${participantCount} of ${eligibleCount} ${studentLabel} participated`;
+                        }
+                        teamProgress.appendChild(item);
+                    }
+                    teamProgress.hidden = state.thumb_team_progress.length === 0;
+                }
             }
 
             updateCapacityStatus(state);
@@ -2197,8 +3434,8 @@ if (instructor) {
             // Skip the tbody re-render while a team-picker dropdown is open so
             // the picker isn't orphaned mid-click; retry on the next poll.
             if (document.getElementById('student-tbody') &&
-                    !document.querySelector('.team-picker') &&
-                    Date.now() - _lastStudentTableRefresh >= 10000) {
+                    !document.querySelector('.team-picker:not(.filter-picker)') &&
+                    Date.now() - _lastStudentTableRefresh >= 5000) {
                 _lastStudentTableRefresh = Date.now();
                 loadStudentTable();
             }
@@ -2210,20 +3447,8 @@ if (instructor) {
                 if (pollCount) {
                     const count = Number(state.poll_count) || 0;
                     const eligible = Number(state.poll_eligible_count) || 0;
-                    const online = Number(state.poll_online_eligible_count) || 0;
-                    pollCount.textContent = `Recorded ratings: ${count}. Eligible now: ${eligible}; online now: ${online}.`;
-                }
-                // Outstanding raters — helps the instructor decide whether to
-                // extend the window. Names only.
-                const nonRaters = document.getElementById('poll-non-raters');
-                if (nonRaters) {
-                    const names = Array.isArray(state.poll_non_raters) ? state.poll_non_raters : [];
-                    if (names.length && state.active_team && state.active_question) {
-                        nonRaters.innerHTML = `<strong>Still to rate:</strong> ${names.map(escapeHtmlValue).join(', ')}`;
-                        nonRaters.style.display = '';
-                    } else {
-                        nonRaters.style.display = 'none';
-                    }
+                    pollCount.textContent =
+                        `${count} out of ${eligible} students voted`;
                 }
                 const presentationIndex = document.getElementById('presentation-index');
                 if (presentationIndex) {
@@ -2283,7 +3508,7 @@ if (instructor) {
                 // Keep poll controls synchronized across instructor tabs.
                 const ps = document.getElementById('poll-status');
                 if (state.poll_active && Number(state.poll_remaining) > 0) {
-                    startPollGlide(state.poll_remaining, state.poll_duration || 30);
+                    startPollGlide(state.poll_remaining, state.poll_duration || 40);
                     if (ps) ps.style.display = 'flex';
                 } else {
                     stopPollGlide();
@@ -2540,7 +3765,7 @@ window.confirmModifyTeams = async function() {
 let _instructorActionInFlight = false;
 
 window.setPhase = async function(phase) {
-    if (_instructorActionInFlight) return;
+    if (_instructorActionInFlight || ratingsSettlementBlocksAction()) return;
     _instructorActionInFlight = true;
     try {
         const currentPhase = instructor?.dataset?.phase || '';
@@ -2607,16 +3832,26 @@ function initStudentPageSizeSelector() {
     pag.parentElement.insertBefore(wrapper, pag);
 }
 
+function setTeamFilterExpanded(expanded) {
+    const menu = document.getElementById('team-filter-menu');
+    const trigger = document.getElementById('team-filter-trigger');
+    if (!menu) return false;
+    const isOpen = Boolean(expanded);
+    menu.style.display = isOpen ? 'block' : 'none';
+    if (trigger) trigger.setAttribute('aria-expanded', isOpen ? 'true' : 'false');
+    return isOpen;
+}
+
 window.toggleTeamFilter = function(e) {
     e.stopPropagation();
     const menu = document.getElementById('team-filter-menu');
     if (!menu) return;
-    const isOpen = menu.style.display === 'block';
-    menu.style.display = isOpen ? 'none' : 'block';
-    if (!isOpen) {
+    const willOpen = menu.style.display !== 'block';
+    setTeamFilterExpanded(willOpen);
+    if (willOpen) {
         setTimeout(() => {
             document.addEventListener('click', function close() {
-                menu.style.display = 'none';
+                setTeamFilterExpanded(false);
                 document.removeEventListener('click', close);
             }, { once: true });
         }, 0);
@@ -2626,9 +3861,17 @@ window.toggleTeamFilter = function(e) {
 window.setTeamFilter = function(val, label) {
     teamFilterVal = val;
     document.getElementById('team-filter-label').textContent = label;
-    document.getElementById('team-filter-menu').style.display = 'none';
+    setTeamFilterExpanded(false);
+    document.getElementById('team-filter-trigger')?.focus();
     studentPage = 1;
     loadStudentTable();
+};
+
+window.teamFilterOptionKeydown = function(event, val, label) {
+    if (event.key !== 'Enter' && event.key !== ' ') return;
+    event.preventDefault();
+    event.stopPropagation();
+    window.setTeamFilter(val, label);
 };
 
 let _searchDebounce = null;
@@ -2692,7 +3935,11 @@ window.loadStudentTable = async function() {
     }
     window._lastTeams = data.teams || [];
     const instructorPage = document.querySelector('.instructor[data-student-count]');
-    if (instructorPage) instructorPage.dataset.studentCount = String(data.total || 0);
+    if (instructorPage && data.course_total != null) {
+        instructorPage.dataset.studentCount = String(
+            Math.max(0, Number(data.course_total) || 0)
+        );
+    }
 
     const tbody = document.getElementById('student-tbody');
     if (!tbody) return;
@@ -2800,25 +4047,25 @@ window.toggleTeamPicker = function(e, studentId) {
     }, 0);
 };
 
-let rosterMutationInProgress = false;
-
 window.pickTeam = async function(studentId, teamId) {
-    if (rosterMutationInProgress) return;
-    rosterMutationInProgress = true;
-    document.querySelectorAll('.team-picker').forEach(el => el.remove());
+    if (!beginRosterMutation()) return;
+    document.querySelectorAll('.team-picker:not(.filter-picker)').forEach(
+        el => el.remove()
+    );
     try {
         const data = await postJSON('/api/assign_student', instructorStatePayload({
             student_id: studentId,
             team_id: teamId
         }));
         if (data && data.success) {
+            applyRosterMutationVersion(data);
             showToast('Team assignment updated', 'success');
             refreshRosterInPlace();
         } else {
             showInstructorMutationError(data, 'Failed to assign student');
         }
     } finally {
-        rosterMutationInProgress = false;
+        endRosterMutation();
     }
 };
 
@@ -2827,6 +4074,7 @@ window.addStudent = async function(btn) {
     const name = document.getElementById('new-name').value.trim();
     const pin = document.getElementById('new-pin').value.trim();
     if (!id || !pin) { showToast('Student ID and PIN are required', 'warning'); return; }
+    if (!beginRosterMutation()) return;
     if (btn) btn.disabled = true;
     try {
         const data = await postJSON('/api/add_student', instructorStatePayload({
@@ -2835,6 +4083,7 @@ window.addStudent = async function(btn) {
             pin
         }));
         if (data.success) {
+            applyRosterMutationVersion(data);
             showToast(data.updated ? 'Student info updated' : 'Student added', 'success');
             document.getElementById('new-student-id').value = '';
             document.getElementById('new-name').value = '';
@@ -2851,6 +4100,7 @@ window.addStudent = async function(btn) {
             showInstructorMutationError(data, 'Failed to add student');
         }
     } finally {
+        endRosterMutation();
         if (btn) btn.disabled = false;
     }
 };
@@ -2902,16 +4152,9 @@ async function initWeekSelector() {
         if (weeks.length > 0) {
             setupSel.disabled = false;
             setupSel.innerHTML = weeks.map(w => {
-                let status = '';
-                if (!w.discussion_ready && !w.presentation_ready) {
-                    status = ' (not ready)';
-                } else if (!w.discussion_ready) {
-                    status = ' (discussion not ready)';
-                } else if (!w.presentation_ready) {
-                    status = ' (discussion only; presentation unavailable)';
-                }
+                const status = w.ready ? '' : ' (not ready)';
                 const selected = w.num === data.current_week ? 'selected' : '';
-                const disabled = w.discussion_ready ? '' : 'disabled';
+                const disabled = w.ready ? '' : 'disabled';
                 const issue = Array.isArray(w.issues) && w.issues[0]
                     ? ` title="${escapeAttrValue(w.issues[0])}"`
                     : '';
@@ -3050,11 +4293,13 @@ window.setDiscussionWeek = async function() {
         week: parseInt(week)
     }));
     if (data && data.success) {
-        const count = data.question_count;
-        const detail = data.presentation_ready
-            ? `${count != null ? ` (${count} presentation choices synced)` : ''}`
-            : ' (discussion ready; presentation questions unavailable)';
-        showToast(`Week ${week} selected${detail}`, 'success');
+        const count = Number(data.question_count);
+        const detail = Number.isFinite(count)
+            ? ` with ${count} questions` : '';
+        showToast(
+            `Week ${week} selected${detail} for Discussion and Presentation`,
+            'success'
+        );
         window.setTimeout(() => window.location.reload(), 250);
     } else {
         select.value = instructor?.dataset?.discussionWeek || '';
@@ -3149,7 +4394,7 @@ window.resetTimer = async function() {
 };
 
 window.nextPresentation = async function() {
-    if (_instructorActionInFlight) return;
+    if (_instructorActionInFlight || ratingsSettlementBlocksAction()) return;
     _instructorActionInFlight = true;
     try {
         const data = await postJSON('/api/next_presentation', instructorStatePayload());
@@ -3168,17 +4413,42 @@ window.nextPresentation = async function() {
 };
 
 window.cancelPresentation = async function() {
-    if (_instructorActionInFlight) return;
+    if (_instructorActionInFlight || ratingsSettlementBlocksAction()) return;
     if (!confirm('Cancel this mistaken presentation without adding it to history?')) return;
     _instructorActionInFlight = true;
     try {
         let data = await postJSON('/api/cancel_presentation', instructorStatePayload());
         if (data.requires_discard) {
-            const count = Number(data.rating_count) || 0;
-            if (!confirm(`This will permanently discard ${count} submitted rating${count === 1 ? '' : 's'}. Continue?`)) return;
-            data = await postJSON('/api/cancel_presentation', instructorStatePayload({
-                discard_ratings: true
-            }));
+            const hasDetailedCounts =
+                data.presentation_rating_count != null ||
+                data.challenge_rating_count != null;
+            const presentationCount = hasDetailedCounts
+                ? (Number(data.presentation_rating_count) || 0)
+                : (Number(data.rating_count) || 0);
+            const challengeCount =
+                Number(data.challenge_rating_count) || 0;
+            const details = [];
+            if (presentationCount > 0) {
+                details.push(
+                    presentationCount + ' presentation rating' +
+                    (presentationCount === 1 ? '' : 's')
+                );
+            }
+            if (challengeCount > 0) {
+                details.push(
+                    challengeCount + ' challenge rating' +
+                    (challengeCount === 1 ? '' : 's')
+                );
+            }
+            const description = details.length
+                ? details.join(' and ') : 'the submitted ratings';
+            if (!confirm(
+                    'This will permanently discard ' + description +
+                    '. Continue?')) return;
+            data = await postJSON(
+                '/api/cancel_presentation',
+                instructorStatePayload({ discard_ratings: true })
+            );
         }
         if (data.success) {
             if (typeof window.instructorPollOnce === 'function') {
@@ -3210,7 +4480,7 @@ function startPollGlide(remainingSec, durationSec) {
     const glide = btn.querySelector('.btn-glide');
     const label = btn.querySelector('.btn-label');
     if (!glide) return;
-    const duration = Math.max(1, Number(durationSec) || 30);
+    const duration = Math.max(1, Number(durationSec) || 40);
     pollGlideAnchor = {
         remaining: Math.max(0, Number(remainingSec) || 0),
         duration,
@@ -3237,13 +4507,18 @@ function startPollGlide(remainingSec, durationSec) {
 
         if (remaining <= 0) {
             btn.classList.remove('gliding');
-            btn.disabled = false;
+            btn.disabled = ratingsSettling;
             const nextButton = document.getElementById('btn-next');
-            if (nextButton) nextButton.disabled = false;
+            if (nextButton) nextButton.disabled = ratingsSettling;
             glide.style.width = '0%';
             if (label) label.textContent = '⭐ Start Poll';
             if (pollGlideTimeout) { clearTimeout(pollGlideTimeout); pollGlideTimeout = null; }
             pollGlideAnchor = null;
+            applyRatingsSettlingState({
+                ratings_settling: true,
+                ratings_settling_remaining: 3
+            });
+            window.instructorPollOnce?.();
             return;
         }
         pollGlideTimeout = setTimeout(step, 200);
@@ -3257,9 +4532,9 @@ function stopPollGlide() {
     const glide = btn.querySelector('.btn-glide');
     const label = btn.querySelector('.btn-label');
     btn.classList.remove('gliding');
-    btn.disabled = false;
+    btn.disabled = ratingsSettling;
     const nextButton = document.getElementById('btn-next');
-    if (nextButton) nextButton.disabled = false;
+    if (nextButton) nextButton.disabled = ratingsSettling;
     if (glide) glide.style.width = '0%';
     if (label) label.textContent = '⭐ Start Poll';
     if (pollGlideTimeout) { clearTimeout(pollGlideTimeout); pollGlideTimeout = null; }
@@ -3267,7 +4542,7 @@ function stopPollGlide() {
 }
 
 /**
- * Student: pulsing countdown badge on the grading card during the 30s poll.
+ * Student: pulsing countdown badge on the grading card during the configured poll.
  */
 let pollPulseInterval = null;
 let pollPulseAnchor = null;
@@ -3331,29 +4606,51 @@ function stopPollPulse() {
 // ===== POLL API =====
 
 window.startPoll = async function() {
-    const btn = document.getElementById('btn-start-poll');
-    if (btn && btn.classList.contains('gliding')) return; // already running
-    const data = await postJSON('/api/start_poll', instructorStatePayload());
-    if (data.success && data.poll_started_at) {
-        startPollGlide(data.poll_remaining, data.poll_duration || 30);
-        // Reveal the Stop-Poll panel so the instructor can cancel early
-        const ps = document.getElementById('poll-status');
-        if (ps) ps.style.display = 'flex';
-    } else {
-        showInstructorMutationError(data, 'Failed to start poll');
+    if (_instructorActionInFlight || ratingsSettlementBlocksAction()) return;
+    const button = document.getElementById('btn-start-poll');
+    if (button?.classList.contains('gliding')) return;
+    _instructorActionInFlight = true;
+    try {
+        const data = await postJSON(
+            '/api/start_poll',
+            instructorStatePayload()
+        );
+        if (data.success && data.poll_started_at) {
+            startPollGlide(
+                data.poll_remaining,
+                data.poll_duration || 40
+            );
+            const status = document.getElementById('poll-status');
+            if (status) status.style.display = 'flex';
+        } else {
+            showInstructorMutationError(data, 'Failed to start poll');
+        }
+    } finally {
+        _instructorActionInFlight = false;
     }
 };
 
 window.stopPoll = async function() {
-    const data = await postJSON('/api/stop_poll', instructorStatePayload());
-    if (data.success) {
-        stopPollGlide();
-    } else {
-        showInstructorMutationError(data, 'Failed to stop poll');
+    if (_instructorActionInFlight || ratingsSettlementBlocksAction()) return;
+    _instructorActionInFlight = true;
+    try {
+        const data = await postJSON(
+            '/api/stop_poll',
+            instructorStatePayload()
+        );
+        if (data.success) {
+            applyRatingsSettlingState(data);
+            stopPollGlide();
+            window.instructorPollOnce?.();
+        } else {
+            showInstructorMutationError(data, 'Failed to stop poll');
+        }
+    } finally {
+        _instructorActionInFlight = false;
     }
 };
-
 window.submitRating = async function() {
+    if (ratingSubmissionInProgress) return;
     if (!activePollOpen || !lastRatedPresentationKey) {
         showToast('The rating window is closed', 'warning');
         return;
@@ -3362,48 +4659,87 @@ window.submitRating = async function() {
         showToast('Please rate both questions', 'warning');
         return;
     }
-    const selectionSnapshot = { q1: pollSelections.q1, q2: pollSelections.q2 };
+    const selectionSnapshot = {
+        q1: pollSelections.q1,
+        q2: pollSelections.q2
+    };
     const presentationKey = lastRatedPresentationKey;
     const btn = document.getElementById('btn-submit-rating');
+    const retryingUnconfirmed = Boolean(
+        unconfirmedPresentationRating &&
+        unconfirmedPresentationRating.presentationKey === presentationKey);
     ++_responseRequestId;
     ratingSubmissionInProgress = true;
+    beginStudentVote();
     updateRatingControlAvailability();
     if (btn) btn.textContent = 'Submitting...';
+
+    let success = false;
+    let unconfirmed = false;
+    let failureMessage = 'Vote not submitted. Please try again.';
     try {
         const data = await postJSON('/api/submit_rating', {
             q1_developed: selectionSnapshot.q1,
             q2_easy: selectionSnapshot.q2,
             presentation_key: presentationKey
-        });
-        if (data && data.success) {
-            ++_responseRequestId;
+        }, VOTE_RETRY_OPTIONS);
+        success = data?.success === true;
+        ++_responseRequestId;
+        if (success) {
+            unconfirmedPresentationRating = null;
+            if (retryingUnconfirmed &&
+                    _unconfirmedChallengeRatings.size === 0 &&
+                    _unconfirmedThumbVotes.size === 0) {
+                _studentVoteBatchFailure = null;
+                _studentVoteKnownFailure = false;
+            }
             showToast('Rating submitted', 'success');
-            savedPollSelections = { ...selectionSnapshot };
-            ratingDraftDirty = false;
-            responseNeedsRefresh = false;
             if (presentationKey === lastRatedPresentationKey) {
+                savedPollSelections = { ...selectionSnapshot };
+                ratingDraftDirty = false;
                 showCurrentRating(selectionSnapshot);
             }
         } else {
-            ++_responseRequestId;
             responseNeedsRefresh = true;
+            if (data?._network_error) {
+                unconfirmed = true;
+                unconfirmedPresentationRating = {
+                    presentationKey,
+                    q1: selectionSnapshot.q1,
+                    q2: selectionSnapshot.q2
+                };
+                failureMessage =
+                    'Could not confirm your vote. Rechecking the saved response...';
+            } else {
+                failureMessage = data?.error || failureMessage;
+            }
             showRatingNotSaved();
-            showToast(data?.error || 'Failed to submit rating', 'error');
-            window.requestDashboardPoll?.();
+            showToast(failureMessage, 'error');
         }
-    } catch (e) {
+    } catch (error) {
         ++_responseRequestId;
         responseNeedsRefresh = true;
         showRatingNotSaved();
-        showToast('Network error. Please try again.', 'error');
-        window.requestDashboardPoll?.();
+        showToast(failureMessage, 'error');
     } finally {
         ratingSubmissionInProgress = false;
+        responseNeedsRefresh = responseNeedsRefresh ||
+            Boolean(unconfirmedPresentationRating) ||
+            _unconfirmedChallengeRatings.size > 0 ||
+            _unconfirmedThumbVotes.size > 0;
+        finishStudentVote(
+            success,
+            'Vote submitted',
+            failureMessage,
+            unconfirmed
+        );
         updateRatingControlAvailability();
         if (btn) btn.textContent = 'Submit Rating';
+        if (!completePendingDashboardReload() && responseNeedsRefresh) {
+            window.requestDashboardPoll?.();
+        }
     }
 };
-
 function showCurrentRating(values) {
     const status = document.getElementById('rating-status');
     if (!status) return;
@@ -3446,7 +4782,7 @@ function showRatingNotSaved() {
 
 function updateRatingControlAvailability() {
     const disabled = !activePollOpen || ratingSubmissionInProgress;
-    document.querySelectorAll('.star-row .star').forEach(star => {
+    document.querySelectorAll('#poll-section .star-row .star').forEach(star => {
         star.disabled = disabled;
     });
     const button = document.getElementById('btn-submit-rating');
@@ -3474,13 +4810,13 @@ function initStarRows() {
                 if (star.disabled) return;
                 ++_responseRequestId;
                 responseNeedsRefresh = true;
-                ratingDraftDirty = true;
                 const val = parseInt(star.dataset.value, 10);
                 pollSelections[question] = val;
                 setStarRowValue(question, val);
-                if (savedPollSelections &&
-                        pollSelections.q1 === savedPollSelections.q1 &&
-                        pollSelections.q2 === savedPollSelections.q2) {
+                ratingDraftDirty = !savedPollSelections ||
+                    pollSelections.q1 !== savedPollSelections.q1 ||
+                    pollSelections.q2 !== savedPollSelections.q2;
+                if (!ratingDraftDirty && savedPollSelections) {
                     showCurrentRating(savedPollSelections);
                 } else {
                     showRatingDraftStatus();
@@ -3494,15 +4830,20 @@ function initStarRows() {
 
 window.unassignAll = async function(btn) {
     if (!confirm('Clear all team assignments?')) return;
+    if (!beginRosterMutation()) return;
     if (btn) btn.disabled = true;
-    const data = await postJSON('/api/unassign_all', instructorStatePayload());
-    if (data.success) {
-        showToast('All team assignments cleared', 'warning');
+    try {
+        const data = await postJSON('/api/unassign_all', instructorStatePayload());
+        if (data.success) {
+            applyRosterMutationVersion(data);
+            showToast('All team assignments cleared', 'warning');
+            refreshRosterInPlace();
+        } else {
+            showInstructorMutationError(data, 'Failed to clear team assignments');
+        }
+    } finally {
+        endRosterMutation();
         if (btn) btn.disabled = false;
-        refreshRosterInPlace();
-    } else {
-        if (btn) btn.disabled = false;
-        showInstructorMutationError(data, 'Failed to clear team assignments');
     }
 };
 
@@ -3789,19 +5130,27 @@ window.deleteAppendixQuestion = async function(button) {
 
 window.removeStudent = async function(studentDbId, btn) {
     if (!confirm('Remove this student?')) return;
+    if (!beginRosterMutation()) return;
     if (btn) btn.disabled = true;
-    const data = await deleteJSON(
-        '/api/remove_student/' + studentDbId,
-        instructorStatePayload()
-    );
-    if (data.success) {
-        showToast('Student removed');
-        instructor.dataset.studentCount =
-            String(Math.max(0, (Number(instructor.dataset.studentCount) || 0) - 1));
-        refreshRosterInPlace();
-    } else {
+    try {
+        const data = await deleteJSON(
+            '/api/remove_student/' + studentDbId,
+            instructorStatePayload()
+        );
+        if (data.success) {
+            applyRosterMutationVersion(data);
+            showToast('Student removed');
+            instructor.dataset.studentCount = String(Math.max(
+                0,
+                (Number(instructor.dataset.studentCount) || 0) - 1
+            ));
+            refreshRosterInPlace();
+        } else {
+            showInstructorMutationError(data, 'Failed to remove student');
+        }
+    } finally {
+        endRosterMutation();
         if (btn) btn.disabled = false;
-        showInstructorMutationError(data, 'Failed to remove student');
     }
 };
 
@@ -3935,7 +5284,7 @@ if (instructorEl) {
     const pollStarted = instructorEl.dataset.pollStarted;
     const pollActive = instructorEl.dataset.pollActive === '1';
     const pollRemaining = Number(instructorEl.dataset.pollRemaining) || 0;
-    const POLL_DURATION = parseInt(instructorEl.dataset.pollDuration || '30', 10);
+    const POLL_DURATION = parseInt(instructorEl.dataset.pollDuration || '40', 10);
     if (pollActive && pollStarted && pollRemaining > 0) {
         startPollGlide(pollRemaining, POLL_DURATION);
         if (pollStatus) pollStatus.style.display = 'flex';
@@ -3943,6 +5292,12 @@ if (instructorEl) {
         stopPollGlide();
         if (pollStatus) pollStatus.style.display = 'none';
     }
+    applyRatingsSettlingState({
+        ratings_settling:
+            instructorEl.dataset.ratingsSettling === '1',
+        ratings_settling_remaining:
+            Number(instructorEl.dataset.ratingsSettlingRemaining) || 0
+    });
     // History
     renderHistory();
 }

@@ -770,6 +770,82 @@ input:focus, textarea:focus {
     box-shadow: 0 0 0 2px rgba(79, 70, 229, 0.12);
 }
 
+.weekly-question-upload-form {
+    align-items: flex-end;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    margin-top: 16px;
+}
+.weekly-question-upload-field {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+.weekly-question-upload-field label {
+    color: var(--text-muted);
+    font-size: 0.85rem;
+    font-weight: 600;
+}
+.weekly-question-week-field { flex: 0 0 110px; }
+.weekly-question-file-field {
+    flex: 1 1 280px;
+    min-width: 220px;
+}
+.weekly-question-upload-field input {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    color: var(--text);
+    font-family: inherit;
+    font-size: 0.9rem;
+    min-height: 38px;
+    padding: 8px 10px;
+    width: 100%;
+}
+.weekly-question-upload-field input[type="file"] {
+    padding: 6px 8px;
+}
+.weekly-question-upload-field input[type="file"]::file-selector-button {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--text);
+    cursor: pointer;
+    font-family: inherit;
+    margin-right: 10px;
+    padding: 5px 9px;
+}
+.weekly-question-upload-preview {
+    background: var(--accent-bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    margin-top: 16px;
+    padding: 16px;
+}
+.weekly-question-upload-preview[hidden] { display: none; }
+.weekly-question-upload-preview h3 { margin-top: 0; }
+.weekly-question-upload-preview ol {
+    max-height: 240px;
+    overflow-y: auto;
+    padding-left: 28px;
+}
+.weekly-question-replace-warning {
+    color: var(--error-text);
+    font-weight: 600;
+}
+
+@media (max-width: 600px) {
+    .weekly-question-upload-form { align-items: stretch; }
+    .weekly-question-week-field,
+    .weekly-question-file-field { flex-basis: 100%; }
+    #btn-preview-question-upload { width: 100%; }
+    .weekly-question-upload-preview .modal-actions {
+        flex-direction: column-reverse;
+    }
+    .weekly-question-upload-preview .modal-actions .btn { width: 100%; }
+}
+
 .filter-picker {
     position: absolute;
     top: 100%;
@@ -897,6 +973,7 @@ input:focus, textarea:focus {
     font-weight: 500;
 }
 .flash-error { background: var(--error-soft); color: var(--error-text); border: 1px solid var(--error-border); }
+.flash-warning { background: var(--warning-soft); color: var(--warning-text); border: 1px solid var(--warning-border); }
 .flash-success { background: var(--success-soft); color: var(--success-text); border: 1px solid var(--success-border); }
 
 @media (max-width: 640px) {
@@ -1890,6 +1967,56 @@ html.light .student-timer {
     border-color: var(--primary-solid);
 }
 
+/* Persistent confirmation for student votes and instructor writes. */
+.request-progress-status {
+    position: fixed;
+    right: 24px;
+    bottom: 24px;
+    z-index: 9998;
+    max-width: min(360px, calc(100vw - 32px));
+    padding: 10px 16px;
+    border: 1px solid var(--border);
+    border-left: 4px solid var(--primary);
+    border-radius: 8px;
+    background: var(--surface);
+    color: var(--text);
+    font-size: 0.9rem;
+    font-weight: 700;
+    box-shadow: var(--shadow-lg);
+    pointer-events: none;
+}
+.request-progress-status:not([data-visible="true"]) {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+}
+.request-progress-status[data-state="submitting"],
+.request-progress-status[data-state="saving"] {
+    border-left-color: var(--warning);
+}
+.request-progress-status[data-state="submitted"],
+.request-progress-status[data-state="saved"] {
+    border-left-color: var(--success);
+    color: var(--success-text);
+}
+.request-progress-status[data-state="error"] {
+    border-left-color: var(--danger);
+    color: var(--error-text);
+}
+@media (max-width: 600px) {
+    .request-progress-status {
+        right: 12px;
+        bottom: 12px;
+        max-width: calc(100vw - 24px);
+    }
+}
+
 /* ===== TOAST NOTIFICATIONS ===== */
 .toast-container {
     position: fixed;
@@ -1959,6 +2086,22 @@ html.light .student-timer {
 .roster-replace-warning { font-weight: 600; }
 .capacity-summary,
 .participation-count { margin: 12px 0 0; color: var(--text-muted); }
+
+.thumb-team-progress {
+    display: grid;
+    gap: 4px;
+    list-style: none;
+    margin: 8px 0 0;
+    padding: 0;
+}
+.thumb-team-progress[hidden] { display: none; }
+.thumb-team-progress li {
+    background: var(--accent-bg);
+    border-radius: 6px;
+    color: var(--text-muted);
+    font-size: 0.9rem;
+    padding: 5px 8px;
+}
 .capacity-summary.capacity-warning,
 .capacity-summary.capacity-danger {
     border: 1px solid;
@@ -2062,15 +2205,6 @@ html.light .student-timer {
     to   { box-shadow: 0 0 0 5px rgba(245, 158, 11, 0.30); }
 }
 
-/* ===== Instructor: outstanding raters during a poll ===== */
-.poll-non-raters {
-    margin: 8px 0 0;
-    color: var(--text-muted);
-    font-size: 0.88rem;
-    line-height: 1.5;
-}
-.poll-non-raters strong { color: var(--text); font-weight: 600; }
-
 /* Respect reduced-motion preference: effectively disables all animations
    and transitions for users who request it. */
 @media (prefers-reduced-motion: reduce) {
@@ -2115,15 +2249,63 @@ html.light .student-timer {
     align-items: center;
     gap: 8px;
     margin-top: 8px;
+    flex-wrap: wrap;
 }
 .challenge-stars .star {
     font-size: 1.3rem;
 }
+.challenge-rating-status {
+    flex-basis: 100%;
+    min-height: 1.2em;
+    color: var(--text-muted);
+    font-size: 0.85rem;
+    font-weight: 600;
+}
+.challenge-rating-status[data-state="submitting"],
+.challenge-rating-status[data-state="draft"] {
+    color: var(--warning-text);
+}
+.challenge-rating-status[data-state="submitted"] {
+    color: var(--success-text);
+}
+.challenge-rating-status[data-state="error"] {
+    color: var(--error-text);
+}
+.ratings-settling-status {
+    margin: 12px 0 0;
+    padding: 8px 12px;
+    border: 1px solid var(--warning);
+    border-radius: 6px;
+    background: var(--warning-bg);
+    color: var(--warning-text);
+    font-weight: 700;
+}
+.ratings-settling-status[data-state="saved"] {
+    border-color: var(--success);
+    color: var(--success-text);
+}
+.ratings-settling-status[hidden] { display: none; }
 .challenge-instructor-panel {
     border-top: 1px solid var(--border);
     padding-top: 12px;
 }
-.challenge-hand-row,
-.challenge-active-row {
+.challenge-hand-row {
     padding: 6px 0;
+}
+.challenge-active-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: 4px 0;
+    padding: 4px 8px;
+    background: var(--accent-bg);
+    border-radius: 6px;
+}
+.challenge-active-details {
+    flex: 1;
+    min-width: 0;
+}
+.challenge-active-row .challenge-mutating-btn {
+    flex: 0 0 auto;
+    margin-left: auto;
 }
