@@ -3,7 +3,7 @@ name: Machine Learning in Data Science
 url: https://teazrq.github.io/stat546/index.html
 code: STAT 546
 semester: Fall 2026
-active: false
+active: true
 team_pool_size: 20
 max_teams: 6
 max_members_per_team: 10
