@@ -43,6 +43,11 @@ except ImportError as exc:  # pragma: no cover
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from database import upgrade_schema_connection
+
 SLUG = "simulation"
 INSTRUCTOR_USERNAME = "sim-instructor"
 INSTRUCTOR_PIN = "9999"
@@ -290,6 +295,7 @@ class ClassroomSimulator:
             db.executescript(
                 (PROJECT_ROOT / "popping.sql").read_text(encoding="utf-8")
             )
+            upgrade_schema_connection(db)
             instructor_id = db.execute(
                 "INSERT INTO instructors (username, name, pin) VALUES (?, ?, ?)",
                 (INSTRUCTOR_USERNAME, "Simulation Instructor", INSTRUCTOR_PIN),

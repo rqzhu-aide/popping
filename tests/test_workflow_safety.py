@@ -5871,7 +5871,12 @@ def test_healthz_checks_active_course_storage(course_env):
     client = app_module.app.test_client()
     healthy = client.get("/healthz")
     assert healthy.status_code == 200
-    assert healthy.get_json() == {"status": "ok", "courses_checked": 1}
+    assert healthy.get_json() == {
+        "status": "ok",
+        "courses_checked": 1,
+        "website_version": "v1.0.0",
+        "database_schema_version": "v1.0.0",
+    }
 
     offline_path = Path(str(course_env["db_path"]) + ".offline")
     Path(course_env["db_path"]).replace(offline_path)

@@ -36,6 +36,11 @@ import yaml
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from database import upgrade_schema_connection
+
 SLUG = "loadtest"
 INSTRUCTOR_USERNAME = "load-instructor"
 INSTRUCTOR_PIN = "9999"
@@ -274,6 +279,7 @@ class ClassroomLoadTest:
         db.execute("PRAGMA foreign_keys=ON")
         db.execute("PRAGMA journal_mode=WAL")
         db.executescript((PROJECT_ROOT / "popping.sql").read_text(encoding="utf-8"))
+        upgrade_schema_connection(db)
         instructor_id = db.execute(
             "INSERT INTO instructors (username, name, pin) VALUES (?, ?, ?)",
             (INSTRUCTOR_USERNAME, "Load Test Instructor", INSTRUCTOR_PIN),

@@ -17,11 +17,33 @@ import zipfile
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from versioning import (  # noqa: E402
+    APP_VERSION,
+    BASELINE_DATA_VERSION,
+    BASELINE_SCHEMA_VERSION,
+    EXPORT_FORMAT_VERSION,
+    parse_version,
+    public_version,
+)
+
 SLUG_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 BUNDLE_FORMAT = "popping-course-backup-v1"
 MANIFEST_NAME = "manifest.json"
 DATABASE_NAME = "popping.db"
 PERSISTENT_DIRECTORIES = ("questions", "appendix")
+VERSIONED_DATA_TABLES = (
+    "teammate_thumbs",
+    "presentation_ratings",
+    "challenge_rounds",
+    "challenge_ratings",
+)
+_SCHEMA_LEDGER_COLUMNS = {
+    "id", "schema_version", "applied_by_app_version", "applied_at",
+}
+
 DEFAULT_LOCK_TIMEOUT_SECONDS = 30.0
 
 
@@ -101,6 +123,177 @@ def _database_course_slug(path):
     if not row or not row[0]:
         raise BackupError("SQLite snapshot has no course record")
     return str(row[0])
+
+
+def _manifest_public_version(value, field_name):
+    """Validate one public semantic version from a backup manifest."""
+    if not isinstance(value, str) or not value.startswith("v"):
+        raise BackupError(f"Backup manifest has no valid {field_name}")
+    try:
+        return public_version(value[1:])
+    except ValueError as exc:
+        raise BackupError(
+            f"Backup manifest has no valid {field_name}"
+        ) from exc
+
+
+def _database_schema_version(path):
+    """Return the schema version recorded by the archived database itself."""
+    uri = Path(path).resolve().as_uri() + "?mode=ro"
+    try:
+        with closing(sqlite3.connect(uri, uri=True)) as db:
+            has_ledger = db.execute(
+                """SELECT 1 FROM sqlite_master
+                   WHERE type = 'table' AND name = 'schema_migrations'"""
+            ).fetchone()
+            if has_ledger is None:
+                return public_version(BASELINE_SCHEMA_VERSION)
+
+            columns = {
+                row[1] for row in db.execute(
+                    "PRAGMA table_info(schema_migrations)"
+                )
+            }
+            if not _SCHEMA_LEDGER_COLUMNS.issubset(columns):
+                raise BackupError(
+                    "Database schema migration ledger is malformed"
+                )
+            rows = db.execute(
+                """SELECT schema_version, applied_by_app_version
+                   FROM schema_migrations ORDER BY id"""
+            ).fetchall()
+            if not rows:
+                raise BackupError("Database schema migration ledger is empty")
+
+            previous = None
+            latest = None
+            for schema_version, app_version in rows:
+                try:
+                    parsed = parse_version(schema_version)
+                    parse_version(app_version)
+                except (TypeError, ValueError) as exc:
+                    raise BackupError(
+                        "Database schema migration ledger contains an invalid "
+                        "version"
+                    ) from exc
+                if parsed[2] != 0:
+                    raise BackupError(
+                        "Database schema migration ledger contains a schema "
+                        "version with a nonzero patch"
+                    )
+                if previous is not None and parsed <= previous:
+                    raise BackupError(
+                        "Database schema migration ledger is not strictly "
+                        "increasing"
+                    )
+                previous = parsed
+                latest = schema_version
+    except BackupError:
+        raise
+    except sqlite3.Error as exc:
+        raise BackupError(
+            f"Could not inspect SQLite schema version: {exc}"
+        ) from exc
+    return public_version(latest)
+
+
+def _database_data_inventory(path):
+    """Return classified data versions and whether raw data is unclassified.
+
+    Pre-versioned tables, rows, and presentation-history entries are the
+    declared v1.0.0 baseline. Malformed durable version strings remain intact
+    in the snapshot, are excluded from the semantic version list, and set the
+    unclassified-data flag.
+    """
+    uri = Path(path).resolve().as_uri() + "?mode=ro"
+    versions = set()
+    contains_unclassified_data = False
+    try:
+        with closing(sqlite3.connect(uri, uri=True)) as db:
+            tables = {
+                row[0] for row in db.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                )
+            }
+            for table in VERSIONED_DATA_TABLES:
+                if table not in tables:
+                    continue
+                has_rows = db.execute(
+                    f"SELECT 1 FROM {table} LIMIT 1"
+                ).fetchone()
+                if has_rows is None:
+                    continue
+                columns = {
+                    row[1] for row in db.execute(f"PRAGMA table_info({table})")
+                }
+                if "data_version" not in columns:
+                    versions.add(BASELINE_DATA_VERSION)
+                    continue
+                for row in db.execute(
+                    f"SELECT DISTINCT data_version FROM {table}"
+                ):
+                    value = row[0]
+                    if value is None:
+                        value = BASELINE_DATA_VERSION
+                    try:
+                        public_version(value)
+                    except (TypeError, ValueError):
+                        contains_unclassified_data = True
+                        continue
+                    versions.add(value)
+
+            if "course_state" in tables:
+                state_columns = {
+                    row[1] for row in db.execute(
+                        "PRAGMA table_info(course_state)"
+                    )
+                }
+                if "presentation_history" in state_columns:
+                    histories = db.execute(
+                        "SELECT presentation_history FROM course_state"
+                    ).fetchall()
+                    for (raw_history,) in histories:
+                        if raw_history is None or not str(raw_history).strip():
+                            continue
+                        try:
+                            history = json.loads(raw_history)
+                        except (TypeError, ValueError):
+                            contains_unclassified_data = True
+                            continue
+                        if not isinstance(history, list):
+                            contains_unclassified_data = True
+                            continue
+                        for item in history:
+                            if not isinstance(item, dict):
+                                contains_unclassified_data = True
+                                continue
+                            if item.get("data_version") is None:
+                                versions.add(BASELINE_DATA_VERSION)
+                                continue
+                            value = item["data_version"]
+                            try:
+                                public_version(value)
+                            except (TypeError, ValueError):
+                                contains_unclassified_data = True
+                                continue
+                            versions.add(value)
+    except sqlite3.Error as exc:
+        raise BackupError(
+            f"Could not inspect SQLite data versions: {exc}"
+        ) from exc
+
+    def version_key(value):
+        return tuple(int(part) for part in value.split("."))
+
+    public_versions = [
+        public_version(value) for value in sorted(versions, key=version_key)
+    ]
+    return public_versions, contains_unclassified_data
+
+
+def _database_data_versions(path):
+    """Compatibility wrapper returning only classified public versions."""
+    return _database_data_inventory(path)[0]
 
 
 def _persistent_source_files(course_dir):
@@ -243,6 +436,50 @@ def verify_archive(archive_path):
                     raise BackupError("Backup manifest must be a JSON object")
                 if manifest.get("format") != BUNDLE_FORMAT:
                     raise BackupError("Backup archive format is not supported")
+                baseline = public_version(BASELINE_DATA_VERSION)
+                for field in ("website_version", "export_format_version"):
+                    value = manifest.get(field, baseline)
+                    manifest[field] = _manifest_public_version(value, field)
+                declared_schema_version = manifest.get(
+                    "database_schema_version"
+                )
+                if declared_schema_version is not None:
+                    declared_schema_version = _manifest_public_version(
+                        declared_schema_version, "database_schema_version"
+                    )
+                    manifest["database_schema_version"] = (
+                        declared_schema_version
+                    )
+                declared_data_versions = manifest.get("contained_data_versions")
+                if declared_data_versions is not None:
+                    if not isinstance(declared_data_versions, list):
+                        raise BackupError(
+                            "Backup manifest contained_data_versions must be a list"
+                        )
+                    declared_data_versions = [
+                        _manifest_public_version(value, "contained data version")
+                        for value in declared_data_versions
+                    ]
+                    if len(declared_data_versions) != len(
+                        set(declared_data_versions)
+                    ):
+                        raise BackupError(
+                            "Backup manifest repeats a contained data version"
+                        )
+                has_declared_unclassified = (
+                    "contains_unclassified_data" in manifest
+                )
+                declared_unclassified = manifest.get(
+                    "contains_unclassified_data"
+                )
+                if (
+                    has_declared_unclassified
+                    and type(declared_unclassified) is not bool
+                ):
+                    raise BackupError(
+                        "Backup manifest contains_unclassified_data must be "
+                        "true or false"
+                    )
                 slug = validate_slug(manifest.get("course_slug"))
                 timestamp = manifest.get("created_at_utc")
                 if not isinstance(timestamp, str) or not timestamp.endswith("Z"):
@@ -334,6 +571,34 @@ def verify_archive(archive_path):
                 if not database_found:
                     raise BackupError("Backup archive has no popping.db snapshot")
             archived_slug = _database_course_slug(database_path)
+            actual_schema_version = _database_schema_version(database_path)
+            if declared_schema_version is None:
+                manifest["database_schema_version"] = actual_schema_version
+            elif declared_schema_version != actual_schema_version:
+                raise BackupError(
+                    "Backup manifest database schema version does not match "
+                    "the archived database"
+                )
+            actual_data_versions, actual_unclassified = (
+                _database_data_inventory(database_path)
+            )
+            if declared_data_versions is None:
+                # Version fields were not present in early v1 bundle manifests.
+                manifest["contained_data_versions"] = actual_data_versions
+            elif set(declared_data_versions) != set(actual_data_versions):
+                raise BackupError(
+                    "Backup manifest contained data versions do not match "
+                    "the archived database"
+                )
+            else:
+                manifest["contained_data_versions"] = actual_data_versions
+            if not has_declared_unclassified:
+                manifest["contains_unclassified_data"] = actual_unclassified
+            elif declared_unclassified != actual_unclassified:
+                raise BackupError(
+                    "Backup manifest unclassified-data flag does not match "
+                    "the archived database"
+                )
         except BackupError:
             raise
         except (OSError, RuntimeError, zipfile.BadZipFile) as exc:
@@ -344,6 +609,7 @@ def verify_archive(archive_path):
             "Backup database course slug does not match its manifest"
         )
     return manifest
+
 
 def create_backup(slug, destination, lock_timeout=DEFAULT_LOCK_TIMEOUT_SECONDS):
     slug = validate_slug(slug)
@@ -393,6 +659,10 @@ def create_backup(slug, destination, lock_timeout=DEFAULT_LOCK_TIMEOUT_SECONDS):
             raise BackupError(
                 f"Database belongs to course {archived_slug}, not {slug}"
             )
+        archived_schema_version = _database_schema_version(snapshot_path)
+        contained_data_versions, contains_unclassified_data = (
+            _database_data_inventory(snapshot_path)
+        )
         database_item = {
             "path": DATABASE_NAME,
             "size": snapshot_path.stat().st_size,
@@ -402,6 +672,11 @@ def create_backup(slug, destination, lock_timeout=DEFAULT_LOCK_TIMEOUT_SECONDS):
             "format": BUNDLE_FORMAT,
             "created_at_utc": created_at.isoformat().replace("+00:00", "Z"),
             "course_slug": slug,
+            "website_version": public_version(APP_VERSION),
+            "database_schema_version": archived_schema_version,
+            "export_format_version": public_version(EXPORT_FORMAT_VERSION),
+            "contained_data_versions": contained_data_versions,
+            "contains_unclassified_data": contains_unclassified_data,
             "database_integrity": "ok",
             "database_foreign_key_check": "ok",
             "files": [database_item, *persistent_files],

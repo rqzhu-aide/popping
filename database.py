@@ -1,9 +1,21 @@
+import json
 import os
 import re
 import sqlite3
+import tempfile
 import threading
 from flask import g
 import config
+from versioning import (
+    APP_VERSION,
+    BASELINE_DATA_VERSION,
+    BASELINE_SCHEMA_VERSION,
+    SCHEMA_VERSION,
+    SCHEMA_VERSION_HISTORY,
+    parse_version,
+    sqlite_versions_compatible,
+    versions_compatible,
+)
 
 SLUG_RE = re.compile(r'^[A-Za-z0-9_-]+$')
 SQLITE_BUSY_TIMEOUT_SECONDS = 8
@@ -20,6 +32,446 @@ _schema_check_locks_guard = threading.Lock()
 def _schema_lock_for(slug):
     with _schema_check_locks_guard:
         return _schema_check_locks.setdefault(slug, threading.Lock())
+
+
+_VERSIONED_DATA_TABLES = (
+    'teammate_thumbs',
+    'presentation_ratings',
+    'challenge_rounds',
+    'challenge_ratings',
+)
+_SCHEMA_LEDGER_COLUMNS = {
+    'id', 'schema_version', 'applied_by_app_version', 'applied_at'
+}
+_SCHEMA_MIGRATIONS = {}
+
+
+def _register_version_functions(connection):
+    """Register fail-closed version predicates on one SQLite connection."""
+    try:
+        connection.create_function(
+            'popping_version_compatible',
+            2,
+            sqlite_versions_compatible,
+            deterministic=True,
+        )
+    except TypeError:  # pragma: no cover - older supported SQLite bindings
+        connection.create_function(
+            'popping_version_compatible', 2, sqlite_versions_compatible
+        )
+
+
+def _schema_ledger_exists(db):
+    return db.execute(
+        """SELECT 1 FROM sqlite_master
+           WHERE type = 'table' AND name = 'schema_migrations'"""
+    ).fetchone() is not None
+
+
+def _row_value(row, name, index):
+    """Read either a sqlite3.Row/mapping field or a tuple position."""
+    try:
+        return row[name]
+    except (TypeError, IndexError, KeyError):
+        return row[index]
+
+
+def _pragma_columns(db, table):
+    return {
+        _row_value(row, 'name', 1): row
+        for row in db.execute(f'PRAGMA table_info({table})').fetchall()
+    }
+
+
+def _read_schema_ledger(db):
+    """Return the latest recorded schema version, or None for a legacy DB.
+
+    A present ledger is authoritative.  It must contain an exact ordered
+    prefix of the schema versions known to this application.  The latest row
+    may be older than the current schema so migration planning can decide
+    whether an explicit upgrade path exists.
+    """
+    if not _schema_ledger_exists(db):
+        return None
+
+    columns = set(_pragma_columns(db, 'schema_migrations'))
+    if not _SCHEMA_LEDGER_COLUMNS.issubset(columns):
+        raise RuntimeError('Database schema migration ledger is malformed')
+
+    rows = db.execute(
+        """SELECT id, schema_version, applied_by_app_version
+           FROM schema_migrations ORDER BY id"""
+    ).fetchall()
+    if not rows:
+        raise RuntimeError('Database schema migration ledger is empty')
+
+    current = parse_version(SCHEMA_VERSION)
+    ledger_versions = []
+    parsed_versions = []
+    for row in rows:
+        value = _row_value(row, 'schema_version', 1)
+        app_version = _row_value(row, 'applied_by_app_version', 2)
+        try:
+            parsed = parse_version(value)
+            parse_version(app_version)
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError(
+                'Database schema migration ledger contains an invalid version'
+            ) from exc
+        if parsed[2] != 0:
+            raise RuntimeError(
+                'Database schema migration ledger contains a patch-level '
+                'schema version'
+            )
+        ledger_versions.append(value)
+        parsed_versions.append(parsed)
+
+    if any(
+        current_version <= previous_version
+        for previous_version, current_version in zip(
+            parsed_versions, parsed_versions[1:]
+        )
+    ):
+        raise RuntimeError(
+            'Database schema migration ledger is not strictly ordered'
+        )
+
+    expected = tuple(SCHEMA_VERSION_HISTORY[:len(ledger_versions)])
+    if tuple(ledger_versions) != expected:
+        mismatch = next(
+            (
+                value for index, value in enumerate(ledger_versions)
+                if index >= len(SCHEMA_VERSION_HISTORY)
+                or value != SCHEMA_VERSION_HISTORY[index]
+            ),
+            ledger_versions[-1],
+        )
+        relation = (
+            'newer' if parse_version(mismatch) > current else 'unknown'
+        )
+        raise RuntimeError(
+            f'Database schema version {mismatch} is {relation} and is not '
+            f'supported by this application (supports {SCHEMA_VERSION})'
+        )
+
+    return ledger_versions[-1]
+
+
+def inspect_schema_version(db, allow_unversioned=True):
+    """Inspect the schema ledger without migrating or otherwise writing.
+
+    Missing ledgers return None when ``allow_unversioned`` is true so the
+    recognized pre-versioning baseline can reach ``ensure_schema``.  A present
+    malformed, unknown, or newer ledger always raises ``RuntimeError``.
+    """
+    version = _read_schema_ledger(db)
+    if version is None and not allow_unversioned:
+        raise RuntimeError('Database schema migration ledger is missing')
+    return version
+
+
+def _schema_migration_plan(source_version):
+    """Resolve every required migration before any schema mutation begins."""
+    if not SCHEMA_VERSION_HISTORY or SCHEMA_VERSION_HISTORY[-1] != (
+            SCHEMA_VERSION):
+        raise RuntimeError('Application schema version history is invalid')
+    try:
+        source_index = SCHEMA_VERSION_HISTORY.index(source_version)
+    except ValueError as exc:
+        raise RuntimeError(
+            f'Database schema version {source_version} is not supported'
+        ) from exc
+
+    plan = []
+    remaining = SCHEMA_VERSION_HISTORY[source_index:]
+    for source, target in zip(remaining, remaining[1:]):
+        migration = _SCHEMA_MIGRATIONS.get((source, target))
+        if migration is None:
+            raise RuntimeError(
+                f'Database schema version {source} cannot be migrated to '
+                f'{target}: no migration path is registered'
+            )
+        plan.append((source, target, migration))
+    return tuple(plan)
+
+
+SCHEMA_MIGRATION_WINDOW_ERROR = (
+    'Database schema upgrades must run between class sessions. End or fully '
+    'reset the active session before deploying this schema version.'
+)
+
+
+def _validate_schema_migration_window(db, migration_plan):
+    """Reject a schema-line upgrade while ephemeral session state is active."""
+    if not migration_plan:
+        return
+    if not db.execute(
+        """SELECT 1 FROM sqlite_master
+           WHERE type = 'table' AND name = 'course_state'"""
+    ).fetchone():
+        return
+
+    columns = set(_pragma_columns(db, 'course_state'))
+    if 'phase' not in columns:
+        raise RuntimeError('Database course_state schema is malformed')
+    candidate_fields = (
+        'phase',
+        'session_started_at',
+        'active_team_id',
+        'active_question_id',
+        'current_question',
+        'current_discussion_key',
+        'presentation_started_at',
+        'presentation_created_at',
+        'poll_active',
+        'active_challenges_json',
+    )
+    selected = [field for field in candidate_fields if field in columns]
+    rows = db.execute(
+        f"SELECT {', '.join(selected)} FROM course_state"
+    ).fetchall()
+    active_fields = set(selected) - {'phase', 'active_challenges_json'}
+    for row in rows:
+        values = {
+            field: _row_value(row, field, index)
+            for index, field in enumerate(selected)
+        }
+        if values['phase'] not in ('setup', 'ended'):
+            raise RuntimeError(SCHEMA_MIGRATION_WINDOW_ERROR)
+        if any(values[field] not in (None, '', 0) for field in active_fields):
+            raise RuntimeError(SCHEMA_MIGRATION_WINDOW_ERROR)
+
+        raw_challenges = values.get('active_challenges_json')
+        if raw_challenges not in (None, ''):
+            try:
+                active_challenges = json.loads(raw_challenges)
+            except (TypeError, ValueError) as exc:
+                raise RuntimeError(SCHEMA_MIGRATION_WINDOW_ERROR) from exc
+            if not isinstance(active_challenges, list) or active_challenges:
+                raise RuntimeError(SCHEMA_MIGRATION_WINDOW_ERROR)
+
+
+def validate_schema_compatibility(db, allow_unversioned=True):
+    """Validate ledger, migration path, and a safe upgrade window.
+
+    This helper is read-only.  It returns None only for the recognized
+    pre-versioning baseline when ``allow_unversioned`` is true.
+    """
+    recorded = inspect_schema_version(db, allow_unversioned=allow_unversioned)
+    migration_plan = _schema_migration_plan(
+        recorded or BASELINE_SCHEMA_VERSION
+    )
+    _validate_schema_migration_window(db, migration_plan)
+    return recorded
+
+
+def _install_baseline_schema_ledger(db):
+    db.execute('''CREATE TABLE schema_migrations (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        schema_version TEXT NOT NULL UNIQUE,
+        applied_by_app_version TEXT NOT NULL,
+        applied_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )''')
+    db.execute(
+        """INSERT INTO schema_migrations
+           (schema_version, applied_by_app_version) VALUES (?, ?)""",
+        [BASELINE_SCHEMA_VERSION, APP_VERSION],
+    )
+
+
+def _ensure_data_version_column(db, table):
+    columns = set(_pragma_columns(db, table))
+    if 'data_version' not in columns:
+        db.execute(
+            f"ALTER TABLE {table} ADD COLUMN data_version TEXT NOT NULL "
+            f"DEFAULT '{BASELINE_DATA_VERSION}'"
+        )
+
+
+def _versionable_presentation_histories(db):
+    """Return parsed legacy histories that can receive baseline provenance."""
+    if 'presentation_history' not in _pragma_columns(db, 'course_state'):
+        return []
+
+    rows = db.execute(
+        'SELECT id, presentation_history FROM course_state'
+    ).fetchall()
+    parsed_histories = []
+    for row in rows:
+        raw_history = _row_value(row, 'presentation_history', 1)
+        if raw_history is None or not str(raw_history).strip():
+            continue
+        try:
+            history = json.loads(raw_history)
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError(
+                'Cannot version malformed presentation history'
+            ) from exc
+        if not isinstance(history, list):
+            raise RuntimeError('Cannot version malformed presentation history')
+        if any(not isinstance(item, dict) for item in history):
+            raise RuntimeError('Cannot version malformed presentation history')
+        parsed_histories.append((_row_value(row, 'id', 0), history))
+    return parsed_histories
+
+
+def validate_legacy_adoption_candidate(db):
+    """Read-only preflight for a database without a schema ledger.
+
+    Missing provenance columns are safe because baseline adoption adds them.
+    A preexisting provenance column must already satisfy the same contract
+    enforced after adoption, or the database would be advertised as ready and
+    then fail on its first request.
+    """
+    if _schema_ledger_exists(db):
+        raise RuntimeError(
+            'Legacy adoption validation requires an unversioned database'
+        )
+
+    _versionable_presentation_histories(db)
+    tables = {
+        _row_value(row, 'name', 0)
+        for row in db.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table'"
+        ).fetchall()
+    }
+    for table in _VERSIONED_DATA_TABLES:
+        if table not in tables:
+            continue
+        version_column = _pragma_columns(db, table).get('data_version')
+        if version_column is None:
+            continue
+        if _row_value(version_column, 'notnull', 3) != 1:
+            raise RuntimeError(
+                f'Database table {table} lacks required data-version metadata'
+            )
+        default = _row_value(version_column, 'dflt_value', 4)
+        normalized_default = (
+            default.strip("'\"") if isinstance(default, str) else None
+        )
+        if normalized_default != BASELINE_DATA_VERSION:
+            raise RuntimeError(
+                f'Database table {table} has an invalid data-version default'
+            )
+        if db.execute(
+            f'SELECT 1 FROM {table} WHERE data_version IS NULL LIMIT 1'
+        ).fetchone():
+            raise RuntimeError(
+                f'Database table {table} contains unversioned data'
+            )
+
+
+def _backfill_presentation_history_versions(db):
+    for row_id, history in _versionable_presentation_histories(db):
+        changed = False
+        for item in history:
+            if item.get('data_version') is None:
+                item['data_version'] = BASELINE_DATA_VERSION
+                changed = True
+        if changed:
+            db.execute(
+                'UPDATE course_state SET presentation_history = ? WHERE id = ?',
+                [json.dumps(history), row_id],
+            )
+
+
+def validate_data_version_schema(db):
+    """Read-only validation of durable row-provenance columns.
+
+    The fixed v1.0 baseline keeps its required ``1.0.0`` default for legacy
+    adoption.  Later schema series may remove the default, which forces every
+    insert to stamp provenance explicitly, or use a default from their own
+    compatible series.  A later schema can never retain the v1.0 fallback and
+    silently mislabel omitted inserts.
+    """
+    recorded_schema = (
+        inspect_schema_version(db, allow_unversioned=True)
+        or BASELINE_SCHEMA_VERSION
+    )
+    uses_baseline_default = recorded_schema == BASELINE_SCHEMA_VERSION
+
+    for table in _VERSIONED_DATA_TABLES:
+        columns = _pragma_columns(db, table)
+        version_column = columns.get('data_version')
+        if version_column is None or _row_value(
+                version_column, 'notnull', 3) != 1:
+            raise RuntimeError(
+                f'Database table {table} lacks required data-version metadata'
+            )
+
+        default = _row_value(version_column, 'dflt_value', 4)
+        if default is None:
+            if uses_baseline_default:
+                raise RuntimeError(
+                    f'Database table {table} has an invalid data-version '
+                    'default'
+                )
+        else:
+            normalized_default = (
+                default.strip("'\"") if isinstance(default, str) else None
+            )
+            try:
+                default_is_valid = (
+                    normalized_default == BASELINE_DATA_VERSION
+                    if uses_baseline_default
+                    else versions_compatible(
+                        normalized_default, recorded_schema
+                    )
+                )
+            except (TypeError, ValueError):
+                default_is_valid = False
+            if not default_is_valid:
+                raise RuntimeError(
+                    f'Database table {table} has an invalid data-version '
+                    'default'
+                )
+
+        if db.execute(
+            f'SELECT 1 FROM {table} WHERE data_version IS NULL LIMIT 1'
+        ).fetchone():
+            raise RuntimeError(
+                f'Database table {table} contains unversioned data'
+            )
+
+
+def _apply_schema_migration_plan(db, migration_plan):
+    for _source, target, migration in migration_plan:
+        migration(db)
+        db.execute(
+            """INSERT INTO schema_migrations
+               (schema_version, applied_by_app_version) VALUES (?, ?)""",
+            [target, APP_VERSION],
+        )
+
+
+def upgrade_schema_connection(db):
+    """Upgrade a baseline-initialized connection to the current schema.
+
+    Fresh databases are always created from the fixed SQL baseline.  This
+    helper derives the complete ledger prefix from registered migrations and
+    applies it atomically.  A missing ledger or migration path is rejected
+    before any upgrade statement runs.
+    """
+    recorded = validate_schema_compatibility(db, allow_unversioned=False)
+    validate_data_version_schema(db)
+    migration_plan = _schema_migration_plan(recorded)
+    if not migration_plan:
+        return recorded
+
+    savepoint = 'popping_schema_upgrade'
+    db.execute(f'SAVEPOINT {savepoint}')
+    try:
+        _apply_schema_migration_plan(db, migration_plan)
+        validate_data_version_schema(db)
+        if inspect_schema_version(db, allow_unversioned=False) != (
+                SCHEMA_VERSION):
+            raise RuntimeError('Schema upgrade did not reach the current version')
+    except Exception:
+        db.execute(f'ROLLBACK TO {savepoint}')
+        db.execute(f'RELEASE {savepoint}')
+        raise
+    db.execute(f'RELEASE {savepoint}')
+    return SCHEMA_VERSION
 
 
 def is_sqlite_busy_error(error):
@@ -53,6 +505,7 @@ def get_db(slug):
         # retryable 503 instead of one 30-second lock wait.
         conn = sqlite3.connect(db_path, timeout=SQLITE_BUSY_TIMEOUT_SECONDS)
         conn.row_factory = sqlite3.Row
+        _register_version_functions(conn)
         # WAL mode persists. Check before requesting it because repeating the
         # write form of this pragma on concurrent requests can itself need a
         # database lock. A busy connection can retry the upgrade later.
@@ -80,16 +533,40 @@ def close_db(e=None):
 
 
 def init_db(slug):
+    """Build and atomically publish a fresh database for one course."""
     slug = validate_slug(slug)
     course_dir = os.path.join(config.DATA_DIR, slug)
     os.makedirs(course_dir, exist_ok=True)
     db_path = os.path.join(course_dir, 'popping.db')
-    conn = sqlite3.connect(db_path)
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA foreign_keys=ON")
-    with open(config.DATABASE_SCHEMA, 'r') as f:
-        conn.executescript(f.read())
-    conn.close()
+    temporary_fd, temporary_path = tempfile.mkstemp(
+        prefix='.popping-init-', suffix='.tmp.db', dir=course_dir
+    )
+    os.close(temporary_fd)
+    try:
+        conn = sqlite3.connect(temporary_path)
+        try:
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA foreign_keys=ON")
+            with open(config.DATABASE_SCHEMA, 'r') as f:
+                conn.executescript(f.read())
+            upgrade_schema_connection(conn)
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+        os.replace(temporary_path, db_path)
+    finally:
+        for candidate in (
+            temporary_path,
+            temporary_path + '-wal',
+            temporary_path + '-shm',
+        ):
+            try:
+                os.remove(candidate)
+            except FileNotFoundError:
+                pass
 
 
 def init_app(app):
@@ -124,6 +601,14 @@ def forget_schema(slug):
 def _ensure_schema_locked(db):
     """Add missing columns/tables to existing databases (migration).
     Runs only once per slug per process; subsequent calls are a no-op."""
+    recorded_schema_version = validate_schema_compatibility(db)
+    adopting_baseline = recorded_schema_version is None
+    migration_plan = _schema_migration_plan(
+        recorded_schema_version or BASELINE_SCHEMA_VERSION
+    )
+    if adopting_baseline:
+        validate_legacy_adoption_candidate(db)
+
     # course_state columns
     cs_cols = [row['name'] for row in db.execute('PRAGMA table_info(course_state)').fetchall()]
     if 'max_teams' not in cs_cols:
@@ -223,6 +708,7 @@ def _ensure_schema_locked(db):
         presenting_team_name TEXT,
         question_id INTEGER,
         question_title TEXT,
+        data_version TEXT NOT NULL DEFAULT '1.0.0',
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (course_id) REFERENCES courses (id) ON DELETE CASCADE,
         FOREIGN KEY (challenger_id) REFERENCES students (id) ON DELETE CASCADE,
@@ -263,6 +749,7 @@ def _ensure_schema_locked(db):
         rater_name TEXT,
         rater_team_id INTEGER,
         rater_team_name TEXT,
+        data_version TEXT NOT NULL DEFAULT '1.0.0',
         score INTEGER CHECK(score >= 1 AND score <= 5),
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (course_id) REFERENCES courses (id) ON DELETE CASCADE,
@@ -379,6 +866,7 @@ def _ensure_schema_locked(db):
         grader_team_name TEXT,
         recipient_team_id INTEGER,
         recipient_team_name TEXT,
+        data_version TEXT NOT NULL DEFAULT '1.0.0',
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (course_id) REFERENCES courses (id) ON DELETE CASCADE,
@@ -404,6 +892,9 @@ def _ensure_schema_locked(db):
             db.execute(
                 f'ALTER TABLE teammate_thumbs ADD COLUMN {column} {definition}'
             )
+    for table in _VERSIONED_DATA_TABLES:
+        _ensure_data_version_column(db, table)
+
     db.execute(
         '''UPDATE teammate_thumbs SET source_question_key = question_key
            WHERE source_question_key IS NULL'''
@@ -465,9 +956,9 @@ def _ensure_schema_locked(db):
             f'''INSERT INTO teammate_thumbs
                 (course_id, session_key, week_num, question_key,
                  source_question_key, grader_id, recipient_id,
-                 created_at, updated_at)
+                 created_at, updated_at, data_version)
                 SELECT course_id, 0, {legacy_week_sql}, 'legacy', 'legacy',
-                       grader_id, recipient_id, created_at, created_at
+                       grader_id, recipient_id, created_at, created_at, ?
                 FROM peer_reviews WHERE score > 0
                 ON CONFLICT(course_id, session_key, question_key,
                             grader_id, recipient_id)
@@ -475,8 +966,24 @@ def _ensure_schema_locked(db):
                     week_num = COALESCE(
                         excluded.week_num, teammate_thumbs.week_num
                     ),
-                    source_question_key = 'legacy' '''
+                    source_question_key = 'legacy' ''',
+            [BASELINE_DATA_VERSION],
         )
+
+    if adopting_baseline:
+        _backfill_presentation_history_versions(db)
+    validate_data_version_schema(db)
+    if adopting_baseline:
+        _install_baseline_schema_ledger(db)
+    _apply_schema_migration_plan(db, migration_plan)
+    if migration_plan:
+        validate_data_version_schema(db)
+
+
+def migrate_schema_connection(db):
+    """Adopt or migrate an existing DB within the caller's transaction."""
+    _ensure_schema_locked(db)
+
 
 def get_max_teams(slug, course_id):
     """Get max_teams for a course, with fallback for old databases."""

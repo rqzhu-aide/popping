@@ -3558,6 +3558,9 @@ if (instructor) {
         );
     });
     window.addEventListener('online', instructorPollOnce);
+    document.addEventListener('visibilitychange', () => {
+        if (!document.hidden) instructorPollOnce();
+    });
     instructorPollOnce();
     // Expose for global functions (randomAssign, unassignAll, etc.)
     window.instructorPollOnce = instructorPollOnce;

@@ -331,11 +331,62 @@ function testPresentationTransitionsReconcileInPlace() {
     assert.strictEqual(elements['presentation-idle'].style.display, '');
 }
 
+function testInstructorVisibilityRecovery() {
+    const instructorBlockStart = source.indexOf('if (instructor) {');
+    const instructorBlockEnd = source.indexOf(
+        '\nlet _originalMaxTeams', instructorBlockStart
+    );
+    assert(instructorBlockStart >= 0 && instructorBlockEnd > instructorBlockStart);
+    const instructorBlock = source.slice(
+        instructorBlockStart, instructorBlockEnd
+    );
+    const registrations = instructorBlock.match(
+        /document\.addEventListener\('visibilitychange', \(\) => \{\s*if \(!document\.hidden\) instructorPollOnce\(\);\s*\}\);/g
+    ) || [];
+    assert.strictEqual(
+        registrations.length,
+        1,
+        'the instructor page must register one visibility recovery listener'
+    );
+
+    let handler = null;
+    let pollCalls = 0;
+    const sandbox = {
+        document: {
+            hidden: true,
+            addEventListener(type, callback) {
+                assert.strictEqual(type, 'visibilitychange');
+                handler = callback;
+            },
+        },
+        instructorPollOnce() { pollCalls += 1; },
+    };
+    vm.createContext(sandbox);
+    vm.runInContext(registrations[0], sandbox, {
+        filename: 'app-instructor-visibility.js',
+    });
+    assert.strictEqual(typeof handler, 'function');
+    handler();
+    assert.strictEqual(pollCalls, 0, 'hidden tabs must not trigger a refresh');
+    sandbox.document.hidden = false;
+    handler();
+    assert.strictEqual(pollCalls, 1, 'a visible instructor tab must refresh now');
+
+    const pollLoop = sourceSlice(
+        'async function instructorPollOnce() {',
+        "window.addEventListener('offline'"
+    );
+    assert(pollLoop.includes(
+        'if (_instrPollInProgress || _instrPollStopped) return;'
+    ), 'visibility recovery must reuse the existing overlap guard');
+}
+
 (async () => {
     await testRosterMutationSerializationAndPickerScope();
     await testStudentTableKeepsCourseTotalSeparateFromFilterTotal();
     testPermanentTeamFilterAccessibility();
     testPresentationTransitionsReconcileInPlace();
+    testInstructorVisibilityRecovery();
     console.log('instructor UI behavior: ok');
 })().catch(error => {
     console.error(error);

@@ -22,8 +22,11 @@ The resulting ZIP contains:
 - a consistent SQLite snapshot named `popping.db`
 - all persistent files under the course's `questions/` directory
 - all persistent files under the course's `appendix/` directory
-- `manifest.json`, with the course slug, UTC creation time, file sizes, SHA-256
-  checksums, and successful SQLite integrity and foreign-key checks
+- `manifest.json`, with the course slug, UTC creation time, website version,
+  database schema version, export format version, contained data versions,
+  unclassified-data status, file sizes, SHA-256 checksums, and successful
+  SQLite integrity and foreign-key
+  checks
 
 The script briefly holds SQLite's writer lock while it takes the snapshot and
 copies the persistent files. Existing reads can continue, but a student or
@@ -46,6 +49,32 @@ python scripts/backup-course.py verify /path/to/popping-432fall2026-YYYYMMDDTHHM
 Verification streams the archived files, checks every size and SHA-256 digest,
 then runs SQLite integrity and foreign-key checks on the archived database. It
 does not rely on the original course directory.
+
+## Version metadata and compatibility
+
+The manifest's `format` value, `popping-course-backup-v1`, identifies the backup
+container layout. It is separate from these semantic version fields:
+
+- `website_version`
+- `database_schema_version`
+- `export_format_version`
+- `contained_data_versions`
+- `contains_unclassified_data`
+
+The verifier reads the archived database's schema ledger instead of assuming the
+version of the running backup script. A database without a ledger is the explicit
+`v1.0.0` baseline. Missing website and export format fields in an older v1
+manifest also default to `v1.0.0`. The verifier derives contained data versions
+from the archived feedback tables and treats pre-versioned rows as `v1.0.0`.
+It also reads presentation-history versions. Missing versions use the baseline.
+Malformed durable version strings stay unchanged in `popping.db`, are omitted from
+the semantic version list, and set `contains_unclassified_data` to `true`.
+
+Before restoring, compare the recorded database schema version with the running
+release. A backup on the same major/minor compatibility line can be restored
+directly. An older compatibility line must go through the supported database
+migration so that its record versions remain available through Download Legacy
+Data. Verification checks the archive; it does not migrate the database.
 
 ## Restore a complete bundle
 

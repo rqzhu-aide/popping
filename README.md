@@ -14,7 +14,7 @@ Each course lives in its own folder with its own SQLite database. This keeps cou
 - **Competition Mode**: Teams present; instructor selects active team.
 - **Presentation Ratings**: Non-presenting students rate the active presentation.
 - **Instructor Panel**: Control phases, pick presenting team, manage students.
-- **Data Export**: Download a ZIP with course data, teammate thumbs, presentation ratings, and question files.
+- **Data Export**: Download versioned current-week results or older and unclassified legacy data.
 
 ## Tech Stack
 
@@ -22,6 +22,15 @@ Each course lives in its own folder with its own SQLite database. This keeps cou
 - **Database**: SQLite (one per course, in its own folder)
 - **Frontend**: Vanilla JS + Jinja2 templates + modern CSS
 - **Auth**: Simple session-based (ID + PIN for students; username + PIN for instructors)
+
+## Versioning and Data Compatibility
+
+The versioned baseline is `v1.0.0`. Website-only changes increment the patch
+number. Any database structure change increments at least the minor number.
+Data is current when its major and minor numbers match the database schema;
+older compatibility lines remain available through **Download Legacy Data**.
+See [VERSIONING.md](VERSIONING.md) for the policy and [CHANGELOG.md](CHANGELOG.md)
+for the release history.
 
 ## Quick Start (Local)
 
@@ -47,7 +56,10 @@ cd classes/432fall2026
 bash init-db.sh
 #   It will prompt you for instructor credentials
 
-# 5. Run the app
+# 5. Publish the initialized course locally
+#   Change active: false to active: true in course.yaml
+
+# 6. Run the app
 cd ../..
 flask --app app run
 ```
@@ -131,9 +143,12 @@ bash init-db.sh
 ```
 
 This will:
-- Delete `popping.db`
-- Recreate the schema
+
+- Build and validate a replacement database before touching the current one
 - Prompt you for new instructor credentials
+- Require the course slug and `SERVICE STOPPED` confirmations when replacing an existing database
+- Save a verified copy of the previous database under `data/{slug}/init-backups/`
+- Atomically replace `popping.db` only after the candidate and backup pass validation
 - Keep the same course name, code, semester, and team structure from `course.yaml`
 
 ### To Create Another Course
@@ -142,11 +157,15 @@ This will:
 bash scripts/create-course.sh
 ```
 
-Then `cd classes/{new-slug} && bash init-db.sh`
+The generated course starts with `active: false`. For local use, initialize its
+database, change `active` to `true` in `course.yaml`, then start the app. For
+Render, follow the inactive deployment sequence below.
 
 ## Deploy to Render
 
-1. Push this repo to GitHub.
+1. Keep every course whose database is not yet on the Render disk set to
+   `active: false`, then push this repo to GitHub. This includes courses made by
+   `scripts/create-course.sh`.
 2. In Render, create a new **Web Service** and connect this repo.
 3. Set build command: `pip install -r requirements.txt`
 4. Set start command: `gunicorn app:app --workers 3 --threads 8 --timeout 120`
@@ -155,7 +174,8 @@ Then `cd classes/{new-slug} && bash init-db.sh`
    - **Name:** `data`
    - **Mount Path:** `/data`
    - **Size:** 1 GB
-7. After first deploy, open Render Shell and init your courses:
+7. After the inactive configuration deploys successfully, open Render Shell and
+   initialize each new course database:
    ```bash
    # STAT 432
    cd classes/432fall2026
@@ -167,6 +187,9 @@ Then `cd classes/{new-slug} && bash init-db.sh`
    bash init-db.sh
    # Enter instructor credentials when prompted
    ```
+8. Confirm each initialization succeeds. Change that course's `active` field to
+   `true` in GitHub, commit and push the change, and wait for Render to deploy
+   again. The course becomes public only after its database is ready.
 
 > **Why the disk?** On Render, anything not committed to git is ephemeral. The disk at `/data` persists across redeploys, so your SQLite databases survive code updates.
 
@@ -224,7 +247,7 @@ popping/
 1. Click **Instructor Login** on your course → enter username + PIN.
 2. Go directly to the control panel for that course.
 3. Control phases, manage students, set questions, select presenting teams.
-4. Export the ZIP package at the end of class.
+4. Export **Current Week Results** at the end of class. Download legacy data separately when it is available.
 
 ## Course Flow
 
@@ -232,7 +255,7 @@ popping/
 2. **DISCUSSION** → Instructor posts a question; students discuss and peer-grade.
 3. **COMPETITION** → Teams present one at a time (instructor selects active team).
 4. **COMPETITION** → Non-presenting teams rate the active presentation.
-5. **ENDED** → Instructor exports the ZIP package and uploads the workbook results to Canvas.
+5. **ENDED** → Instructor exports Current Week Results and uploads the workbook to Canvas.
 
 ## Managing Courses
 
@@ -242,7 +265,10 @@ popping/
 bash scripts/create-course.sh
 ```
 
-Follow the prompts. Then `cd classes/{slug}` and `bash init-db.sh`.
+The scaffold deliberately uses `active: false`. Commit and deploy it in that
+state, initialize the database in Render Shell, then change `active` to `true`
+and deploy again. For local use, initialize first and activate the course before
+starting the app.
 
 ### Customizing Teams
 
@@ -302,7 +328,10 @@ python scripts/backup-course.py create 432fall2026 /path/on/another-disk/popping
 ```
 
 The bundle contains a consistent SQLite snapshot, persistent uploaded question
-and appendix files, and a SHA-256 manifest. Verify any retained copy with:
+and appendix files, and a SHA-256 manifest. The manifest records the website,
+database schema, export format, contained data versions, and unclassified-data
+status. Verify any retained
+copy with:
 
 ```bash
 python scripts/backup-course.py verify /path/to/popping-432fall2026-YYYYMMDDTHHMMSSZ.zip

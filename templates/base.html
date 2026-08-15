@@ -56,9 +56,14 @@
             </a>
         </div>
         <div class="nav-links">
-            <button class="theme-toggle" id="theme-toggle" onclick="toggleTheme()" title="Toggle theme" aria-label="Toggle light/dark theme">
-                <span id="theme-icon">☀</span>
-            </button>
+            <div class="nav-version-theme">
+                {% if session.get('slug') and (session.get('student_id') or session.get('instructor_id')) %}
+                    <span class="nav-version" aria-label="Popping version {{ app_version }}">{{ app_version }}</span>
+                {% endif %}
+                <button class="theme-toggle" id="theme-toggle" onclick="toggleTheme()" title="Toggle theme" aria-label="Toggle light/dark theme">
+                    <span id="theme-icon">☀</span>
+                </button>
+            </div>
             {% if session.student_id %}
                 <a href="{{ url_for('dashboard') }}" class="nav-link">Dashboard</a>
                 <form method="post" action="{{ url_for('logout') }}" class="nav-logout-form">
@@ -68,8 +73,8 @@
                 <div class="nav-dropdown" id="tools-dropdown">
                     <button class="nav-link nav-dropdown-btn" onclick="toggleToolsDropdown()">Tools ▾</button>
                     <div class="nav-dropdown-menu" id="tools-menu">
-                        <a href="{{ url_for('export_data', slug=session.slug) }}" class="nav-dropdown-item">⬇ Download Week Results</a>
-                        <a href="{{ url_for('export_legacy_feedback', slug=session.slug) }}" class="nav-dropdown-item">⬇ Download Legacy Feedback (week unknown)</a>
+                        <a href="{{ url_for('export_data', slug=session.slug) }}" class="nav-dropdown-item">⬇ Download Current Week Results</a>
+                        <a href="{{ url_for('export_legacy_feedback', slug=session.slug) }}" class="nav-dropdown-item" title="Older-version or unclassified records excluded from current-week results">⬇ Download Legacy Data</a>
                         {% if not session.get('is_demo') %}
                         {% if state is defined and state and state.phase != 'setup' %}
                         <span class="nav-dropdown-item disabled" title="The roster can only be replaced during setup">📋 Upload Student Roster (setup only)</span>
@@ -142,6 +147,8 @@
     </main>
 
     <footer class="site-footer">
+        <span>Popping {{ app_version }}</span>
+        <span>·</span>
         <a href="https://github.com/rqzhu-aide/popping" target="_blank" rel="noopener">Source Code</a>
         <span>by Ruoqing Zhu</span>
         <span>·</span>

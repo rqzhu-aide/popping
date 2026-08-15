@@ -144,6 +144,18 @@ a:visited:hover { color: var(--primary-hover); }
 }
 
 .nav-links { display: flex; flex: 0 0 auto; gap: 20px; align-items: center; }
+.nav-version-theme {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+.nav-version {
+    color: var(--text-muted);
+    font-size: 0.75rem;
+    font-variant-numeric: tabular-nums;
+    font-weight: 600;
+    white-space: nowrap;
+}
 .nav-link {
     color: var(--text-muted);
     text-decoration: none;

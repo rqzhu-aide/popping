@@ -49,7 +49,14 @@ SCHEMA_PATH = os.path.join(PROJECT_ROOT, 'popping.sql')
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
+from database import (
+    upgrade_schema_connection,
+    validate_data_version_schema,
+    validate_legacy_adoption_candidate,
+    validate_schema_compatibility,
+)
 from question_catalog import read_week_questions, validate_question_catalog
+from versioning import SCHEMA_VERSION
 
 
 def build_team_rows(config):
@@ -184,6 +191,7 @@ def build_candidate_database(
         conn.execute('PRAGMA foreign_keys=ON')
         with open(SCHEMA_PATH, 'r', encoding='utf-8-sig') as f:
             conn.executescript(f.read())
+        upgrade_schema_connection(conn)
 
         instructor_id = conn.execute(
             "INSERT INTO instructors (username, name, pin) VALUES (?, ?, ?)",
@@ -236,7 +244,7 @@ def build_candidate_database(
         conn.close()
 
 
-def validate_course_database(path, expected_slug):
+def validate_course_database(path, expected_slug, require_current_version=False):
     if not os.path.isfile(path):
         raise ValueError(f"Database file not found: {path}")
     conn = sqlite3.connect(path)
@@ -274,6 +282,18 @@ def validate_course_database(path, expected_slug):
                     f"Database table {table} is missing required column(s): "
                     + ', '.join(missing_columns)
                 )
+
+        recorded_version = validate_schema_compatibility(
+            conn, allow_unversioned=not require_current_version
+        )
+        if require_current_version and recorded_version != SCHEMA_VERSION:
+            raise RuntimeError(
+                f"Replacement database must use schema version {SCHEMA_VERSION}"
+            )
+        if recorded_version is None:
+            validate_legacy_adoption_candidate(conn)
+        else:
+            validate_data_version_schema(conn)
 
         courses = conn.execute(
             'SELECT id, slug, instructor_id FROM courses'
@@ -449,7 +469,9 @@ def main(argv=None):
             display_name,
             pin,
         )
-        validate_course_database(temporary_path, config['slug'])
+        validate_course_database(
+            temporary_path, config['slug'], require_current_version=True
+        )
 
         backup_path = None
         if os.path.exists(db_path):

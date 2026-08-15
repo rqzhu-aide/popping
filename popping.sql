@@ -12,6 +12,17 @@ DROP TABLE IF EXISTS students;
 DROP TABLE IF EXISTS teams;
 DROP TABLE IF EXISTS courses;
 DROP TABLE IF EXISTS instructors;
+DROP TABLE IF EXISTS schema_migrations;
+
+CREATE TABLE schema_migrations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    schema_version TEXT NOT NULL UNIQUE,
+    applied_by_app_version TEXT NOT NULL,
+    applied_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+INSERT INTO schema_migrations (schema_version, applied_by_app_version)
+VALUES ('1.0.0', '1.0.0');
 
 CREATE TABLE instructors (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -152,6 +163,7 @@ CREATE TABLE presentation_ratings (
     question_title TEXT,
     rater_team_id INTEGER,
     rater_team_name TEXT,
+    data_version TEXT NOT NULL DEFAULT '1.0.0',
     q1_developed INTEGER CHECK(q1_developed >= 1 AND q1_developed <= 5),
     q2_easy INTEGER CHECK(q2_easy >= 1 AND q2_easy <= 5),
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -182,6 +194,7 @@ CREATE TABLE teammate_thumbs (
     grader_team_name TEXT,
     recipient_team_id INTEGER,
     recipient_team_name TEXT,
+    data_version TEXT NOT NULL DEFAULT '1.0.0',
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (course_id) REFERENCES courses (id) ON DELETE CASCADE,
@@ -230,6 +243,7 @@ CREATE TABLE challenge_rounds (
     presenting_team_name TEXT,
     question_id INTEGER,
     question_title TEXT,
+    data_version TEXT NOT NULL DEFAULT '1.0.0',
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (course_id) REFERENCES courses (id) ON DELETE CASCADE,
     FOREIGN KEY (challenger_id) REFERENCES students (id) ON DELETE CASCADE,
@@ -270,6 +284,7 @@ CREATE TABLE challenge_ratings (
     rater_name TEXT,
     rater_team_id INTEGER,
     rater_team_name TEXT,
+    data_version TEXT NOT NULL DEFAULT '1.0.0',
     score INTEGER CHECK(score >= 1 AND score <= 5),
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (course_id) REFERENCES courses (id) ON DELETE CASCADE,

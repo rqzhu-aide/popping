@@ -24,6 +24,7 @@ SCHEMA = os.path.join(BASE_DIR, 'popping.sql')
 if BASE_DIR not in sys.path:
     sys.path.insert(0, BASE_DIR)
 
+from database import migrate_schema_connection, upgrade_schema_connection
 from question_catalog import read_week_questions
 
 
@@ -265,6 +266,7 @@ def _build_candidate(path):
         conn.execute('PRAGMA foreign_keys = ON')
         with open(SCHEMA, encoding='utf-8') as f:
             conn.executescript(f.read())
+        upgrade_schema_connection(conn)
         q_count = _populate(conn)
         conn.commit()
     except Exception:
@@ -301,11 +303,7 @@ def _reset_demo_db():
         conn.execute('PRAGMA busy_timeout = 30000')
         conn.execute('PRAGMA foreign_keys = ON')
         conn.execute('BEGIN IMMEDIATE')
-        if conn.execute('PRAGMA user_version').fetchone()[0] < DEMO_SEED_VERSION:
-            if BASE_DIR not in sys.path:
-                sys.path.insert(0, BASE_DIR)
-            from database import _ensure_schema_locked
-            _ensure_schema_locked(conn)
+        migrate_schema_connection(conn)
 
         existing_tables = {
             row[0] for row in conn.execute(
@@ -322,6 +320,23 @@ def _reset_demo_db():
         _validate_demo_connection(conn, require_seeded_shape=True)
         conn.commit()
         return q_count
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def _upgrade_existing_demo_schema():
+    """Adopt or migrate an existing demo without resetting its seed data."""
+    conn = sqlite3.connect(DB_PATH, timeout=30)
+    conn.row_factory = sqlite3.Row
+    try:
+        conn.execute('PRAGMA busy_timeout = 30000')
+        conn.execute('PRAGMA foreign_keys = ON')
+        conn.execute('BEGIN IMMEDIATE')
+        migrate_schema_connection(conn)
+        conn.commit()
     except Exception:
         conn.rollback()
         raise
@@ -357,6 +372,7 @@ def init_demo_db(ensure_only=False):
                     q_count = _reset_demo_db()
                     action = 'upgraded'
                 else:
+                    _upgrade_existing_demo_schema()
                     q_count = _validate_demo_db(
                         DB_PATH, require_seeded_shape=False
                     )

@@ -37,6 +37,14 @@ REQUIRED_SCHEMA = {
     },
 }
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
+
+from database import (
+    validate_data_version_schema,
+    validate_legacy_adoption_candidate,
+    validate_schema_compatibility,
+)
 
 
 def validate_slug(slug):
@@ -100,6 +108,14 @@ def validate_course_database(path, expected_slug):
                     f"Database table {table} is missing required column(s): "
                     + ', '.join(missing_columns)
                 )
+
+        recorded_version = validate_schema_compatibility(
+            conn, allow_unversioned=True
+        )
+        if recorded_version is None:
+            validate_legacy_adoption_candidate(conn)
+        else:
+            validate_data_version_schema(conn)
 
         courses = conn.execute(
             'SELECT id, slug, instructor_id FROM courses'

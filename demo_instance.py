@@ -14,6 +14,7 @@ import uuid
 from contextlib import contextmanager
 from pathlib import Path
 
+from database import migrate_schema_connection, upgrade_schema_connection
 from question_catalog import read_week_questions
 
 
@@ -208,6 +209,7 @@ def create_demo_instance(data_dir, classes_dir, schema_path, slug=None):
         conn.execute('PRAGMA foreign_keys = ON')
         with open(schema_path, 'r', encoding='utf-8') as schema_file:
             conn.executescript(schema_file.read())
+        upgrade_schema_connection(conn)
         _populate_demo(conn, slug, classes_dir)
         conn.commit()
         _validate_demo(conn, slug)
@@ -262,9 +264,11 @@ def reset_demo_instance(
         cooldown_seconds=DEMO_RESET_COOLDOWN_SECONDS, now=None):
     database_path = demo_database_path(data_dir, slug)
     conn = sqlite3.connect(database_path, timeout=1)
+    conn.row_factory = sqlite3.Row
     try:
         conn.execute('PRAGMA foreign_keys = ON')
         conn.execute('BEGIN IMMEDIATE')
+        migrate_schema_connection(conn)
         conn.execute(
             '''CREATE TABLE IF NOT EXISTS demo_metadata (
                    key TEXT PRIMARY KEY,
