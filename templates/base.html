@@ -91,7 +91,6 @@
                         <a href="#" class="nav-dropdown-item" onclick="uploadRoster(event)">📋 Upload Student Roster</a>
                         {% endif %}
                         <a href="/roster_template.csv" class="nav-dropdown-item">📄 Download Roster Template</a>
-                        <a href="#" class="nav-dropdown-item" onclick="openChangePinDialog(event)">🔑 Change Instructor PIN</a>
                         <input type="file" id="roster-file-input" accept=".csv" style="display:none" onchange="handleRosterFile(event)">
                         {% endif %}
                     </div>
@@ -129,27 +128,6 @@
             <div class="modal-actions">
                 <button type="button" class="btn btn-secondary" onclick="cancelRosterUpload()">Cancel</button>
                 <button type="button" class="btn btn-danger" id="btn-confirm-roster-upload" onclick="confirmRosterUpload()">Replace Roster</button>
-            </div>
-        </div>
-    </div>
-    <div class="modal-backdrop" id="change-pin-dialog" role="dialog" aria-modal="true"
-         aria-labelledby="change-pin-title" hidden>
-        <div class="modal-card">
-            <h2 id="change-pin-title">Change Instructor PIN</h2>
-            <div class="form-group">
-                <label for="new-pin">New PIN (4-32 digits)</label>
-                <input type="password" id="new-pin" inputmode="numeric"
-                       pattern="[0-9]{4,32}" maxlength="32" autocomplete="off">
-            </div>
-            <div class="form-group">
-                <label for="confirm-new-pin">Confirm New PIN</label>
-                <input type="password" id="confirm-new-pin" inputmode="numeric"
-                       pattern="[0-9]{4,32}" maxlength="32" autocomplete="off"
-                       enterkeyhint="go">
-            </div>
-            <div class="modal-actions">
-                <button type="button" class="btn btn-secondary" onclick="closeChangePinDialog()">Cancel</button>
-                <button type="button" class="btn btn-primary" id="btn-confirm-change-pin" onclick="submitChangePin()">Change PIN</button>
             </div>
         </div>
     </div>

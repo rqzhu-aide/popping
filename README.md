@@ -139,7 +139,21 @@ is confirmed. A confirmed upload is saved under
 the same name under `classes/{slug}/`. Legacy `weekN/index.md` and `qNN.html`
 files are ignored.
 
-### To Reset a Course (change instructor password, wipe student data)
+### To Change or Recover the Instructor PIN
+
+No website login is required, so this also works when the PIN is forgotten.
+On Render, run in the Shell:
+
+```bash
+python scripts/set-instructor-pin.py              # every course
+python scripts/set-instructor-pin.py 432fall2026  # one course
+```
+
+The script prompts twice for the new PIN (hidden input, 4-32 digits, matching
+the login form) and updates each course database in its own transaction. The
+new PIN is active on the next login attempt; no restart is needed.
+
+### To Reset a Course (wipe student data and start over)
 
 Stop every Flask or Gunicorn worker before resetting an existing course, then
 restart the service after the script finishes. On Render, suspend the web

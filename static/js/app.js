@@ -377,54 +377,6 @@ window.uploadRoster = function(e) {
     document.getElementById('roster-file-input').click();
 };
 
-/* ===== CHANGE INSTRUCTOR PIN ===== */
-window.openChangePinDialog = function(e) {
-    e.preventDefault();
-    const menu = document.getElementById('tools-menu');
-    if (menu) menu.classList.remove('open');
-    const dialog = document.getElementById('change-pin-dialog');
-    if (dialog) {
-        dialog.hidden = false;
-        const input = document.getElementById('new-pin');
-        if (input) input.focus();
-    }
-};
-
-window.closeChangePinDialog = function() {
-    const dialog = document.getElementById('change-pin-dialog');
-    if (dialog) dialog.hidden = true;
-    const newPin = document.getElementById('new-pin');
-    const confirmPin = document.getElementById('confirm-new-pin');
-    if (newPin) newPin.value = '';
-    if (confirmPin) confirmPin.value = '';
-};
-
-window.submitChangePin = async function() {
-    const newPin = (document.getElementById('new-pin').value || '').trim();
-    const confirmPin = (document.getElementById('confirm-new-pin').value || '').trim();
-    const btn = document.getElementById('btn-confirm-change-pin');
-    if (btn) btn.disabled = true;
-    try {
-        const data = await postJSON('/api/change_instructor_pin', {
-            new_pin: newPin,
-            confirm_pin: confirmPin,
-        });
-        if (data && data.success) {
-            closeChangePinDialog();
-            showToast('Instructor PIN updated', 'success');
-        } else {
-            showToast(
-                (data && data.error) || 'Could not change the PIN',
-                'error'
-            );
-        }
-    } catch (err) {
-        showToast('Could not change the PIN', 'error');
-    } finally {
-        if (btn) btn.disabled = false;
-    }
-};
-
 let pendingRosterUpload = null;
 
 function appendInstructorStateForm(formData) {

@@ -2182,64 +2182,6 @@ def test_export_workbook_activity_is_scoped_to_selected_week(course_env):
     assert teams["Team 2"]["combined_avg"] == 4.5
 
 
-def test_change_instructor_pin_flow(course_env):
-    slug = course_env["slug"]
-
-    # Anonymous callers are rejected.
-    anon = app_module.app.test_client()
-    response = anon.post(
-        "/api/change_instructor_pin",
-        json={"new_pin": "12345678", "confirm_pin": "12345678"},
-    )
-    assert response.status_code == 401
-
-    client = _instructor_client(course_env)
-
-    # Mismatched confirmation is rejected.
-    response = client.post(
-        "/api/change_instructor_pin",
-        json={"new_pin": "12345678", "confirm_pin": "12345679"},
-    )
-    assert response.status_code == 409
-
-    # Out-of-range and non-numeric PINs are rejected.
-    for bad in ("123", "1234abcd", "1" * 33, ""):
-        response = client.post(
-            "/api/change_instructor_pin",
-            json={"new_pin": bad, "confirm_pin": bad},
-        )
-        assert response.status_code == 400, bad
-
-    # A valid 8-digit PIN is accepted and stored.
-    response = client.post(
-        "/api/change_instructor_pin",
-        json={"new_pin": "12345678", "confirm_pin": "12345678"},
-    )
-    assert response.status_code == 200
-    assert response.get_json()["success"] is True
-    with _connect(course_env) as db:
-        stored = db.execute(
-            "SELECT pin FROM instructors WHERE id = ?",
-            (course_env["instructor_id"],),
-        ).fetchone()["pin"]
-    assert stored == "12345678"
-
-    # The old PIN no longer logs in; the new one does.
-    fresh = app_module.app.test_client()
-    response = fresh.post(
-        f"/instructor_login/{slug}",
-        data={"username": "instructor", "pin": "9999"},
-    )
-    assert response.status_code == 302
-    assert f"/instructor/{slug}" not in response.headers["Location"]
-    response = fresh.post(
-        f"/instructor_login/{slug}",
-        data={"username": "instructor", "pin": "12345678"},
-    )
-    assert response.status_code == 302
-    assert f"/instructor/{slug}" in response.headers["Location"]
-
-
 def test_export_all_weeks_parameter_is_rejected(course_env):
     response = _instructor_client(course_env).get(
         f"/export/{course_env['slug']}?weeks=all"

@@ -7020,41 +7020,6 @@ def remove_student(student_db_id):
         raise
 
 
-@app.route('/api/change_instructor_pin', methods=['POST'])
-@instructor_login_required
-def change_instructor_pin():
-    """Change the logged-in instructor's PIN (new + confirm only).
-
-    Single-operator deployment model: an active instructor session is
-    sufficient authority, so the current PIN is not required.
-    """
-    slug = session['slug']
-    if is_demo_instance_slug(slug):
-        return jsonify({'error': 'The demo instructor PIN is fixed'}), 403
-    data = request.get_json(silent=True) or {}
-    new_pin = str(data.get('new_pin') or '').strip()
-    confirm_pin = str(data.get('confirm_pin') or '').strip()
-    if not new_pin or not confirm_pin:
-        return jsonify({'error': 'Enter the new PIN in both fields'}), 400
-    if new_pin != confirm_pin:
-        return jsonify({'error': 'The two PIN entries do not match'}), 409
-    if not re.fullmatch(r'\d{4,32}', new_pin):
-        return jsonify({'error': 'PIN must be 4 to 32 digits'}), 400
-    ensure_schema(slug)
-    db = get_db(slug)
-    db.execute('BEGIN IMMEDIATE')
-    try:
-        db.execute(
-            'UPDATE instructors SET pin = ? WHERE id = ?',
-            [new_pin, session['instructor_id']]
-        )
-        db.commit()
-        return jsonify({'success': True})
-    except Exception:
-        db.rollback()
-        raise
-
-
 @app.route('/api/reset_data', methods=['POST'])
 @instructor_login_required
 def reset_data():
