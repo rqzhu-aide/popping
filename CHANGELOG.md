@@ -37,6 +37,12 @@ versions as defined in `VERSIONING.md`.
   run `python scripts/migrate-course-db.py <course_slug>` for every existing
   course before starting `v1.1.0`.
 
+### Fixed
+
+- Instructor login now accepts numeric PINs of 4-32 digits (previously clipped
+  at 4 characters, which locked out instructors who set a longer PIN at
+  course initialization). `init-course-db.py` validates the same range.
+
 ## [v1.0.0] - 2026-08-15
 
 ### Added
