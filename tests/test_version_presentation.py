@@ -20,7 +20,9 @@ def test_templates_present_version_and_unambiguous_download_labels():
     )
 
     assert "Popping {{ app_version }}" in base
-    assert "Download Current Week Results" in base
+    assert "Download Results" in base
+    assert "Current Week ({{ export_week }})" in base
+    assert "week=w" in base
     assert "Download Current Week Results" in instructor
     assert "Download Legacy Data" in base
     assert (
@@ -69,7 +71,7 @@ def test_authenticated_header_shows_version_before_theme_toggle(session_data):
         rendered.index('<nav class="navbar">'):rendered.index("</nav>")
     ]
     assert navbar.count('class="nav-version"') == 1
-    assert "v1.0.0" in navbar
+    assert app_module.public_version(app_module.APP_VERSION) in navbar
     assert navbar.index('class="nav-version"') < navbar.index(
         'id="theme-toggle"'
     )
@@ -84,5 +86,5 @@ def test_anonymous_header_omits_version_but_footer_keeps_it():
     ]
     footer = rendered[rendered.index('<footer class="site-footer">'):]
     assert 'class="nav-version"' not in navbar
-    assert "v1.0.0" not in navbar
-    assert "Popping v1.0.0" in footer
+    assert app_module.public_version(app_module.APP_VERSION) not in navbar
+    assert f"Popping {app_module.public_version(app_module.APP_VERSION)}" in footer

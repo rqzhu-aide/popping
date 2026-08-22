@@ -19,11 +19,13 @@ import zipfile
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
+from database import validate_current_schema  # noqa: E402
 
 from versioning import (  # noqa: E402
     APP_VERSION,
     BASELINE_DATA_VERSION,
     BASELINE_SCHEMA_VERSION,
+    SCHEMA_VERSION,
     EXPORT_FORMAT_VERSION,
     parse_version,
     public_version,
@@ -39,6 +41,7 @@ VERSIONED_DATA_TABLES = (
     "presentation_ratings",
     "challenge_rounds",
     "challenge_ratings",
+    "presentation_participants",
 )
 _SCHEMA_LEDGER_COLUMNS = {
     "id", "schema_version", "applied_by_app_version", "applied_at",
@@ -197,6 +200,30 @@ def _database_schema_version(path):
     return public_version(latest)
 
 
+def _validate_current_database_schema(path, schema_version):
+    """Apply the app's full contract to backups from its current schema."""
+    if schema_version != public_version(SCHEMA_VERSION):
+        return
+    uri = Path(path).resolve().as_uri() + "?mode=ro"
+    try:
+        with closing(sqlite3.connect(uri, uri=True)) as db:
+            db.row_factory = sqlite3.Row
+            db.execute("PRAGMA query_only = ON")
+            validate_current_schema(db)
+    except RuntimeError as exc:
+        raise BackupError(
+            f"Current-schema database structure is invalid: {exc}"
+        ) from exc
+    except sqlite3.Error as exc:
+        raise BackupError(
+            f"Could not validate current database structure: {exc}"
+        ) from exc
+
+
+def _quote_sqlite_identifier(identifier):
+    return '"' + identifier.replace('"', '""') + '"'
+
+
 def _database_data_inventory(path):
     """Return classified data versions and whether raw data is unclassified.
 
@@ -211,26 +238,34 @@ def _database_data_inventory(path):
     try:
         with closing(sqlite3.connect(uri, uri=True)) as db:
             tables = {
-                row[0] for row in db.execute(
+                str(row[0])
+                for row in db.execute(
                     "SELECT name FROM sqlite_master WHERE type = 'table'"
                 )
+                if not str(row[0]).startswith("sqlite_")
             }
-            for table in VERSIONED_DATA_TABLES:
-                if table not in tables:
+            for table in sorted(tables):
+                quoted_table = _quote_sqlite_identifier(table)
+                columns = {
+                    row[1] for row in db.execute(
+                        f"PRAGMA table_info({quoted_table})"
+                    )
+                }
+                if (
+                    table not in VERSIONED_DATA_TABLES
+                    and "data_version" not in columns
+                ):
                     continue
                 has_rows = db.execute(
-                    f"SELECT 1 FROM {table} LIMIT 1"
+                    f"SELECT 1 FROM {quoted_table} LIMIT 1"
                 ).fetchone()
                 if has_rows is None:
                     continue
-                columns = {
-                    row[1] for row in db.execute(f"PRAGMA table_info({table})")
-                }
                 if "data_version" not in columns:
                     versions.add(BASELINE_DATA_VERSION)
                     continue
                 for row in db.execute(
-                    f"SELECT DISTINCT data_version FROM {table}"
+                    f"SELECT DISTINCT data_version FROM {quoted_table}"
                 ):
                     value = row[0]
                     if value is None:
@@ -572,6 +607,9 @@ def verify_archive(archive_path):
                     raise BackupError("Backup archive has no popping.db snapshot")
             archived_slug = _database_course_slug(database_path)
             actual_schema_version = _database_schema_version(database_path)
+            _validate_current_database_schema(
+                database_path, actual_schema_version
+            )
             if declared_schema_version is None:
                 manifest["database_schema_version"] = actual_schema_version
             elif declared_schema_version != actual_schema_version:
@@ -660,6 +698,9 @@ def create_backup(slug, destination, lock_timeout=DEFAULT_LOCK_TIMEOUT_SECONDS):
                 f"Database belongs to course {archived_slug}, not {slug}"
             )
         archived_schema_version = _database_schema_version(snapshot_path)
+        _validate_current_database_schema(
+            snapshot_path, archived_schema_version
+        )
         contained_data_versions, contains_unclassified_data = (
             _database_data_inventory(snapshot_path)
         )

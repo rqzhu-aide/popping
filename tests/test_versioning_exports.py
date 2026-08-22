@@ -24,6 +24,7 @@ import database  # noqa: E402
 from versioning import (  # noqa: E402
     APP_VERSION,
     BASELINE_DATA_VERSION,
+    BASELINE_SCHEMA_VERSION,
     EXPORT_FORMAT_VERSION,
     SCHEMA_VERSION,
     parse_version,
@@ -34,28 +35,30 @@ from versioning import (  # noqa: E402
 
 
 SESSION_KEY = 11
-FEEDBACK_TABLES = (
+BASELINE_FEEDBACK_TABLES = (
     "teammate_thumbs",
     "presentation_ratings",
     "challenge_rounds",
     "challenge_ratings",
 )
+FEEDBACK_TABLES = (*BASELINE_FEEDBACK_TABLES, "presentation_participants")
 
 
-def test_v1_baseline_constants_and_public_form_are_aligned():
-    assert APP_VERSION == "1.0.0"
-    assert SCHEMA_VERSION == "1.0.0"
-    assert EXPORT_FORMAT_VERSION == "1.0.0"
+def test_v1_versions_and_public_form_are_aligned():
+    assert APP_VERSION == "1.1.0"
+    assert SCHEMA_VERSION == "1.1.0"
+    assert EXPORT_FORMAT_VERSION == "1.1.0"
+    assert BASELINE_SCHEMA_VERSION == "1.0.0"
     assert BASELINE_DATA_VERSION == "1.0.0"
-    assert public_version() == "v1.0.0"
-    assert public_version(SCHEMA_VERSION) == "v1.0.0"
+    assert public_version() == "v1.1.0"
+    assert public_version(SCHEMA_VERSION) == "v1.1.0"
     assert parse_version(SCHEMA_VERSION)[2] == 0
 
 
 @pytest.mark.parametrize(
     "left,right,expected",
     (
-        ("1.0.0", "1.0.99", True),
+        ("1.1.0", "1.1.99", True),
         ("1.0.3", "1.0.10", True),
         ("1.0.3", "1.1.0", False),
         ("1.10.0", "1.1.99", False),
@@ -77,24 +80,36 @@ def test_malformed_internal_versions_fail_closed(value):
     assert sqlite_versions_compatible(SCHEMA_VERSION, value) == 0
 
 
-def test_fresh_schema_stamps_ledger_and_all_feedback_tables():
+def test_fresh_schema_upgrades_baseline_and_all_versioned_tables():
     db = sqlite3.connect(":memory:")
     try:
         db.executescript(
             (PROJECT_ROOT / "popping.sql").read_text(encoding="utf-8")
         )
-        ledger = db.execute(
+        assert db.execute(
             """SELECT schema_version, applied_by_app_version
                FROM schema_migrations ORDER BY id"""
-        ).fetchall()
-        assert ledger == [(SCHEMA_VERSION, APP_VERSION)]
+        ).fetchall() == [(BASELINE_SCHEMA_VERSION, BASELINE_SCHEMA_VERSION)]
+        for table in BASELINE_FEEDBACK_TABLES:
+            columns = {
+                row[1]: row for row in db.execute(f"PRAGMA table_info({table})")
+            }
+            assert columns["data_version"][4] == "'1.0.0'"
 
+        database.upgrade_schema_connection(db)
+        assert db.execute(
+            """SELECT schema_version, applied_by_app_version
+               FROM schema_migrations ORDER BY id"""
+        ).fetchall() == [
+            (BASELINE_SCHEMA_VERSION, BASELINE_SCHEMA_VERSION),
+            (SCHEMA_VERSION, APP_VERSION),
+        ]
         for table in FEEDBACK_TABLES:
             columns = {
                 row[1]: row for row in db.execute(f"PRAGMA table_info({table})")
             }
-            assert "data_version" in columns
             assert columns["data_version"][3] == 1
+            assert columns["data_version"][4] is None
     finally:
         db.close()
 
@@ -199,6 +214,8 @@ def versioned_course_env(tmp_path, monkeypatch):
         (course_id, SESSION_KEY),
     )
     db.commit()
+    database.upgrade_schema_connection(db)
+    db.commit()
     db.close()
 
     env = {
@@ -261,10 +278,10 @@ def test_sqlite_compatibility_function_is_registered(versioned_course_env):
         database.forget_schema(versioned_course_env["slug"])
         db = database.get_db(versioned_course_env["slug"])
         assert db.execute(
-            "SELECT popping_version_compatible('1.0.9', '1.0.0')"
+            "SELECT popping_version_compatible('1.1.9', '1.1.0')"
         ).fetchone()[0] == 1
         assert db.execute(
-            "SELECT popping_version_compatible('broken', '1.0.0')"
+            "SELECT popping_version_compatible('broken', '1.1.0')"
         ).fetchone()[0] == 0
 
 
@@ -273,14 +290,14 @@ def test_readiness_requires_a_registered_schema_migration_path(
     env = versioned_course_env
     calls = []
 
-    def reject_unmigratable_schema(connection, allow_unversioned=True):
+    def reject_schema_inspection(connection, allow_unversioned=True):
         calls.append(allow_unversioned)
-        raise RuntimeError("No registered migration path")
+        raise RuntimeError("Unsupported schema ledger")
 
     monkeypatch.setattr(
         app_module,
-        "validate_schema_compatibility",
-        reject_unmigratable_schema,
+        "inspect_schema_version",
+        reject_schema_inspection,
     )
     app_module._clear_course_availability_cache(env["slug"])
 
@@ -311,7 +328,7 @@ def test_future_schema_fails_closed_in_health_and_course_availability(
         db.execute(
             """INSERT INTO schema_migrations
                (schema_version, applied_by_app_version)
-               VALUES ('1.1.0', '1.1.0')"""
+               VALUES ('1.2.0', '1.2.0')"""
         )
         db.commit()
 
@@ -340,7 +357,7 @@ def test_feedback_write_paths_stamp_and_preserve_data_version(
         ).fetchone()
         assert thumb["data_version"] == APP_VERSION
         db.execute(
-            "UPDATE teammate_thumbs SET data_version = '1.0.7' WHERE id = ?",
+            "UPDATE teammate_thumbs SET data_version = '1.1.7' WHERE id = ?",
             (thumb["id"],),
         )
         db.commit()
@@ -384,7 +401,7 @@ def test_feedback_write_paths_stamp_and_preserve_data_version(
         ).fetchone()
         assert rating["data_version"] == APP_VERSION
         db.execute(
-            "UPDATE presentation_ratings SET data_version = '1.0.8' WHERE id = ?",
+            "UPDATE presentation_ratings SET data_version = '1.1.8' WHERE id = ?",
             (rating["id"],),
         )
         db.commit()
@@ -438,7 +455,7 @@ def test_feedback_write_paths_stamp_and_preserve_data_version(
         assert round_row["data_version"] == APP_VERSION
         assert challenge_rating["data_version"] == APP_VERSION
         db.execute(
-            "UPDATE challenge_ratings SET data_version = '1.0.9' WHERE id = ?",
+            "UPDATE challenge_ratings SET data_version = '1.1.9' WHERE id = ?",
             (challenge_rating["id"],),
         )
         db.commit()
@@ -451,18 +468,18 @@ def test_feedback_write_paths_stamp_and_preserve_data_version(
     with _connect(env) as db:
         assert db.execute(
             "SELECT data_version FROM teammate_thumbs"
-        ).fetchone()[0] == "1.0.7"
+        ).fetchone()[0] == "1.1.7"
         assert db.execute(
             "SELECT data_version FROM presentation_ratings"
-        ).fetchone()[0] == "1.0.8"
+        ).fetchone()[0] == "1.1.8"
         assert db.execute(
             "SELECT data_version FROM challenge_ratings"
-        ).fetchone()[0] == "1.0.9"
+        ).fetchone()[0] == "1.1.9"
 
 
 def _seed_versioned_export_rows(env):
     cases = (
-        ("compatible", "1.0.3", 1),
+        ("compatible", "1.1.3", 1),
         ("unknown", "1.0.4", None),
         ("incompatible", "0.9.9", 1),
         ("malformed", "not-a-version", 1),
@@ -535,6 +552,18 @@ def _seed_versioned_export_rows(env):
                     env["teams"]["Team 2"], data_version,
                 ),
             )
+            db.execute(
+                """INSERT INTO presentation_participants
+                   (course_id, session_key, week_num, presentation_key,
+                    student_id, student_identifier, student_name,
+                    team_id, team_name, data_version)
+                   VALUES (?, ?, ?, ?, ?, 's1', 'Alice', ?, 'Team 1', ?)""",
+                (
+                    env["course_id"], SESSION_KEY, week_num,
+                    f"presentation-{label}", env["students"]["s1"],
+                    env["teams"]["Team 1"], data_version,
+                ),
+            )
         db.commit()
     _set_state(env, phase="ended", discussion_week=1)
 
@@ -556,6 +585,42 @@ def test_weekly_export_routes_only_compatible_known_week_rows_and_versions(
 
     env = versioned_course_env
     _seed_versioned_export_rows(env)
+    with _connect(env) as db:
+        db.execute(
+            """UPDATE students
+               SET is_active = 0, last_team_id = team_id, team_id = NULL
+               WHERE id = ?""",
+            (env["students"]["s2"],),
+        )
+        db.execute(
+            """INSERT INTO presentation_participants
+               (course_id, session_key, week_num, presentation_key,
+                student_id, student_identifier, student_name,
+                team_id, team_name, data_version)
+               VALUES (?, ?, 2, 'presentation-prior-week', ?, 's1', 'Alice',
+                       ?, 'Team 1', '1.1.3')""",
+            (
+                env["course_id"], SESSION_KEY + 1,
+                env["students"]["s1"], env["teams"]["Team 1"],
+            ),
+        )
+        db.execute(
+            """INSERT INTO challenge_rounds
+               (course_id, session_key, week_num, presentation_key,
+                challenge_key, challenge_num, challenger_id,
+                challenger_name, challenger_team_id, challenger_team_name,
+                presenting_team_id, presenting_team_name, question_id,
+                question_title, data_version)
+               VALUES (?, ?, 2, 'presentation-prior-week',
+                       'challenge-prior-week', 1, ?, 'Bob', ?, 'Team 1',
+                       ?, 'Team 2', ?, 'Prior week', '1.1.3')""",
+            (
+                env["course_id"], SESSION_KEY + 1,
+                env["students"]["s2"], env["teams"]["Team 1"],
+                env["teams"]["Team 2"], env["question_id"],
+            ),
+        )
+        db.commit()
     response = _instructor_client(env).get(f"/export/{env['slug']}")
 
     assert response.status_code == 200
@@ -570,8 +635,8 @@ def test_weekly_export_routes_only_compatible_known_week_rows_and_versions(
     assert manifest["export_format_version"] == public_version(
         EXPORT_FORMAT_VERSION
     )
-    assert manifest["data_compatibility"] == "v1.0.x"
-    assert manifest["data_versions"] == ["v1.0.3"]
+    assert manifest["data_compatibility"] == "v1.1.x"
+    assert manifest["data_versions"] == ["v1.1.3"]
     _assert_utc_timestamp(manifest["exported_at_utc"])
 
     summary = {
@@ -579,14 +644,18 @@ def test_weekly_export_routes_only_compatible_known_week_rows_and_versions(
         for row in workbook["Summary"].iter_rows(values_only=True)
         if row[0]
     }
-    assert summary["Website Version"] == "v1.0.0"
-    assert summary["Database Schema Version"] == "v1.0.0"
-    assert summary["Export Format Version"] == "v1.0.0"
-    assert summary["Data Compatibility"] == "v1.0.x"
-    assert summary["Data Versions Included"] == "v1.0.3"
+    assert summary["Website Version"] == "v1.1.0"
+    assert summary["Database Schema Version"] == "v1.1.0"
+    assert summary["Export Format Version"] == "v1.1.0"
+    assert summary["Data Compatibility"] == "v1.1.x"
+    assert summary["Data Versions Included"] == "v1.1.3"
+    assert summary["Participation Roster Scope"] == (
+        "Course-wide compatible participation through export time"
+    )
     _assert_utc_timestamp(summary["Exported At (UTC)"])
     assert summary["Week Peer Reviews (thumbs)"] == 1
     assert summary["Week Presentation Ratings"] == 1
+    assert summary["Week Presentation Participants"] == 1
     assert summary["Week Challenge Rounds"] == 1
     assert summary["Week Challenge Ratings"] == 1
 
@@ -594,6 +663,9 @@ def test_weekly_export_routes_only_compatible_known_week_rows_and_versions(
     presentation_rows = _workbook_rows(workbook, "Presentation Ratings")
     round_rows = _workbook_rows(workbook, "Challenge Rounds")
     challenge_rating_rows = _workbook_rows(workbook, "Challenge Ratings")
+    participant_rows = _workbook_rows(workbook, "Presentation Participants")
+    roster_rows = _workbook_rows(workbook, "Participation Roster")
+    student_rows = _workbook_rows(workbook, "Students")
     assert [row["discussion_post_key"] for row in peer_rows] == [
         "thumb-compatible"
     ]
@@ -606,10 +678,195 @@ def test_weekly_export_routes_only_compatible_known_week_rows_and_versions(
     assert [row["challenge_key"] for row in challenge_rating_rows] == [
         "challenge-compatible"
     ]
+    assert participant_rows == [{
+        "session_key": SESSION_KEY,
+        "week": 1,
+        "presentation_key": "presentation-compatible",
+        "participant_id": "s1",
+        "participant_name": "Alice",
+        "team_id": env["teams"]["Team 1"],
+        "team_name": "Team 1",
+        "data_version": "v1.1.3",
+        "time": participant_rows[0]["time"],
+    }]
+    alice = next(row for row in student_rows if row["student_id"] == "s1")
+    assert alice["course_presentation_team_turns"] == 2
+    assert alice["course_challenger_turns"] == 0
+    assert next(
+        workbook["Participation Roster"].iter_rows(values_only=True)
+    ) == (
+        "student_id", "name", "team", "status",
+        "course_presentation_team_turns", "course_challenger_turns",
+    )
+    assert len(roster_rows) == 5
+    assert {row["student_id"] for row in roster_rows} == {
+        "s1", "s2", "s3", "s4", "s5",
+    }
+    roster_alice = next(
+        row for row in roster_rows if row["student_id"] == "s1"
+    )
+    assert roster_alice == {
+        "student_id": "s1",
+        "name": "Alice",
+        "team": "Team 1",
+        "status": "active",
+        "course_presentation_team_turns": 2,
+        "course_challenger_turns": 0,
+    }
+    roster_bob = next(
+        row for row in roster_rows if row["student_id"] == "s2"
+    )
+    assert roster_bob == {
+        "student_id": "s2",
+        "name": "Bob",
+        "team": "Team 1",
+        "status": "archived",
+        "course_presentation_team_turns": 0,
+        "course_challenger_turns": 1,
+    }
     for rows in (
         peer_rows, presentation_rows, round_rows, challenge_rating_rows
     ):
-        assert [row["data_version"] for row in rows] == ["v1.0.3"]
+        assert [row["data_version"] for row in rows] == ["v1.1.3"]
+
+
+def test_participants_export_and_roster_counts_agree_on_invalid_weeks(
+        versioned_course_env):
+    """Hand-corrupted week rows vanish from BOTH export and roster counts.
+
+    The dashboard counting query and the participants export must apply the
+    same week-validity rule so they can never disagree about a corrupted row.
+    """
+    from openpyxl import load_workbook
+
+    env = versioned_course_env
+    _seed_versioned_export_rows(env)
+    with _connect(env) as db:
+        for bad_week in (0, -1):
+            db.execute(
+                """INSERT INTO presentation_participants
+                   (course_id, session_key, week_num, presentation_key,
+                    student_id, student_identifier, student_name,
+                    team_id, team_name, data_version)
+                   VALUES (?, ?, ?, ?, ?, 's1', 'Alice', ?, 'Team 1',
+                           '1.1.3')""",
+                (
+                    env["course_id"], SESSION_KEY, bad_week,
+                    f"presentation-bad-week-{bad_week}",
+                    env["students"]["s1"], env["teams"]["Team 1"],
+                ),
+            )
+        db.commit()
+
+    response = _instructor_client(env).get(f"/export/{env['slug']}")
+
+    assert response.status_code == 200
+    with zipfile.ZipFile(io.BytesIO(response.data)) as archive:
+        workbook = load_workbook(
+            io.BytesIO(archive.read("course_data.xlsx")), read_only=True
+        )
+    participant_rows = _workbook_rows(workbook, "Presentation Participants")
+    assert [row["presentation_key"] for row in participant_rows] == [
+        "presentation-compatible"
+    ]
+    roster_rows = _workbook_rows(workbook, "Participation Roster")
+    roster_alice = next(
+        row for row in roster_rows if row["student_id"] == "s1"
+    )
+    assert roster_alice["course_presentation_team_turns"] == 1
+
+
+def test_export_previous_week_uses_same_layout(versioned_course_env):
+    """?week=N exports that week's rows with the identical workbook layout."""
+    from openpyxl import load_workbook
+
+    env = versioned_course_env
+    _seed_versioned_export_rows(env)
+    with _connect(env) as db:
+        db.execute(
+            """INSERT INTO presentation_participants
+               (course_id, session_key, week_num, presentation_key,
+                student_id, student_identifier, student_name,
+                team_id, team_name, data_version)
+               VALUES (?, ?, 2, 'presentation-week-2', ?, 's2', 'Bob',
+                       ?, 'Team 1', '1.1.3')""",
+            (
+                env["course_id"], SESSION_KEY + 1,
+                env["students"]["s2"], env["teams"]["Team 1"],
+            ),
+        )
+        db.commit()
+    _set_state(env, phase="ended", discussion_week=2)
+    client = _instructor_client(env)
+
+    def export_workbook(response):
+        assert response.status_code == 200
+        with zipfile.ZipFile(io.BytesIO(response.data)) as archive:
+            return load_workbook(
+                io.BytesIO(archive.read("course_data.xlsx")), read_only=True
+            )
+
+    # Default export: current week (2) only.
+    response = client.get(f"/export/{env['slug']}")
+    assert "week_2" in response.headers["Content-Disposition"]
+    workbook = export_workbook(response)
+    participant_rows = _workbook_rows(workbook, "Presentation Participants")
+    assert [row["presentation_key"] for row in participant_rows] == [
+        "presentation-week-2"
+    ]
+
+    # Explicit previous week: same layout, week-1 rows, week-1 labels.
+    response = client.get(f"/export/{env['slug']}?week=1")
+    assert "week_1" in response.headers["Content-Disposition"]
+    workbook = export_workbook(response)
+    participant_rows = _workbook_rows(workbook, "Presentation Participants")
+    assert [row["presentation_key"] for row in participant_rows] == [
+        "presentation-compatible"
+    ]
+    summary = {
+        row[0]: row[1]
+        for row in workbook["Summary"].iter_rows(values_only=True)
+        if row[0]
+    }
+    assert summary["Lecture Week"] == 1
+    assert summary["Export Scope"] == "Week 1"
+    # The course-wide roster still pools all weeks in a week-1 export.
+    roster_rows = _workbook_rows(workbook, "Participation Roster")
+    roster_bob = next(
+        row for row in roster_rows if row["student_id"] == "s2"
+    )
+    assert roster_bob["course_presentation_team_turns"] == 1
+
+
+def test_export_week_parameter_validation(versioned_course_env):
+    env = versioned_course_env
+    _seed_versioned_export_rows(env)
+    _set_state(env, phase="ended", discussion_week=2)
+    client = _instructor_client(env)
+
+    for bad in ("0", "-1", "abc", "3", "2.5"):
+        response = client.get(f"/export/{env['slug']}?week={bad}")
+        assert response.status_code == 400, f"week={bad!r} must be rejected"
+    response = client.get(f"/export/{env['slug']}?weeks=all")
+    assert response.status_code == 400
+    # An empty week parameter behaves like no parameter (current week).
+    assert client.get(f"/export/{env['slug']}?week=").status_code == 200
+    # Boundary values are accepted.
+    assert client.get(f"/export/{env['slug']}?week=1").status_code == 200
+    assert client.get(f"/export/{env['slug']}?week=2").status_code == 200
+
+
+def test_tools_menu_lists_downloadable_weeks(versioned_course_env):
+    env = versioned_course_env
+    _set_state(env, phase="ended", discussion_week=3)
+    response = _instructor_client(env).get(f"/instructor/{env['slug']}")
+
+    assert response.status_code == 200
+    html = response.get_data(as_text=True)
+    assert "Download Results" in html
+    assert "Current Week (3)" in html
+    assert f"/export/{env['slug']}?week=2" in html
+    assert f"/export/{env['slug']}?week=1" in html
 
 
 def test_legacy_export_routes_unknown_incompatible_and_malformed_four_types(
@@ -624,12 +881,13 @@ def test_legacy_export_routes_unknown_incompatible_and_malformed_four_types(
     rows = list(csv.DictReader(io.StringIO(
         response.data.decode("utf-8-sig")
     )))
-    assert len(rows) == 12
+    assert len(rows) == 15
     assert {row["record_type"] for row in rows} == {
         "teammate_thumb",
         "presentation_rating",
         "challenge_round",
         "challenge_rating",
+        "presentation_participant",
     }
 
     def row_key(row):
@@ -637,14 +895,16 @@ def test_legacy_export_routes_unknown_incompatible_and_malformed_four_types(
             return row["question_key"].removeprefix("thumb-")
         if row["record_type"] == "presentation_rating":
             return row["question_key"].removeprefix("presentation-")
+        if row["record_type"] == "presentation_participant":
+            return row["presentation_key"].removeprefix("presentation-")
         return row["challenge_key"].removeprefix("challenge-")
 
     by_label = {}
     for row in rows:
         by_label.setdefault(row_key(row), []).append(row)
-        assert row["exported_by_website_version"] == "v1.0.0"
-        assert row["database_schema_version"] == "v1.0.0"
-        assert row["export_format_version"] == "v1.0.0"
+        assert row["exported_by_website_version"] == "v1.1.0"
+        assert row["database_schema_version"] == "v1.1.0"
+        assert row["export_format_version"] == "v1.1.0"
         _assert_utc_timestamp(row["exported_at_utc"])
 
     assert set(by_label) == {"unknown", "incompatible", "malformed"}
@@ -721,6 +981,7 @@ def test_history_current_and_legacy_routes_share_week_inference(
         {
             "presentation_key": "history-question",
             "session_key": SESSION_KEY,
+            "data_version": "1.1.0",
             "question_id": env["question_id"],
             "team_id": env["teams"]["Team 1"],
             "team": "Team 1",
@@ -730,7 +991,7 @@ def test_history_current_and_legacy_routes_share_week_inference(
         {
             "presentation_key": "history-rating",
             "session_key": SESSION_KEY,
-            "data_version": "1.0.4",
+            "data_version": "1.1.4",
             "team_id": env["teams"]["Team 1"],
             "team": "Team 1",
             "title": "Inferred from rating",
@@ -739,7 +1000,7 @@ def test_history_current_and_legacy_routes_share_week_inference(
         {
             "presentation_key": "history-unknown",
             "session_key": SESSION_KEY,
-            "data_version": "1.0.5",
+            "data_version": "1.1.5",
             "team": "Team 2",
             "title": "Unknown week",
         },
@@ -768,7 +1029,7 @@ def test_history_current_and_legacy_routes_share_week_inference(
                 rater_team_id, rater_team_name, q1_developed, q2_easy,
                 data_version)
                VALUES (?, ?, 'history-rating', ?, 1, ?, 'Team 1',
-                       'Inferred from rating', ?, 'Team 2', 4, 4, '1.0.6')""",
+                       'Inferred from rating', ?, 'Team 2', 4, 4, '1.1.6')""",
             (
                 env["course_id"], env["students"]["s3"], SESSION_KEY,
                 env["teams"]["Team 1"], env["teams"]["Team 2"],
@@ -790,7 +1051,7 @@ def test_history_current_and_legacy_routes_share_week_inference(
         workbook = load_workbook(
             io.BytesIO(archive.read("course_data.xlsx")), read_only=True
         )
-    assert manifest["data_versions"] == ["v1.0.0", "v1.0.4", "v1.0.6"]
+    assert manifest["data_versions"] == ["v1.1.0", "v1.1.4", "v1.1.6"]
     team_rows = _workbook_rows(workbook, "Teams")
     team_1 = next(row for row in team_rows if row["team_name"] == "Team 1")
     assert team_1["presentations"] == 2
@@ -833,7 +1094,7 @@ def test_history_with_zero_week_question_is_legacy_only(
         "presentation_key": presentation_key,
         "session_key": SESSION_KEY,
         "question_id": env["question_id"],
-        "data_version": "1.0.4",
+        "data_version": "1.1.4",
         "team_id": env["teams"]["Team 1"],
         "team": "Team 1",
         "title": "Invalid zero-week question",
@@ -877,7 +1138,7 @@ def test_history_with_zero_week_question_is_legacy_only(
     assert history_rows[0]["presentation_key"] == presentation_key
     assert history_rows[0]["lecture_week"] == "unknown"
     assert history_rows[0]["legacy_reason"] == "unknown_week"
-    assert history_rows[0]["data_version"] == "v1.0.4"
+    assert history_rows[0]["data_version"] == "v1.1.4"
 
 def test_nonpositive_and_noninteger_weeks_route_as_unknown(
         versioned_course_env):
@@ -931,13 +1192,113 @@ def test_nonpositive_and_noninteger_weeks_route_as_unknown(
     }
     assert {row["legacy_reason"] for row in rows} == {"unknown_week"}
 
+
+def test_invalid_participation_weeks_are_legacy_only_everywhere(
+        versioned_course_env):
+    from openpyxl import load_workbook
+
+    env = versioned_course_env
+    invalid_weeks = (
+        ("null-week", None),
+        ("zero-week", 0),
+        ("negative-week", -2),
+        ("text-week", "not-a-week"),
+        ("real-week", 1.5),
+    )
+    with _connect(env) as db:
+        for number, (label, week_num) in enumerate(invalid_weeks, 1):
+            db.execute(
+                """INSERT INTO presentation_participants
+                   (course_id, session_key, week_num, presentation_key,
+                    student_id, student_identifier, data_version)
+                   VALUES (?, ?, ?, ?, ?, 's1', '1.1.9')""",
+                (
+                    env["course_id"], SESSION_KEY, week_num,
+                    f"presentation-{label}", env["students"]["s1"],
+                ),
+            )
+            db.execute(
+                """INSERT INTO challenge_rounds
+                   (course_id, session_key, week_num, presentation_key,
+                    challenge_key, challenge_num, challenger_id, data_version)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, '1.1.9')""",
+                (
+                    env["course_id"], SESSION_KEY, week_num,
+                    f"presentation-{label}", f"challenge-{label}", number,
+                    env["students"]["s5"],
+                ),
+            )
+        db.commit()
+
+    client = _instructor_client(env)
+    teams_response = client.get("/api/teams")
+    assert teams_response.status_code == 200
+    team_members = {
+        member["student_id"]: member
+        for team in teams_response.get_json()
+        for member in team["members"]
+    }
+    assert team_members["s1"]["presentation_count"] == 0
+    assert team_members["s5"]["challenger_count"] == 0
+
+    students_response = client.get("/api/students?per_page=100")
+    assert students_response.status_code == 200
+    student_rows = {
+        row["student_id"]: row
+        for row in students_response.get_json()["students"]
+    }
+    assert student_rows["s1"]["presentation_count"] == 0
+    assert student_rows["s5"]["challenger_count"] == 0
+
+    _set_state(env, phase="ended")
+    current = client.get(f"/export/{env['slug']}")
+    assert current.status_code == 200
+    with zipfile.ZipFile(io.BytesIO(current.data)) as archive:
+        manifest = json.loads(archive.read("manifest.json"))
+        workbook = load_workbook(
+            io.BytesIO(archive.read("course_data.xlsx")), read_only=True
+        )
+
+    assert "v1.1.9" not in manifest["data_versions"]
+    assert _workbook_rows(workbook, "Presentation Participants") == []
+    assert _workbook_rows(workbook, "Challenge Rounds") == []
+    roster_rows = {
+        row["student_id"]: row
+        for row in _workbook_rows(workbook, "Participation Roster")
+    }
+    assert roster_rows["s1"]["course_presentation_team_turns"] == 0
+    assert roster_rows["s5"]["course_challenger_turns"] == 0
+
+    legacy = client.get(f"/export/{env['slug']}/legacy-feedback.csv")
+    assert legacy.status_code == 200
+    legacy_rows = list(csv.DictReader(io.StringIO(
+        legacy.data.decode("utf-8-sig")
+    )))
+    assert len(legacy_rows) == 10
+    assert {row["record_type"] for row in legacy_rows} == {
+        "presentation_participant", "challenge_round",
+    }
+    assert {row["legacy_reason"] for row in legacy_rows} == {"unknown_week"}
+    expected_labels = {label for label, _week_num in invalid_weeks}
+    assert {
+        row["presentation_key"].removeprefix("presentation-")
+        for row in legacy_rows
+        if row["record_type"] == "presentation_participant"
+    } == expected_labels
+    assert {
+        row["challenge_key"].removeprefix("challenge-")
+        for row in legacy_rows
+        if row["record_type"] == "challenge_round"
+    } == expected_labels
+
+
 def test_live_counts_and_saved_controls_ignore_incompatible_rows(
         versioned_course_env):
     env = versioned_course_env
     _set_state(env, phase="discussion")
     with _connect(env) as db:
         for grader, recipient, version in (
-            ("s1", "s2", "1.0.7"),
+            ("s1", "s2", "1.1.7"),
             ("s2", "s1", "0.9.9"),
         ):
             db.execute(
@@ -998,7 +1359,7 @@ def test_live_counts_and_saved_controls_ignore_incompatible_rows(
     )
     with _connect(env) as db:
         for student_id, version, score in (
-            ("s3", "1.0.8", 3),
+            ("s3", "1.1.8", 3),
             ("s4", "0.9.9", 5),
         ):
             db.execute(
@@ -1024,7 +1385,7 @@ def test_live_counts_and_saved_controls_ignore_incompatible_rows(
                 presenting_team_name, question_id, question_title,
                 data_version)
                VALUES (?, ?, 1, ?, ?, 1, ?, 'Eve', ?, 'Team 3', ?,
-                       'Team 1', ?, 'Versioned Question', '1.0.8')""",
+                       'Team 1', ?, 'Versioned Question', '1.1.8')""",
             (
                 env["course_id"], SESSION_KEY, presentation_key,
                 challenge_key, env["students"]["s5"],
@@ -1033,7 +1394,7 @@ def test_live_counts_and_saved_controls_ignore_incompatible_rows(
             ),
         )
         for student_id, version, score in (
-            ("s3", "1.0.8", 3),
+            ("s3", "1.1.8", 3),
             ("s4", "0.9.9", 5),
         ):
             db.execute(
@@ -1083,7 +1444,7 @@ def test_end_summary_rankings_and_live_history_ignore_incompatible_rows(
             "presentation_key": "rank-current",
             "session_key": SESSION_KEY,
             "week_num": 1,
-            "data_version": "1.0.8",
+            "data_version": "1.1.8",
             "team_id": env["teams"]["Team 1"],
             "team": "Team 1",
         },
@@ -1114,7 +1475,7 @@ def test_end_summary_rankings_and_live_history_ignore_incompatible_rows(
     with _connect(env) as db:
         for key, student_id, team_name, team_id, score, version in (
             ("rank-current", "s3", "Team 1", env["teams"]["Team 1"], 2,
-             "1.0.8"),
+             "1.1.8"),
             ("rank-old", "s4", "Team 2", env["teams"]["Team 2"], 5,
              "0.9.9"),
         ):
@@ -1131,7 +1492,7 @@ def test_end_summary_rankings_and_live_history_ignore_incompatible_rows(
                 ),
             )
         for key, student_id, challenger_id, challenger_name, score, version in (
-            ("rank-ch-current", "s3", "s5", "Eve", 2, "1.0.8"),
+            ("rank-ch-current", "s3", "s5", "Eve", 2, "1.1.8"),
             ("rank-ch-old", "s4", "s1", "Alice", 5, "0.9.9"),
         ):
             db.execute(
@@ -1157,11 +1518,11 @@ def test_end_summary_rankings_and_live_history_ignore_incompatible_rows(
         db.commit()
 
     instructor_state = _instructor_client(env).get("/api/state").get_json()
-    assert instructor_state["completed_presentation_count"] == 2
+    assert instructor_state["completed_presentation_count"] == 1
     assert {
         item["presentation_key"]
         for item in instructor_state["presentation_history"]
-    } == {"rank-current", "rank-baseline"}
+    } == {"rank-current"}
 
     instructor_html = _instructor_client(env).get(
         f"/instructor/{env['slug']}"
@@ -1254,7 +1615,7 @@ def test_current_challenge_rating_export_does_not_borrow_legacy_round_metadata(
                 rater_name, rater_team_id, rater_team_name, score,
                 data_version)
                VALUES (?, ?, 1, ?, 'mixed-presentation', ?, 'Eve', ?,
-                       'Team 3', ?, 'Cara', ?, 'Team 2', 4, '1.0.7')""",
+                       'Team 3', ?, 'Cara', ?, 'Team 2', 4, '1.1.7')""",
             (
                 env["course_id"], SESSION_KEY, challenge_key,
                 env["students"]["s5"], env["teams"]["Team 3"],
@@ -1277,3 +1638,126 @@ def test_current_challenge_rating_export_does_not_borrow_legacy_round_metadata(
     assert rating_rows[0]["challenge_number"] is None
     assert rating_rows[0]["presenting_team"] is None
     assert rating_rows[0]["question_title"] is None
+
+
+def test_challenge_export_joins_require_matching_snapshot_identity(
+        versioned_course_env):
+    from openpyxl import load_workbook
+
+    env = versioned_course_env
+    scoped_key = "scoped-challenge"
+    legacy_parent_key = "legacy-parent-current-rating"
+    scoped_presentation = "scoped-presentation"
+
+    with _connect(env) as db:
+        def add_round(key, *, week, presentation, number, title):
+            db.execute(
+                """INSERT INTO challenge_rounds
+                   (course_id, session_key, week_num, presentation_key,
+                    challenge_key, challenge_num, challenger_id,
+                    challenger_name, challenger_team_id, challenger_team_name,
+                    presenting_team_id, presenting_team_name, question_id,
+                    question_title, data_version)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, 'Eve', ?, 'Team 3', ?,
+                           'Team 1', ?, ?, '1.1.7')""",
+                (
+                    env["course_id"], SESSION_KEY, week, presentation, key,
+                    number, env["students"]["s5"], env["teams"]["Team 3"],
+                    env["teams"]["Team 1"], env["question_id"], title,
+                ),
+            )
+
+        def add_rating(
+                key, *, rater, score, week=1, session_key=SESSION_KEY,
+                presentation=scoped_presentation, challenger="s5"):
+            db.execute(
+                """INSERT INTO challenge_ratings
+                   (course_id, session_key, week_num, challenge_key,
+                    presentation_key, challenger_id, rater_id, score,
+                    data_version)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, '1.1.8')""",
+                (
+                    env["course_id"], session_key, week, key, presentation,
+                    env["students"][challenger], env["students"][rater], score,
+                ),
+            )
+
+        add_round(
+            scoped_key, week=1, presentation=scoped_presentation, number=7,
+            title="Scoped Question",
+        )
+        add_rating(scoped_key, rater="s1", score=4)
+        add_rating(scoped_key, rater="s2", score=5, week=0)
+        add_rating(
+            scoped_key, rater="s3", score=1,
+            session_key=SESSION_KEY + 1,
+        )
+        add_rating(
+            scoped_key, rater="s4", score=2,
+            presentation="other-presentation",
+        )
+        add_rating(
+            scoped_key, rater="s5", score=3, challenger="s4",
+        )
+
+        add_round(
+            legacy_parent_key, week=0, presentation="legacy-presentation",
+            number=8, title="Legacy Question",
+        )
+        add_rating(
+            legacy_parent_key, rater="s2", score=5,
+            presentation="legacy-presentation",
+        )
+        db.execute("UPDATE course_state SET phase = 'ended'")
+        db.commit()
+
+    client = _instructor_client(env)
+    response = client.get(f"/export/{env['slug']}")
+    assert response.status_code == 200
+    with zipfile.ZipFile(io.BytesIO(response.data)) as archive:
+        workbook = load_workbook(
+            io.BytesIO(archive.read("course_data.xlsx")), read_only=True
+        )
+
+    round_rows = _workbook_rows(workbook, "Challenge Rounds")
+    assert len(round_rows) == 1
+    assert round_rows[0]["challenge_key"] == scoped_key
+    assert round_rows[0]["ratings_submitted"] == 1
+    assert round_rows[0]["average_score_1to5"] == 4
+
+    rating_rows = _workbook_rows(workbook, "Challenge Ratings")
+    scoped_rows = {
+        row["rater_id"]: row
+        for row in rating_rows
+        if row["challenge_key"] == scoped_key
+    }
+    assert set(scoped_rows) == {"s1", "s3", "s4", "s5"}
+    assert scoped_rows["s1"]["challenge_number"] == 7
+    assert scoped_rows["s1"]["presenting_team"] == "Team 1"
+    assert scoped_rows["s1"]["question_title"] == "Scoped Question"
+    for rater_id in ("s3", "s4", "s5"):
+        assert scoped_rows[rater_id]["challenge_number"] is None
+        assert scoped_rows[rater_id]["presenting_team"] is None
+        assert scoped_rows[rater_id]["question_title"] is None
+
+    legacy_parent_rating = next(
+        row for row in rating_rows
+        if row["challenge_key"] == legacy_parent_key
+    )
+    assert legacy_parent_rating["challenge_number"] is None
+    assert legacy_parent_rating["presenting_team"] is None
+    assert legacy_parent_rating["question_title"] is None
+
+    legacy = client.get(f"/export/{env['slug']}/legacy-feedback.csv")
+    assert legacy.status_code == 200
+    legacy_rows = list(csv.DictReader(io.StringIO(
+        legacy.data.decode("utf-8-sig")
+    )))
+    assert {
+        (row["record_type"], row["challenge_key"], row["legacy_reason"])
+        for row in legacy_rows
+        if row["challenge_key"] in {scoped_key, legacy_parent_key}
+    } == {
+        ("challenge_rating", scoped_key, "unknown_week"),
+        ("challenge_round", legacy_parent_key, "unknown_week"),
+    }

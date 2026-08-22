@@ -8,6 +8,8 @@ import sqlite3
 from threading import Barrier
 import zipfile
 
+import database
+
 import pytest
 
 
@@ -70,9 +72,9 @@ def test_create_bundle_captures_database_and_persistent_question_files(
     manifest = backup_course_module.verify_archive(archive_path)
     assert manifest["format"] == "popping-course-backup-v1"
     assert manifest["course_slug"] == "safe101"
-    assert manifest["website_version"] == "v1.0.0"
+    assert manifest["website_version"] == "v1.1.0"
     assert manifest["database_schema_version"] == "v1.0.0"
-    assert manifest["export_format_version"] == "v1.0.0"
+    assert manifest["export_format_version"] == "v1.1.0"
     assert manifest["contained_data_versions"] == []
     assert manifest["contains_unclassified_data"] is False
     assert manifest["database_integrity"] == "ok"
@@ -106,14 +108,21 @@ def test_bundle_manifest_uses_archived_database_schema_ledger(
                SET schema_version = '1.2.0',
                    applied_by_app_version = '1.2.4'"""
         )
+        db.execute('CREATE TABLE "future""activity" (data_version TEXT)')
+        db.executemany(
+            'INSERT INTO "future""activity" (data_version) VALUES (?)',
+            [("1.2.7",), ("not-a-version",)],
+        )
 
     destination = tmp_path / "offsite"
     monkeypatch.setenv("DATA_DIR", str(data_dir))
     archive_path = backup_course_module.create_backup("safe101", destination)
 
     manifest = backup_course_module.verify_archive(archive_path)
-    assert manifest["website_version"] == "v1.0.0"
+    assert manifest["website_version"] == "v1.1.0"
     assert manifest["database_schema_version"] == "v1.2.0"
+    assert manifest["contained_data_versions"] == ["v1.2.7"]
+    assert manifest["contains_unclassified_data"] is True
 
 
 def test_create_bundle_rejects_destination_inside_live_data(
@@ -316,6 +325,11 @@ def test_data_version_inventory_handles_versioned_and_preversioned_tables(
             "INSERT INTO challenge_rounds (data_version) VALUES ('1.0.10')"
         )
         db.execute("CREATE TABLE challenge_ratings (data_version TEXT)")
+        db.execute("CREATE TABLE presentation_participants (data_version TEXT)")
+        db.execute(
+            "INSERT INTO presentation_participants (data_version) "
+            "VALUES ('1.1.0')"
+        )
         db.execute("CREATE TABLE course_state (presentation_history TEXT)")
         db.execute(
             "INSERT INTO course_state (presentation_history) VALUES (?)",
@@ -330,6 +344,7 @@ def test_data_version_inventory_handles_versioned_and_preversioned_tables(
         "v1.0.3",
         "v1.0.8",
         "v1.0.10",
+        "v1.1.0",
     ]
     assert unclassified is True
 
@@ -500,3 +515,28 @@ def test_verify_rejects_unclassified_flag_that_disagrees_with_database(
         match="unclassified-data flag does not match",
     ):
         backup_course_module.verify_archive(tampered)
+
+
+def test_create_backup_rejects_malformed_current_schema(
+    backup_course_module, tmp_path, monkeypatch
+):
+    data_dir = tmp_path / "live-data"
+    course_dir = create_course(data_dir)
+    database_path = course_dir / "popping.db"
+    with sqlite3.connect(database_path) as connection:
+        connection.row_factory = sqlite3.Row
+        database.upgrade_schema_connection(connection)
+        connection.execute(
+            "DROP INDEX idx_presentation_participants_student"
+        )
+        connection.commit()
+
+    destination = tmp_path / "offsite"
+    monkeypatch.setenv("DATA_DIR", str(data_dir))
+    with pytest.raises(
+        backup_course_module.BackupError,
+        match="missing required index",
+    ):
+        backup_course_module.create_backup("safe101", destination)
+
+    assert not list(destination.glob("*.zip"))

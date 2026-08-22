@@ -3,21 +3,25 @@
 from pathlib import Path
 import sqlite3
 
+import database
 import demo_instance
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_private_demo_reset_adopts_missing_schema_ledger(tmp_path):
+def test_private_demo_reset_adopts_missing_schema_ledger(tmp_path, monkeypatch):
     data_dir = tmp_path / "data"
     slug = "demo_" + "b" * 32
-    demo_instance.create_demo_instance(
-        str(data_dir),
-        str(PROJECT_ROOT / "classes"),
-        str(PROJECT_ROOT / "popping.sql"),
-        slug=slug,
-    )
+    with monkeypatch.context() as baseline:
+        baseline.setattr(database, "SCHEMA_VERSION", "1.0.0")
+        baseline.setattr(database, "SCHEMA_VERSION_HISTORY", ("1.0.0",))
+        demo_instance.create_demo_instance(
+            str(data_dir),
+            str(PROJECT_ROOT / "classes"),
+            str(PROJECT_ROOT / "popping.sql"),
+            slug=slug,
+        )
     path = Path(demo_instance.demo_database_path(str(data_dir), slug))
     with sqlite3.connect(path) as connection:
         connection.execute("DROP TABLE schema_migrations")
@@ -32,7 +36,7 @@ def test_private_demo_reset_adopts_missing_schema_ledger(tmp_path):
     with sqlite3.connect(path) as connection:
         assert connection.execute(
             "SELECT schema_version FROM schema_migrations"
-        ).fetchall() == [("1.0.0",)]
+        ).fetchall() == [("1.0.0",), ("1.1.0",)]
         assert connection.execute(
             "SELECT COUNT(*) FROM students"
         ).fetchone()[0] == 2

@@ -73,7 +73,16 @@
                 <div class="nav-dropdown" id="tools-dropdown">
                     <button class="nav-link nav-dropdown-btn" onclick="toggleToolsDropdown()">Tools ▾</button>
                     <div class="nav-dropdown-menu" id="tools-menu">
-                        <a href="{{ url_for('export_data', slug=session.slug) }}" class="nav-dropdown-item">⬇ Download Current Week Results</a>
+                        {% set export_week = ((state.discussion_week if state is defined and state else 1) or 1) | int %}
+                        <div class="nav-dropdown-item nav-submenu">
+                            <button type="button" class="nav-submenu-label" onclick="toggleDownloadResults(event)">⬇ Download Results <span class="nav-submenu-arrow">▸</span></button>
+                            <div class="nav-submenu-menu" id="download-results-menu">
+                                <a href="{{ url_for('export_data', slug=session.slug) }}" class="nav-dropdown-item">Current Week ({{ export_week }})</a>
+                                {% for w in range(export_week - 1, 0, -1) %}
+                                <a href="{{ url_for('export_data', slug=session.slug, week=w) }}" class="nav-dropdown-item">Week {{ w }}</a>
+                                {% endfor %}
+                            </div>
+                        </div>
                         <a href="{{ url_for('export_legacy_feedback', slug=session.slug) }}" class="nav-dropdown-item" title="Older-version or unclassified records excluded from current-week results">⬇ Download Legacy Data</a>
                         {% if not session.get('is_demo') %}
                         {% if state is defined and state and state.phase != 'setup' %}

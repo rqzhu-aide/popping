@@ -22,8 +22,8 @@ SQLITE_BUSY_TIMEOUT_SECONDS = 8
 SQLITE_BUSY_TIMEOUT_MS = SQLITE_BUSY_TIMEOUT_SECONDS * 1000
 SQLITE_BUSY_RETRY_AFTER_SECONDS = 2
 
-# Process-local cache: slugs whose schema has already been verified/migrated.
-# Without this, ensure_schema() runs ~10 PRAGMA queries on every API call.
+# Process-local cache: slugs whose current schema has already been verified.
+# Without this, ensure_schema() runs several PRAGMA queries on every API call.
 _schema_checked = set()
 _schema_check_locks = {}
 _schema_check_locks_guard = threading.Lock()
@@ -39,11 +39,174 @@ _VERSIONED_DATA_TABLES = (
     'presentation_ratings',
     'challenge_rounds',
     'challenge_ratings',
+    'presentation_participants',
 )
+_PARTICIPATION_SCHEMA_VERSION = '1.1.0'
+_VERSIONED_DATA_TABLE_INTRODUCED = {
+    'teammate_thumbs': BASELINE_SCHEMA_VERSION,
+    'presentation_ratings': BASELINE_SCHEMA_VERSION,
+    'challenge_rounds': BASELINE_SCHEMA_VERSION,
+    'challenge_ratings': BASELINE_SCHEMA_VERSION,
+    'presentation_participants': _PARTICIPATION_SCHEMA_VERSION,
+}
 _SCHEMA_LEDGER_COLUMNS = {
     'id', 'schema_version', 'applied_by_app_version', 'applied_at'
 }
 _SCHEMA_MIGRATIONS = {}
+
+SCHEMA_MIGRATION_REQUIRED_ERROR = (
+    'This course database requires an offline schema migration before this '
+    'website version can use it.'
+)
+
+_MIGRATION_SESSION_ACTIVITY_TABLES = (
+    'teammate_thumbs',
+    'presentation_ratings',
+    'challenge_rounds',
+    'challenge_ratings',
+    'presentation_participants',
+)
+
+_PARTICIPATION_REQUIRED_COLUMNS = {
+    'teammate_thumbs': {
+        'id', 'course_id', 'session_key', 'week_num', 'question_key',
+        'source_question_key', 'question_title', 'grader_id', 'recipient_id',
+        'grader_team_id', 'grader_team_name', 'recipient_team_id',
+        'recipient_team_name', 'data_version', 'created_at', 'updated_at',
+    },
+    'presentation_ratings': {
+        'id', 'course_id', 'student_id', 'question_key', 'session_key',
+        'week_num', 'presenting_team_id', 'presenting_team_name',
+        'question_id', 'question_title', 'rater_team_id', 'rater_team_name',
+        'data_version', 'q1_developed', 'q2_easy', 'created_at',
+    },
+    'challenge_rounds': {
+        'id', 'course_id', 'session_key', 'week_num', 'presentation_key',
+        'challenge_key', 'challenge_num', 'challenger_id', 'challenger_name',
+        'challenger_team_id', 'challenger_team_name', 'presenting_team_id',
+        'presenting_team_name', 'question_id', 'question_title',
+        'data_version', 'created_at',
+    },
+    'challenge_ratings': {
+        'id', 'course_id', 'session_key', 'week_num', 'challenge_key',
+        'presentation_key', 'challenger_id', 'challenger_name',
+        'challenger_team_id', 'challenger_team_name', 'rater_id',
+        'rater_name', 'rater_team_id', 'rater_team_name', 'data_version',
+        'score', 'created_at',
+    },
+    'presentation_participants': {
+        'id', 'course_id', 'session_key', 'week_num', 'presentation_key',
+        'student_id', 'student_identifier', 'student_name', 'team_id',
+        'team_name', 'data_version', 'created_at',
+    },
+}
+
+_PARTICIPATION_REQUIRED_UNIQUE_KEYS = {
+    'teammate_thumbs': {
+        ('course_id', 'session_key', 'question_key', 'grader_id',
+         'recipient_id'),
+    },
+    'presentation_ratings': {
+        ('course_id', 'student_id', 'question_key'),
+    },
+    'challenge_rounds': {
+        ('challenge_key',),
+        ('course_id', 'presentation_key', 'challenge_num'),
+    },
+    'challenge_ratings': {
+        ('course_id', 'challenge_key', 'rater_id'),
+    },
+    'presentation_participants': {
+        ('course_id', 'presentation_key', 'student_id'),
+    },
+}
+
+_PARTICIPATION_REQUIRED_FOREIGN_KEYS = {
+    'teammate_thumbs': {
+        ('course_id', 'courses', 'id'),
+        ('grader_id', 'students', 'id'),
+        ('recipient_id', 'students', 'id'),
+        ('grader_team_id', 'teams', 'id'),
+        ('recipient_team_id', 'teams', 'id'),
+    },
+    'presentation_ratings': {
+        ('course_id', 'courses', 'id'),
+        ('student_id', 'students', 'id'),
+    },
+    'challenge_rounds': {
+        ('course_id', 'courses', 'id'),
+        ('challenger_id', 'students', 'id'),
+        ('challenger_team_id', 'teams', 'id'),
+        ('presenting_team_id', 'teams', 'id'),
+    },
+    'challenge_ratings': {
+        ('course_id', 'courses', 'id'),
+        ('challenger_id', 'students', 'id'),
+        ('rater_id', 'students', 'id'),
+        ('challenger_team_id', 'teams', 'id'),
+        ('rater_team_id', 'teams', 'id'),
+    },
+    'presentation_participants': {
+        ('course_id', 'courses', 'id'),
+        ('student_id', 'students', 'id'),
+        ('team_id', 'teams', 'id'),
+    },
+}
+
+_PARTICIPATION_REQUIRED_INDEXES = {
+    'idx_thumbs_current': (
+        'teammate_thumbs', ('course_id', 'session_key', 'question_key')
+    ),
+    'idx_thumbs_export_week': (
+        'teammate_thumbs', ('course_id', 'week_num')
+    ),
+    'idx_ratings_presentation': (
+        'presentation_ratings', ('course_id', 'question_key')
+    ),
+    'idx_ratings_session': (
+        'presentation_ratings', ('course_id', 'session_key')
+    ),
+    'idx_ratings_export_week': (
+        'presentation_ratings', ('course_id', 'week_num')
+    ),
+    'idx_challenge_rounds_pres': (
+        'challenge_rounds', ('course_id', 'presentation_key')
+    ),
+    'idx_challenge_rounds_session': (
+        'challenge_rounds', ('course_id', 'session_key')
+    ),
+    'idx_challenge_rounds_challenger': (
+        'challenge_rounds', ('course_id', 'challenger_id')
+    ),
+    'idx_challenge_ratings_challenge': (
+        'challenge_ratings', ('course_id', 'challenge_key')
+    ),
+    'idx_challenge_ratings_session': (
+        'challenge_ratings', ('course_id', 'session_key')
+    ),
+    'idx_challenge_ratings_export_week': (
+        'challenge_ratings', ('course_id', 'week_num')
+    ),
+    'idx_presentation_participants_student': (
+        'presentation_participants', ('course_id', 'student_id')
+    ),
+    'idx_presentation_participants_session': (
+        'presentation_participants', ('course_id', 'session_key')
+    ),
+    'idx_presentation_participants_export_week': (
+        'presentation_participants', ('course_id', 'week_num')
+    ),
+}
+
+
+def _versioned_data_tables_for(schema_version):
+    target = parse_version(schema_version)
+    return tuple(
+        table for table in _VERSIONED_DATA_TABLES
+        if parse_version(_VERSIONED_DATA_TABLE_INTRODUCED.get(
+            table, BASELINE_SCHEMA_VERSION
+        )) <= target
+    )
 
 
 def _register_version_functions(connection):
@@ -201,6 +364,83 @@ SCHEMA_MIGRATION_WINDOW_ERROR = (
 )
 
 
+def _history_has_current_session_activity(raw_history, session_key):
+    if raw_history is None or not str(raw_history).strip():
+        return False
+    try:
+        history = json.loads(raw_history)
+    except (TypeError, ValueError):
+        return True
+    if not isinstance(history, list):
+        return True
+    for item in history:
+        if not isinstance(item, dict):
+            return True
+        item_session = item.get('session_key')
+        if item_session is None:
+            if session_key == 0:
+                return True
+            continue
+        try:
+            item_session = int(item_session)
+        except (TypeError, ValueError):
+            return True
+        if item_session == session_key:
+            return True
+    return False
+
+
+def _setup_has_current_session_activity(
+        db, course_id, session_key, raw_history):
+    """Fail closed when Setup still contains durable current-session work."""
+    session_key = session_key or 0
+    if _history_has_current_session_activity(raw_history, session_key):
+        return True
+
+    tables = {
+        _row_value(row, 'name', 0)
+        for row in db.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table'"
+        ).fetchall()
+    }
+    for table in _MIGRATION_SESSION_ACTIVITY_TABLES:
+        if table not in tables:
+            continue
+        columns = set(_pragma_columns(db, table))
+        if 'course_id' not in columns:
+            return True
+        if 'session_key' not in columns:
+            if session_key == 0 and db.execute(
+                f'SELECT 1 FROM {table} WHERE course_id = ? LIMIT 1',
+                [course_id],
+            ).fetchone():
+                return True
+            continue
+        if db.execute(
+            f'''SELECT 1 FROM {table}
+                WHERE course_id = ?
+                  AND (session_key = ? OR session_key IS NULL
+                       OR typeof(session_key) != 'integer')
+                LIMIT 1''',
+            [course_id, session_key],
+        ).fetchone():
+            return True
+
+    # The oldest supported databases may contain only peer_reviews. Such rows
+    # have no session key, so they can belong to the current session only while
+    # the course itself is still on the baseline session key.
+    if session_key == 0 and 'peer_reviews' in tables:
+        peer_columns = set(_pragma_columns(db, 'peer_reviews'))
+        if 'course_id' not in peer_columns:
+            return True
+        if db.execute(
+            'SELECT 1 FROM peer_reviews WHERE course_id = ? LIMIT 1',
+            [course_id],
+        ).fetchone():
+            return True
+    return False
+
+
 def _validate_schema_migration_window(db, migration_plan):
     """Reject a schema-line upgrade while ephemeral session state is active."""
     if not migration_plan:
@@ -212,10 +452,13 @@ def _validate_schema_migration_window(db, migration_plan):
         return
 
     columns = set(_pragma_columns(db, 'course_state'))
-    if 'phase' not in columns:
+    if not {'course_id', 'phase'}.issubset(columns):
         raise RuntimeError('Database course_state schema is malformed')
     candidate_fields = (
+        'course_id',
         'phase',
+        'session_key',
+        'presentation_history',
         'session_started_at',
         'active_team_id',
         'active_question_id',
@@ -230,7 +473,10 @@ def _validate_schema_migration_window(db, migration_plan):
     rows = db.execute(
         f"SELECT {', '.join(selected)} FROM course_state"
     ).fetchall()
-    active_fields = set(selected) - {'phase', 'active_challenges_json'}
+    active_fields = set(selected) - {
+        'course_id', 'phase', 'session_key', 'presentation_history',
+        'active_challenges_json',
+    }
     for row in rows:
         values = {
             field: _row_value(row, field, index)
@@ -249,6 +495,16 @@ def _validate_schema_migration_window(db, migration_plan):
                 raise RuntimeError(SCHEMA_MIGRATION_WINDOW_ERROR) from exc
             if not isinstance(active_challenges, list) or active_challenges:
                 raise RuntimeError(SCHEMA_MIGRATION_WINDOW_ERROR)
+
+        if values['phase'] == 'setup' and (
+            _setup_has_current_session_activity(
+                db,
+                values['course_id'],
+                values.get('session_key') or 0,
+                values.get('presentation_history'),
+            )
+        ):
+            raise RuntimeError(SCHEMA_MIGRATION_WINDOW_ERROR)
 
 
 def validate_schema_compatibility(db, allow_unversioned=True):
@@ -335,7 +591,7 @@ def validate_legacy_adoption_candidate(db):
             "SELECT name FROM sqlite_master WHERE type = 'table'"
         ).fetchall()
     }
-    for table in _VERSIONED_DATA_TABLES:
+    for table in _versioned_data_tables_for(BASELINE_SCHEMA_VERSION):
         if table not in tables:
             continue
         version_column = _pragma_columns(db, table).get('data_version')
@@ -390,7 +646,7 @@ def validate_data_version_schema(db):
     )
     uses_baseline_default = recorded_schema == BASELINE_SCHEMA_VERSION
 
-    for table in _VERSIONED_DATA_TABLES:
+    for table in _versioned_data_tables_for(recorded_schema):
         columns = _pragma_columns(db, table)
         version_column = columns.get('data_version')
         if version_column is None or _row_value(
@@ -434,6 +690,256 @@ def validate_data_version_schema(db):
             )
 
 
+def _quote_identifier(value):
+    return '"' + str(value).replace('"', '""') + '"'
+
+
+def _table_index_signatures(db, table):
+    signatures = set()
+    for index in db.execute(
+            f'PRAGMA index_list({_quote_identifier(table)})').fetchall():
+        if _row_value(index, 'partial', 4):
+            continue
+        index_name = _row_value(index, 'name', 1)
+        columns = tuple(
+            _row_value(row, 'name', 2)
+            for row in db.execute(
+                f'PRAGMA index_info({_quote_identifier(index_name)})'
+            ).fetchall()
+        )
+        signatures.add((columns, bool(_row_value(index, 'unique', 2))))
+    return signatures
+
+
+def _table_foreign_key_signatures(db, table):
+    return {
+        (
+            _row_value(row, 'from', 3),
+            _row_value(row, 'table', 2),
+            _row_value(row, 'to', 4),
+        )
+        for row in db.execute(
+            f'PRAGMA foreign_key_list({_quote_identifier(table)})'
+        ).fetchall()
+    }
+
+
+def _ensure_participation_indexes(db, repair_indexes):
+    for index_name, (table, expected_columns) in (
+            _PARTICIPATION_REQUIRED_INDEXES.items()):
+        index_row = db.execute(
+            """SELECT tbl_name FROM sqlite_master
+               WHERE type = 'index' AND name = ?""",
+            [index_name],
+        ).fetchone()
+        if index_row is None:
+            if not repair_indexes:
+                raise RuntimeError(
+                    f'Database is missing required index {index_name}'
+                )
+            columns_sql = ', '.join(
+                _quote_identifier(column) for column in expected_columns
+            )
+            db.execute(
+                f'CREATE INDEX {_quote_identifier(index_name)} '
+                f'ON {_quote_identifier(table)} ({columns_sql})'
+            )
+            index_row = db.execute(
+                """SELECT tbl_name FROM sqlite_master
+                   WHERE type = 'index' AND name = ?""",
+                [index_name],
+            ).fetchone()
+
+        actual_table = _row_value(index_row, 'tbl_name', 0)
+        actual_columns = tuple(
+            _row_value(row, 'name', 2)
+            for row in db.execute(
+                f'PRAGMA index_info({_quote_identifier(index_name)})'
+            ).fetchall()
+        )
+        index_list = {
+            _row_value(row, 'name', 1): row
+            for row in db.execute(
+                f'PRAGMA index_list({_quote_identifier(table)})'
+            ).fetchall()
+        }
+        metadata = index_list.get(index_name)
+        if (actual_table != table or actual_columns != expected_columns
+                or metadata is None
+                or bool(_row_value(metadata, 'unique', 2))
+                or bool(_row_value(metadata, 'partial', 4))):
+            raise RuntimeError(
+                f'Database index {index_name} has an invalid definition'
+            )
+
+
+def _validate_participation_schema(db, repair_indexes=False):
+    for table, required_columns in _PARTICIPATION_REQUIRED_COLUMNS.items():
+        columns = set(_pragma_columns(db, table))
+        missing_columns = sorted(required_columns - columns)
+        if missing_columns:
+            raise RuntimeError(
+                f'Database table {table} is missing required column(s): '
+                + ', '.join(missing_columns)
+            )
+
+        index_signatures = _table_index_signatures(db, table)
+        for unique_key in _PARTICIPATION_REQUIRED_UNIQUE_KEYS[table]:
+            if (unique_key, True) not in index_signatures:
+                raise RuntimeError(
+                    f'Database table {table} is missing required unique key '
+                    f"({', '.join(unique_key)})"
+                )
+
+        foreign_keys = _table_foreign_key_signatures(db, table)
+        missing_foreign_keys = (
+            _PARTICIPATION_REQUIRED_FOREIGN_KEYS[table] - foreign_keys
+        )
+        if missing_foreign_keys:
+            raise RuntimeError(
+                f'Database table {table} is missing required foreign key(s)'
+            )
+
+    _ensure_participation_indexes(db, repair_indexes)
+
+
+def validate_current_schema(db, repair_indexes=False):
+    """Validate the complete contract for the schema served by this app."""
+    recorded = inspect_schema_version(db, allow_unversioned=False)
+    if recorded != SCHEMA_VERSION:
+        raise RuntimeError(SCHEMA_MIGRATION_REQUIRED_ERROR)
+    if parse_version(recorded) >= parse_version(
+            _PARTICIPATION_SCHEMA_VERSION):
+        _validate_participation_schema(
+            db, repair_indexes=repair_indexes
+        )
+    validate_data_version_schema(db)
+    return recorded
+
+
+def _rebuild_versioned_table_without_default(db, table):
+    """Preserve one v1.0 table while requiring explicit future provenance."""
+    table_row = db.execute(
+        """SELECT sql FROM sqlite_master
+           WHERE type = 'table' AND name = ?""",
+        [table],
+    ).fetchone()
+    create_sql = _row_value(table_row, 'sql', 0) if table_row else None
+    if not create_sql:
+        raise RuntimeError(f'Database table {table} is missing')
+
+    schema_objects = db.execute(
+        """SELECT type, name, sql FROM sqlite_master
+           WHERE tbl_name = ? AND type IN ('index', 'trigger')
+             AND sql IS NOT NULL
+           ORDER BY type, name""",
+        [table],
+    ).fetchall()
+    temporary_table = f'__popping_{table}_v1_1'
+    if db.execute(
+        """SELECT 1 FROM sqlite_master
+           WHERE type = 'table' AND name = ?""",
+        [temporary_table],
+    ).fetchone():
+        raise RuntimeError(
+            f'Database contains unexpected migration table {temporary_table}'
+        )
+
+    escaped_table = re.escape(table)
+    table_token = (
+        rf'(?:"{escaped_table}"|\[{escaped_table}\]|{escaped_table})'
+    )
+    migrated_sql, table_replacements = re.subn(
+        rf'^\s*CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?{table_token}',
+        f'CREATE TABLE {_quote_identifier(temporary_table)}',
+        create_sql,
+        count=1,
+        flags=re.IGNORECASE,
+    )
+    migrated_sql, default_replacements = re.subn(
+        (
+            r'(\bdata_version\s+TEXT\s+NOT\s+NULL)\s+DEFAULT\s+'
+            r'(?:\([^)]*\)|\x27[^\x27]*\x27|"[^"]*"|[^\s,)]+)'
+        ),
+        r'\1',
+        migrated_sql,
+        count=1,
+        flags=re.IGNORECASE,
+    )
+    if table_replacements != 1 or default_replacements != 1:
+        raise RuntimeError(
+            f'Database table {table} cannot be upgraded safely'
+        )
+
+    db.execute(migrated_sql)
+    column_names = list(_pragma_columns(db, table))
+    quoted_columns = ', '.join(
+        _quote_identifier(column) for column in column_names
+    )
+    db.execute(
+        f'INSERT INTO {_quote_identifier(temporary_table)} '
+        f'({quoted_columns}) SELECT {quoted_columns} '
+        f'FROM {_quote_identifier(table)}'
+    )
+    db.execute(f'DROP TABLE {_quote_identifier(table)}')
+    db.execute(
+        f'ALTER TABLE {_quote_identifier(temporary_table)} '
+        f'RENAME TO {_quote_identifier(table)}'
+    )
+    for schema_object in schema_objects:
+        db.execute(_row_value(schema_object, 'sql', 2))
+
+
+def _migrate_1_0_0_to_1_1_0(db):
+    """Add trustworthy participation events and explicit data provenance."""
+    for table in _versioned_data_tables_for(BASELINE_SCHEMA_VERSION):
+        _rebuild_versioned_table_without_default(db, table)
+
+    db.execute('''CREATE TABLE presentation_participants (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        course_id INTEGER NOT NULL,
+        session_key INTEGER NOT NULL,
+        week_num INTEGER,
+        presentation_key TEXT NOT NULL,
+        student_id INTEGER NOT NULL,
+        student_identifier TEXT NOT NULL,
+        student_name TEXT,
+        team_id INTEGER,
+        team_name TEXT,
+        data_version TEXT NOT NULL,
+        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (course_id) REFERENCES courses (id) ON DELETE CASCADE,
+        FOREIGN KEY (student_id) REFERENCES students (id) ON DELETE CASCADE,
+        FOREIGN KEY (team_id) REFERENCES teams (id) ON DELETE SET NULL,
+        UNIQUE(course_id, presentation_key, student_id)
+    )''')
+    db.execute(
+        '''CREATE INDEX idx_presentation_participants_student
+           ON presentation_participants(course_id, student_id)'''
+    )
+    db.execute(
+        '''CREATE INDEX idx_presentation_participants_session
+           ON presentation_participants(course_id, session_key)'''
+    )
+    db.execute(
+        '''CREATE INDEX idx_presentation_participants_export_week
+           ON presentation_participants(course_id, week_num)'''
+    )
+    db.execute(
+        '''CREATE INDEX idx_challenge_rounds_challenger
+           ON challenge_rounds(course_id, challenger_id)'''
+    )
+    if db.execute('PRAGMA foreign_key_check').fetchone():
+        raise RuntimeError(
+            'Database foreign keys are invalid after schema migration'
+        )
+
+
+_SCHEMA_MIGRATIONS[(
+    BASELINE_SCHEMA_VERSION, _PARTICIPATION_SCHEMA_VERSION
+)] = _migrate_1_0_0_to_1_1_0
+
+
 def _apply_schema_migration_plan(db, migration_plan):
     for _source, target, migration in migration_plan:
         migration(db)
@@ -456,13 +962,13 @@ def upgrade_schema_connection(db):
     validate_data_version_schema(db)
     migration_plan = _schema_migration_plan(recorded)
     if not migration_plan:
-        return recorded
+        return validate_current_schema(db, repair_indexes=True)
 
     savepoint = 'popping_schema_upgrade'
     db.execute(f'SAVEPOINT {savepoint}')
     try:
         _apply_schema_migration_plan(db, migration_plan)
-        validate_data_version_schema(db)
+        validate_current_schema(db, repair_indexes=True)
         if inspect_schema_version(db, allow_unversioned=False) != (
                 SCHEMA_VERSION):
             raise RuntimeError('Schema upgrade did not reach the current version')
@@ -574,20 +1080,17 @@ def init_app(app):
 
 
 def ensure_schema(slug):
-    """Run idempotent migrations once per process and safely across workers."""
+    """Read-only verification of the current schema, once per process."""
     if slug in _schema_checked:
         return
     with _schema_lock_for(slug):
         if slug in _schema_checked:
             return
         db = get_db(slug)
-        db.execute('BEGIN IMMEDIATE')
-        try:
-            _ensure_schema_locked(db)
-            db.commit()
-        except Exception:
-            db.rollback()
-            raise
+        recorded = inspect_schema_version(db, allow_unversioned=True)
+        if recorded != SCHEMA_VERSION:
+            raise RuntimeError(SCHEMA_MIGRATION_REQUIRED_ERROR)
+        validate_current_schema(db)
         _schema_checked.add(slug)
 
 
@@ -892,7 +1395,10 @@ def _ensure_schema_locked(db):
             db.execute(
                 f'ALTER TABLE teammate_thumbs ADD COLUMN {column} {definition}'
             )
-    for table in _VERSIONED_DATA_TABLES:
+    versioned_tables = _versioned_data_tables_for(
+        recorded_schema_version or BASELINE_SCHEMA_VERSION
+    )
+    for table in versioned_tables:
         _ensure_data_version_column(db, table)
 
     db.execute(
@@ -976,8 +1482,7 @@ def _ensure_schema_locked(db):
     if adopting_baseline:
         _install_baseline_schema_ledger(db)
     _apply_schema_migration_plan(db, migration_plan)
-    if migration_plan:
-        validate_data_version_schema(db)
+    validate_current_schema(db, repair_indexes=True)
 
 
 def migrate_schema_connection(db):

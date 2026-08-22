@@ -14,7 +14,11 @@ Each course lives in its own folder with its own SQLite database. This keeps cou
 - **Competition Mode**: Teams present; instructor selects active team.
 - **Presentation Ratings**: Non-presenting students rate the active presentation.
 - **Instructor Panel**: Control phases, pick presenting team, manage students.
-- **Data Export**: Download versioned current-week results or older and unclassified legacy data.
+- **Participation History**: Instructors can compare course-wide presentation-team
+  and challenger turn counts when choosing participants.
+- **Data Export**: Download versioned results for the current or any previous
+  week, a dedicated full-roster participation snapshot, or older and
+  unclassified legacy data.
 
 ## Tech Stack
 
@@ -31,6 +35,11 @@ Data is current when its major and minor numbers match the database schema;
 older compatibility lines remain available through **Download Legacy Data**.
 See [VERSIONING.md](VERSIONING.md) for the policy and [CHANGELOG.md](CHANGELOG.md)
 for the release history.
+
+`v1.1.0` is the first schema update. It adds durable participation events and
+requires an explicit offline migration for every existing `v1.0.x` course
+database. Do not start `v1.1.0` web workers against an existing database until
+the migration below has succeeded.
 
 ## Quick Start (Local)
 
@@ -160,6 +169,34 @@ bash scripts/create-course.sh
 The generated course starts with `active: false`. For local use, initialize its
 database, change `active` to `true` in `course.yaml`, then start the app. For
 Render, follow the inactive deployment sequence below.
+
+### Upgrade an Existing v1.0 Course to v1.1.0
+
+This is an offline operation. Complete it between classes for every existing
+course database:
+
+1. End or reset any active classroom session, then stop every Flask or Gunicorn
+   worker. On Render, suspend the web service and wait for all workers to stop.
+2. Make the `v1.1.0` code available on the same machine and persistent disk
+   while keeping the web workers stopped.
+3. From the repository root, run:
+
+   ```bash
+   python scripts/migrate-course-db.py 432fall2026
+   ```
+
+4. Type the course slug, then type `SERVICE STOPPED` when prompted.
+5. Repeat for each course. Start or resume the `v1.1.0` service only after every
+   required migration succeeds.
+
+The command validates the course database, creates a verified snapshot under
+`data/{slug}/migration-backups/`, and applies the schema change in one
+transaction. The migration deliberately does not infer participation from
+`v1.0.x` ratings. Presentation-team and challenger counts begin with activity
+recorded by `v1.1.0`.
+
+Normal web traffic and `/healthz` only validate an exact current schema. They
+never migrate or repair a persistent course database.
 
 ## Deploy to Render
 
@@ -310,6 +347,12 @@ For an initialization, reset, or restore:
 
 ```bash
 python scripts/restore-course-db.py 432fall2026 /path/to/backup.db
+```
+
+For the required `v1.0.x` to `v1.1.0` schema migration, use:
+
+```bash
+python scripts/migrate-course-db.py 432fall2026
 ```
 
 3. Restart the service and verify instructor and student login before class.

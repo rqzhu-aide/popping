@@ -52,6 +52,27 @@ With full participation and teams of 5, the expected final live counts are:
 The counts increase over several seconds so the instructor view behaves like a
 live class rather than receiving one artificial instant update.
 
+## Check participation history
+
+Each simulator run starts with a new `v1.1.0` database, so every student's Team
+turns and Challenge turns begin at zero. Use the normal instructor controls to
+verify the new rules:
+
+1. Select a raised-hand student as challenger. That student's Challenge turns
+   becomes 1 immediately, even before any ratings arrive.
+2. Select **Clear**. The challenge turn returns to zero. A later retained
+   selection counts as a new turn, and separate retained selections accumulate.
+3. Finalize the presentation. Every active member of the presenting team gains
+   one Team turn, including in a run configured so that zero students rate.
+4. Instead of finalizing, choose **Cancel Presentation**. No Team turn is added,
+   and challenger turns attached to that presentation are removed.
+5. End the session and return to Setup within the same simulator run. The
+   course-wide counts remain available in Student Management.
+
+The simulator's normal shutdown deletes its temporary database, so counts do
+not carry into the next run. Use `--keep-data` only when you want to retain that
+temporary database for inspection.
+
 ## Observe or stop the classroom
 
 From another terminal:
