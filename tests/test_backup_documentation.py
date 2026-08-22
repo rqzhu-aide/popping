@@ -20,24 +20,20 @@ def test_question_guide_documents_only_the_canonical_weekly_source():
     assert "server reads `index.md`" not in guide
 
 
-def test_preserved_legacy_guide_starts_with_a_do_not_use_warning():
-    legacy = read("question-guide/LEGACY_PRE_RENDERED_HTML_GUIDE.md")
-    opening = "\n".join(legacy.splitlines()[:7])
-    assert "Historical reference only" in opening
-    assert "current application ignores" in opening
-    assert "Do not follow it for" in opening
-    assert "README.md" in opening
-
-
-def test_checked_in_legacy_asset_directories_are_marked_unused():
-    for relative in (
-        "classes/432fall2026/week1/LEGACY_UNUSED.md",
-        "classes/demo/week1/LEGACY_UNUSED.md",
-        "question-guide/examples/LEGACY_UNUSED.md",
-    ):
-        marker = " ".join(read(relative).split())
-        assert "current application does not read" in marker
-        assert "canonical weekly file" in marker
+def test_legacy_pre_rendered_assets_are_fully_removed():
+    """The obsolete pre-rendered workflow must not creep back in."""
+    removed_paths = (
+        "question-guide/LEGACY_PRE_RENDERED_HTML_GUIDE.md",
+        "question-guide/examples",
+        "classes/432fall2026/week1",
+        "classes/demo/week1",
+    )
+    for relative in removed_paths:
+        assert not (PROJECT_ROOT / relative).exists(), relative
+    # No tracked file may point future authors at the legacy workflow.
+    guide = read("question-guide/README.md")
+    assert "LEGACY_PRE_RENDERED_HTML_GUIDE" not in guide
+    assert "LEGACY_UNUSED" not in guide
 
 
 def test_backup_guide_covers_security_verification_and_complete_recovery():

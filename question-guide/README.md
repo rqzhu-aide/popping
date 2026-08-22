@@ -79,14 +79,11 @@ and presentation.
 ## Legacy files are not used
 
 Directories such as `classes/<course-slug>/weekN/` containing `index.md` and
-`qNN.html` are legacy reference material. The current application does not read,
-sync, or display questions from those files. They remain in this repository
-only to preserve older authored content. Do not edit them for a future class.
-Move any question you still need into the canonical `week-N-questions.md` file
-and upload that file from Setup.
+`qNN.html` are an obsolete pre-rendered workflow. The current application
+does not read, sync, or display questions from those files. Do not author
+them for a future class. Move any question you still need into the canonical
+`week-N-questions.md` file and upload that file from Setup.
 
 For a starting point, see
 [`classes/templates/question-template.md`](../classes/templates/question-template.md)
-or a checked-in `classes/<course-slug>/week-N-questions.md` file. The obsolete
-pre-rendered workflow is preserved only as historical context in
-[`LEGACY_PRE_RENDERED_HTML_GUIDE.md`](LEGACY_PRE_RENDERED_HTML_GUIDE.md).
+or a checked-in `classes/<course-slug>/week-N-questions.md` file.

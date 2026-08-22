@@ -1,6 +1,6 @@
 # Known Issues and Improvement Backlog
 
-Last reviewed: 2026-08-21
+Last reviewed: 2026-08-22
 
 ## Current status
 
@@ -15,7 +15,8 @@ The full automated suite passes. Current coverage includes:
 - transient presence-write and demo-marker failures
 - retry and read-back behavior after interrupted vote responses
 - stable discussion-question visibility across edits
-- current-week presentation, challenge, and teammate-thumb exports
+- current-week and previous-week presentation, challenge, and
+  teammate-thumb exports with identical workbook layout
 - v1.0 to v1.1 schema migration, backup, restore, and export routing
 - presentation-team finalization and cancellation idempotency
 - challenger selection, clearing, cancellation, and reselection counts
@@ -23,6 +24,9 @@ The full automated suite passes. Current coverage includes:
 - participation removal only through confirmed course reset
 - case-insensitive roster identity protection
 - safe discard confirmation for saved presentation and challenger ratings
+- instructor login and initialization agreeing on 4-32 digit PINs
+- command-line instructor PIN rotation across all or one course database
+- obsolete pre-rendered question assets fully removed from the repository
 
 ## P3: Production-equivalent load validation is not automated
 

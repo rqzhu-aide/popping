@@ -46,6 +46,13 @@ versions as defined in `VERSIONING.md`.
   at 4 characters, which locked out instructors who set a longer PIN at
   course initialization). `init-course-db.py` validates the same range.
 
+### Removed
+
+- Deleted the obsolete pre-rendered question assets (`classes/*/weekN/`
+  folders, `question-guide/examples/`, and the legacy authoring guide). The
+  application never read them; the canonical `week-N-questions.md` workflow is
+  now the only documented path.
+
 ## [v1.0.0] - 2026-08-15
 
 ### Added
