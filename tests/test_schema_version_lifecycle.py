@@ -141,7 +141,7 @@ def _add_ledger(connection, schema_version="1.0.0", app_version="1.0.0"):
 
 def test_baseline_schema_contract_is_fixed():
     assert versioning.BASELINE_SCHEMA_VERSION == "1.0.0"
-    assert versioning.SCHEMA_VERSION_HISTORY == ("1.0.0",)
+    assert versioning.SCHEMA_VERSION_HISTORY == ("1.0.0", "1.1.0")
 
 
 def test_legacy_adoption_stamps_fixed_baseline_and_backfills_once():
@@ -151,12 +151,15 @@ def test_legacy_adoption_stamps_fixed_baseline_and_backfills_once():
     )
     try:
         _seed_durable_rows(connection, course_id)
+        connection.execute("UPDATE course_state SET phase = 'ended'")
         database._ensure_schema_locked(connection)
 
         assert connection.execute(
             "SELECT schema_version FROM schema_migrations ORDER BY id"
         ).fetchall()[0][0] == versioning.BASELINE_SCHEMA_VERSION
-        for table in database._VERSIONED_DATA_TABLES:
+        for table in database._versioned_data_tables_for(
+            versioning.BASELINE_SCHEMA_VERSION
+        ):
             assert connection.execute(
                 f"SELECT DISTINCT data_version FROM {table}"
             ).fetchall()[0][0] == versioning.BASELINE_DATA_VERSION
@@ -175,6 +178,7 @@ def test_existing_ledger_does_not_rewrite_missing_history_provenance():
         history=[{"presentation_key": "already-versioned-database"}]
     )
     try:
+        connection.execute("UPDATE course_state SET phase = 'ended'")
         database._ensure_schema_locked(connection)
         history = json.loads(
             connection.execute(
@@ -269,6 +273,9 @@ def test_future_migration_cannot_leave_stale_baseline_defaults(monkeypatch):
             "_SCHEMA_MIGRATIONS",
             {("1.0.0", "1.1.0"): migrate},
         )
+        monkeypatch.setattr(
+            database, "_validate_participation_schema", lambda _db, **_kw: None
+        )
         connection.execute("BEGIN")
         with pytest.raises(RuntimeError, match="data-version default"):
             database.migrate_schema_connection(connection)
@@ -320,6 +327,7 @@ def test_init_requires_current_metadata_for_candidate_but_accepts_legacy_backup(
 ):
     current_path = tmp_path / "current.db"
     current, _course_id = _create_course_db(current_path)
+    database.upgrade_schema_connection(current)
     current.close()
     init_module.validate_course_database(
         current_path, "safe101", require_current_version=True
@@ -337,8 +345,14 @@ def test_init_requires_current_metadata_for_candidate_but_accepts_legacy_backup(
     claimed_path = tmp_path / "claimed-current.db"
     claimed, _course_id = _create_course_db(claimed_path, versioned=False)
     _add_ledger(claimed)
+    claimed.execute(
+        """INSERT INTO schema_migrations
+           (schema_version, applied_by_app_version)
+           VALUES ('1.1.0', '1.1.0')"""
+    )
+    claimed.commit()
     claimed.close()
-    with pytest.raises(RuntimeError, match="data-version metadata"):
+    with pytest.raises(RuntimeError, match="missing required column"):
         init_module.validate_course_database(
             claimed_path, "safe101", require_current_version=True
         )
@@ -352,10 +366,133 @@ def test_restore_accepts_preversioning_baseline(restore_module, tmp_path):
     restore_module.validate_course_database(legacy_path, "safe101")
 
 
+def test_restore_rejects_v1_1_database_missing_participant_table(
+    restore_module,
+    tmp_path,
+):
+    path = tmp_path / "missing-participants.db"
+    connection, _course_id = _create_course_db(path)
+    database.upgrade_schema_connection(connection)
+    connection.execute("DROP TABLE presentation_participants")
+    connection.commit()
+    connection.close()
+
+    with pytest.raises(
+        RuntimeError,
+        match="presentation_participants is missing required column",
+    ):
+        restore_module.validate_course_database(path, "safe101")
+
+
+def test_current_schema_contract_repairs_only_missing_expected_indexes():
+    connection, _course_id = _create_course_db()
+    try:
+        database.upgrade_schema_connection(connection)
+        connection.execute(
+            "DROP INDEX idx_presentation_participants_student"
+        )
+
+        with pytest.raises(RuntimeError, match="missing required index"):
+            database.validate_current_schema(connection)
+        database.validate_current_schema(connection, repair_indexes=True)
+        database.validate_current_schema(connection)
+
+        columns = tuple(
+            row[2] for row in connection.execute(
+                "PRAGMA index_info(idx_presentation_participants_student)"
+            )
+        )
+        assert columns == ("course_id", "student_id")
+    finally:
+        connection.close()
+
+
+def test_current_schema_contract_rejects_named_partial_index():
+    connection, _course_id = _create_course_db()
+    try:
+        database.upgrade_schema_connection(connection)
+        connection.execute(
+            "DROP INDEX idx_presentation_participants_student"
+        )
+        connection.execute(
+            """CREATE INDEX idx_presentation_participants_student
+               ON presentation_participants(course_id, student_id)
+               WHERE course_id > 0"""
+        )
+
+        with pytest.raises(RuntimeError, match="invalid definition"):
+            database.validate_current_schema(connection, repair_indexes=True)
+    finally:
+        connection.close()
+
+
+def test_current_schema_contract_rejects_missing_participant_unique_key():
+    connection, _course_id = _create_course_db()
+    try:
+        database.upgrade_schema_connection(connection)
+        connection.execute(
+            """ALTER TABLE presentation_participants
+               RENAME TO old_presentation_participants"""
+        )
+        connection.execute(
+            """CREATE TABLE presentation_participants AS
+               SELECT * FROM old_presentation_participants WHERE 0"""
+        )
+        connection.execute("DROP TABLE old_presentation_participants")
+
+        with pytest.raises(RuntimeError, match="missing required unique key"):
+            database.validate_current_schema(connection, repair_indexes=True)
+    finally:
+        connection.close()
+
+
+def test_current_schema_contract_rejects_missing_participant_foreign_keys():
+    connection, _course_id = _create_course_db()
+    try:
+        database.upgrade_schema_connection(connection)
+        connection.execute(
+            """ALTER TABLE presentation_participants
+               RENAME TO old_presentation_participants"""
+        )
+        connection.execute(
+            """CREATE TABLE presentation_participants (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                course_id INTEGER NOT NULL,
+                session_key INTEGER NOT NULL,
+                week_num INTEGER,
+                presentation_key TEXT NOT NULL,
+                student_id INTEGER NOT NULL,
+                student_identifier TEXT NOT NULL,
+                student_name TEXT,
+                team_id INTEGER,
+                team_name TEXT,
+                data_version TEXT NOT NULL,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(course_id, presentation_key, student_id)
+            )"""
+        )
+        connection.execute(
+            """INSERT INTO presentation_participants
+               (id, course_id, session_key, week_num, presentation_key,
+                student_id, student_identifier, student_name, team_id,
+                team_name, data_version, created_at)
+               SELECT id, course_id, session_key, week_num, presentation_key,
+                      student_id, student_identifier, student_name, team_id,
+                      team_name, data_version, created_at
+               FROM old_presentation_participants"""
+        )
+        connection.execute("DROP TABLE old_presentation_participants")
+
+        with pytest.raises(RuntimeError, match="missing required foreign key"):
+            database.validate_current_schema(connection, repair_indexes=True)
+    finally:
+        connection.close()
+
+
 @pytest.mark.parametrize(
     "schema_version, app_version, message",
     (
-        ("1.1.0", "1.0.0", "newer"),
+        ("1.2.0", "1.1.0", "newer"),
         ("0.9.0", "1.0.0", "unknown"),
         ("1.0.1", "1.0.0", "patch-level"),
         ("1.0.0", "not-a-version", "invalid version"),
@@ -395,7 +532,7 @@ def test_restore_rejects_future_source_before_confirmation_or_live_backup(
     source_path = tmp_path / "future.db"
     source, _course_id = _create_course_db(source_path)
     source.execute(
-        "UPDATE schema_migrations SET schema_version = '1.1.0'"
+        "UPDATE schema_migrations SET schema_version = '1.2.0'"
     )
     source.commit()
     source.close()
@@ -500,7 +637,8 @@ def test_maintenance_validators_reject_unadoptable_legacy_database(
     path = tmp_path / "malformed-legacy.db"
     connection, _course_id = _create_course_db(path, versioned=False)
     connection.execute(
-        "UPDATE course_state SET presentation_history = '{broken'"
+        """UPDATE course_state
+           SET phase = 'ended', presentation_history = '{broken}'"""
     )
     connection.commit()
     connection.close()

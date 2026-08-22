@@ -25,10 +25,6 @@ REQUIRED_SCHEMA = {
         'id', 'course_id', 'phase', 'active_team_id', 'active_question_id',
         'current_question', 'presentation_started_at'
     },
-    'peer_reviews': {
-        'course_id', 'grader_id', 'recipient_id', 'criterion', 'score',
-        'created_at'
-    },
     'presentation_ratings': {
         'course_id', 'student_id', 'question_key', 'q1_developed', 'q2_easy'
     },
@@ -42,9 +38,11 @@ if PROJECT_ROOT not in sys.path:
 
 from database import (
     validate_data_version_schema,
+    validate_current_schema,
     validate_legacy_adoption_candidate,
     validate_schema_compatibility,
 )
+from versioning import SCHEMA_VERSION
 
 
 def validate_slug(slug):
@@ -114,6 +112,8 @@ def validate_course_database(path, expected_slug):
         )
         if recorded_version is None:
             validate_legacy_adoption_candidate(conn)
+        elif recorded_version == SCHEMA_VERSION:
+            validate_current_schema(conn)
         else:
             validate_data_version_schema(conn)
 

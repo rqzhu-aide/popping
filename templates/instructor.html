@@ -162,7 +162,13 @@
                     {% for s in team_students %}
                     <div class="roster-member">
                         <span class="team-dot" style="background:{{ t.color }}"></span>
-                        {{ s | display_name }}
+                        <span class="roster-member-name">{{ s | display_name }}</span>
+                        <span class="participation-badges" aria-label="Participation history">
+                            <span class="participation-badge{% if (s.presentation_count or 0) == 0 %} is-zero{% endif %}"
+                                  title="Completed presentation-team turns">Team turns: <strong>{{ s.presentation_count or 0 }}</strong></span>
+                            <span class="participation-badge{% if (s.challenger_count or 0) == 0 %} is-zero{% endif %}"
+                                  title="Confirmed challenger turns">Challenge turns: <strong>{{ s.challenger_count or 0 }}</strong></span>
+                        </span>
                     </div>
                     {% endfor %}
                 {% else %}
@@ -187,6 +193,7 @@
 
     <section class="card">
         <h2>Student Management</h2>
+        <p class="hint">Counts cover this course offering and are tracked from v1.1.0 onward.</p>
         {% if not session.get('is_demo') %}
         <div class="add-student-form">
             <input type="text" id="new-student-id" placeholder="Student ID" required>
@@ -228,10 +235,17 @@
             <table class="data-table" id="student-table">
                 <thead>
                     <tr>
-                        <th class="sortable" data-sort="student_id" onclick="sortStudents('student_id')">ID <span class="sort-arrow"></span></th>
-                        <th class="sortable" data-sort="name" onclick="sortStudents('name')">Name <span class="sort-arrow"></span></th>
+                        <th class="sortable" data-sort="student_id" aria-sort="none" tabindex="0"
+                            onclick="sortStudents('student_id')" onkeydown="studentSortHeaderKeydown(event, 'student_id')">ID <span class="sort-arrow"></span></th>
+                        <th class="sortable" data-sort="name" aria-sort="none" tabindex="0"
+                            onclick="sortStudents('name')" onkeydown="studentSortHeaderKeydown(event, 'name')">Name <span class="sort-arrow"></span></th>
                         <th>Team</th>
-                        <th class="sortable" data-sort="last_active_at" onclick="sortStudents('last_active_at')">Status <span class="sort-arrow"></span></th>
+                        <th class="sortable" data-sort="presentation_count" aria-sort="none" tabindex="0"
+                            onclick="sortStudents('presentation_count')" onkeydown="studentSortHeaderKeydown(event, 'presentation_count')">Team turns <span class="sort-arrow"></span></th>
+                        <th class="sortable" data-sort="challenger_count" aria-sort="none" tabindex="0"
+                            onclick="sortStudents('challenger_count')" onkeydown="studentSortHeaderKeydown(event, 'challenger_count')">Challenge turns <span class="sort-arrow"></span></th>
+                        <th class="sortable" data-sort="last_active_at" aria-sort="none" tabindex="0"
+                            onclick="sortStudents('last_active_at')" onkeydown="studentSortHeaderKeydown(event, 'last_active_at')">Status <span class="sort-arrow"></span></th>
                         <th>Last Login</th>
                         {% if not session.get('is_demo') %}
                         <th>Action</th>
@@ -362,7 +376,17 @@
                         <option value="">-- Choose team --</option>
                         {% for t in teams[:max_teams] %}
                         {% set presentation_members = students | selectattr('team_id', 'equalto', t.id) | list %}
-                        <option value="{{ t.id }}" {% if not presentation_members %}disabled{% endif %}>{{ t.name }}{% if not presentation_members %} (empty){% endif %}</option>
+                        {% set participation = namespace(never=0) %}
+                        {% for member in presentation_members %}
+                            {% if (member.presentation_count or 0) == 0 %}
+                                {% set participation.never = participation.never + 1 %}
+                            {% endif %}
+                        {% endfor %}
+                        <option value="{{ t.id }}"
+                                data-team-name="{{ t.name }}"
+                                data-member-count="{{ presentation_members | length }}"
+                                data-never-count="{{ participation.never }}"
+                                {% if not presentation_members %}disabled{% endif %}>{{ t.name }}{% if not presentation_members %} (empty){% else %} · {{ participation.never }}/{{ presentation_members | length }} no prior turn{% endif %}</option>
                         {% endfor %}
                     </select>
                 </div>
@@ -389,6 +413,45 @@
             </div>
             </div>
 
+            <div class="team-participation-preview" id="team-participation-preview"
+                 aria-live="polite">
+                <p class="hint team-participation-placeholder" id="team-participation-placeholder">
+                    Choose a team to review each member's participation history.
+                </p>
+                {% for t in teams[:max_teams] %}
+                {% set participation_members = students | selectattr('team_id', 'equalto', t.id) | list %}
+                {% set participation = namespace(never=0) %}
+                {% for member in participation_members %}
+                    {% if (member.presentation_count or 0) == 0 %}
+                        {% set participation.never = participation.never + 1 %}
+                    {% endif %}
+                {% endfor %}
+                <section class="team-participation-team" data-team-id="{{ t.id }}" hidden>
+                    <div class="team-participation-heading">
+                        <h4>{{ t.name }} participation history</h4>
+                        <span class="team-participation-summary" data-role="team-summary">
+                            {% if participation_members %}{{ participation.never }} of {{ participation_members | length }} members have no completed team turns.{% else %}No members.{% endif %}
+                        </span>
+                    </div>
+                    {% if participation_members %}
+                    <ul class="team-participation-members">
+                        {% for member in participation_members %}
+                        <li class="team-participation-member"
+                            data-student-id="{{ member.id }}"
+                            data-presentation-count="{{ member.presentation_count or 0 }}"
+                            data-challenger-count="{{ member.challenger_count or 0 }}">
+                            <span class="team-participation-member-name">{{ member | display_name }}</span>
+                            <span class="participation-badges" aria-label="Participation history">
+                                <span class="participation-badge{% if (member.presentation_count or 0) == 0 %} is-zero{% endif %}">Team turns: <strong class="team-turn-count">{{ member.presentation_count or 0 }}</strong></span>
+                                <span class="participation-badge{% if (member.challenger_count or 0) == 0 %} is-zero{% endif %}">Challenge turns: <strong class="challenge-turn-count">{{ member.challenger_count or 0 }}</strong></span>
+                            </span>
+                        </li>
+                        {% endfor %}
+                    </ul>
+                    {% endif %}
+                </section>
+                {% endfor %}
+            </div>
             {# History panel — always visible in competition phase #}
             <div class="history-panel" id="history-panel" style="margin-top:20px;">
                 <div class="history-heading">

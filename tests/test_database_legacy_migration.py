@@ -148,31 +148,33 @@ def test_schema_checks_for_different_courses_do_not_block_each_other(
         def __init__(self, slug):
             self.slug = slug
 
-        def execute(self, _sql):
-            return None
-
-        def commit(self):
-            return None
-
-        def rollback(self):
-            return None
 
     connections = {
         slow_slug: FakeConnection(slow_slug),
         fast_slug: FakeConnection(fast_slug),
     }
 
-    def fake_migration(connection):
+    def fake_inspection(connection, allow_unversioned=True):
+        assert connection.slug in connections
+        assert allow_unversioned is True
+        return database.SCHEMA_VERSION
+
+    def fake_validation(connection, repair_indexes=False):
+        assert repair_indexes is False
         if connection.slug == slow_slug:
             slow_started.set()
             assert release_slow.wait(timeout=2)
         else:
             fast_finished.set()
+        return database.SCHEMA_VERSION
 
     database.forget_schema(slow_slug)
     database.forget_schema(fast_slug)
     monkeypatch.setattr(database, "get_db", connections.get)
-    monkeypatch.setattr(database, "_ensure_schema_locked", fake_migration)
+    monkeypatch.setattr(database, "inspect_schema_version", fake_inspection)
+    monkeypatch.setattr(
+        database, "validate_current_schema", fake_validation
+    )
 
     slow_thread = threading.Thread(
         target=database.ensure_schema, args=(slow_slug,)

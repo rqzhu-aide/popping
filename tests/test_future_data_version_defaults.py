@@ -128,6 +128,10 @@ def test_legacy_peer_review_conversion_stamps_baseline_without_default(
         monkeypatch.setattr(
             database, "_VERSIONED_DATA_TABLES", ("teammate_thumbs",)
         )
+        monkeypatch.setattr(
+            database, "_validate_participation_schema",
+            lambda _db, repair_indexes=False: None,
+        )
         database._ensure_schema_locked(db)
 
         row = db.execute(
@@ -135,5 +139,11 @@ def test_legacy_peer_review_conversion_stamps_baseline_without_default(
                WHERE source_question_key = 'legacy'"""
         ).fetchone()
         assert row["data_version"] == database.BASELINE_DATA_VERSION
+        version_column = {
+            row["name"]: row
+            for row in db.execute("PRAGMA table_info(teammate_thumbs)")
+        }["data_version"]
+        assert version_column["notnull"] == 1
+        assert version_column["dflt_value"] is None
     finally:
         db.close()

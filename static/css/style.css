@@ -206,10 +206,17 @@ a:visited:hover { color: var(--primary-hover); }
     box-shadow: var(--shadow-lg);
     min-width: 240px;
     z-index: 200;
-    overflow: hidden;
+    overflow: visible;
 }
 .nav-dropdown-menu.open {
     display: block;
+}
+.nav-dropdown-menu > .nav-dropdown-item:first-child,
+.nav-dropdown-menu > .nav-submenu:first-child .nav-submenu-label {
+    border-radius: 8px 8px 0 0;
+}
+.nav-dropdown-menu > .nav-dropdown-item:last-child {
+    border-radius: 0 0 8px 8px;
 }
 .nav-dropdown-item {
     display: block;
@@ -229,6 +236,59 @@ a:visited:hover { color: var(--primary-hover); }
 }
 .nav-dropdown-item.disabled:hover {
     background: none;
+}
+
+/* Nested flyout submenu (e.g. Download Results → week list) */
+.nav-submenu {
+    position: relative;
+    padding: 0;
+}
+.nav-submenu-label {
+    display: block;
+    width: 100%;
+    text-align: left;
+    padding: 10px 16px;
+    font-size: 0.88rem;
+    font-weight: 500;
+    font-family: inherit;
+    background: none;
+    border: none;
+    cursor: pointer;
+    color: var(--text);
+    transition: background 0.1s;
+}
+.nav-submenu-label:hover {
+    background: var(--bg);
+}
+.nav-submenu-arrow {
+    float: right;
+    color: var(--text-muted);
+}
+.nav-submenu-menu {
+    display: none;
+    position: absolute;
+    right: 100%;
+    top: -9px;
+    margin-right: -1px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    box-shadow: var(--shadow-lg);
+    min-width: 200px;
+    max-height: 320px;
+    overflow-y: auto;
+    z-index: 210;
+}
+.nav-submenu:hover .nav-submenu-menu,
+.nav-submenu:focus-within .nav-submenu-menu,
+.nav-submenu-menu.open {
+    display: block;
+}
+.nav-submenu-menu .nav-dropdown-item:first-child {
+    border-radius: 8px 8px 0 0;
+}
+.nav-submenu-menu .nav-dropdown-item:last-child {
+    border-radius: 0 0 8px 8px;
 }
 
 .nav-home {
@@ -2320,4 +2380,144 @@ html.light .student-timer {
 .challenge-active-row .challenge-mutating-btn {
     flex: 0 0 auto;
     margin-left: auto;
+}
+
+/* ===== Instructor participation history ===== */
+.roster-member-name {
+    flex: 1;
+    min-width: 0;
+    overflow-wrap: anywhere;
+}
+.participation-badges {
+    display: inline-flex;
+    flex: 0 0 auto;
+    flex-wrap: wrap;
+    gap: 5px;
+    justify-content: flex-end;
+    margin-left: auto;
+}
+.participation-badge {
+    align-items: center;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    color: var(--text-muted);
+    display: inline-flex;
+    font-size: 0.72rem;
+    font-variant-numeric: tabular-nums;
+    gap: 3px;
+    line-height: 1.2;
+    padding: 3px 7px;
+    white-space: nowrap;
+}
+.participation-badge strong {
+    color: var(--text);
+}
+.participation-badge.is-zero {
+    background: var(--success-soft);
+    border-color: var(--success-border);
+    color: var(--success-text);
+}
+.participation-badge.is-zero strong {
+    color: inherit;
+}
+.participation-table-count {
+    font-variant-numeric: tabular-nums;
+    font-weight: 700;
+}
+.sortable:focus-visible {
+    border-radius: 4px;
+    outline: 2px solid var(--primary);
+    outline-offset: -2px;
+}
+.team-participation-preview {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px 14px;
+}
+.team-participation-placeholder {
+    margin: 0;
+}
+.team-participation-placeholder[hidden],
+.team-participation-team[hidden] {
+    display: none;
+}
+.team-participation-heading {
+    align-items: baseline;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px 12px;
+    justify-content: space-between;
+    margin-bottom: 9px;
+}
+.team-participation-heading h4 {
+    margin: 0;
+}
+.team-participation-summary {
+    color: var(--text-muted);
+    font-size: 0.82rem;
+}
+.team-participation-members {
+    display: grid;
+    gap: 6px;
+    list-style: none;
+    margin: 0;
+    padding: 0;
+}
+.team-participation-member {
+    align-items: center;
+    background: var(--surface);
+    border-radius: 6px;
+    display: flex;
+    gap: 8px;
+    padding: 7px 9px;
+}
+.team-participation-member-name {
+    flex: 1;
+    min-width: 0;
+    overflow-wrap: anywhere;
+}
+.challenge-hand-row {
+    align-items: center;
+    display: flex;
+    gap: 8px;
+    justify-content: space-between;
+    margin: 4px 0;
+}
+.challenge-hand-details,
+.challenge-active-details {
+    align-items: center;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 5px 8px;
+}
+.challenge-hand-details {
+    flex: 1;
+    min-width: 0;
+}
+.challenge-hand-row .challenge-mutating-btn {
+    flex: 0 0 auto;
+    margin-left: auto;
+}
+
+@media (max-width: 640px) {
+    .roster-member,
+    .team-participation-member {
+        align-items: flex-start;
+        flex-wrap: wrap;
+    }
+    .roster-member .participation-badges,
+    .team-participation-member .participation-badges {
+        flex-basis: 100%;
+        justify-content: flex-start;
+        margin-left: 24px;
+    }
+    .challenge-hand-row {
+        align-items: flex-start;
+        flex-direction: column;
+    }
+    .challenge-hand-row .challenge-mutating-btn {
+        margin-left: 0;
+    }
 }

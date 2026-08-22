@@ -1,6 +1,6 @@
 # Known Issues and Improvement Backlog
 
-Last reviewed: 2026-08-14
+Last reviewed: 2026-08-21
 
 ## Current status
 
@@ -16,6 +16,11 @@ The full automated suite passes. Current coverage includes:
 - retry and read-back behavior after interrupted vote responses
 - stable discussion-question visibility across edits
 - current-week presentation, challenge, and teammate-thumb exports
+- v1.0 to v1.1 schema migration, backup, restore, and export routing
+- presentation-team finalization and cancellation idempotency
+- challenger selection, clearing, cancellation, and reselection counts
+- participation persistence across sessions and roster archive/reactivation
+- participation removal only through confirmed course reset
 - case-insensitive roster identity protection
 - safe discard confirmation for saved presentation and challenger ratings
 
@@ -52,6 +57,16 @@ non-sensitive course database:
 - CPU, memory, and disk latency remain within the selected Render plan
 
 Do not run this test against the active production class service.
+
+## Operational limitation: v1.0 participation cannot be backfilled
+
+The v1.1 migration preserves all existing feedback, but initializes the new
+presentation-team participation history as empty. Old rating rows cannot prove
+which students were assigned to the presenting team when a presentation was
+finalized. Cleared challenger selections also leave no durable v1.0 record.
+
+Treat the displayed Team turns and Challenge turns as tracked since v1.1.0.
+The original v1.0 feedback remains available through the legacy export.
 
 ## P3: Equation formatting still uses one external CDN
 

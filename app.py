@@ -35,9 +35,9 @@ from database import (
     get_max_teams,
     init_app,
     init_db,
-    validate_data_version_schema,
+    validate_current_schema,
     validate_legacy_adoption_candidate,
-    validate_schema_compatibility,
+    inspect_schema_version,
     is_sqlite_busy_error,
     query_db,
     SQLITE_BUSY_RETRY_AFTER_SECONDS,
@@ -1499,13 +1499,21 @@ def _inspect_course_availability(slug):
             }
             if not required_columns.issubset(columns):
                 return result
-        recorded_version = validate_schema_compatibility(
+        recorded_version = inspect_schema_version(
             connection, allow_unversioned=True
         )
         if recorded_version is None:
             validate_legacy_adoption_candidate(connection)
-        else:
-            validate_data_version_schema(connection)
+        actual_schema_version = recorded_version or BASELINE_SCHEMA_VERSION
+        if actual_schema_version != SCHEMA_VERSION:
+            result.update({
+                'status': 'migration_required',
+                'message': (
+                    'Course database maintenance is required before login.'
+                ),
+            })
+            return result
+        validate_current_schema(connection)
         rows = connection.execute(
             '''SELECT c.*, i.name AS instructor_name
                FROM courses c
@@ -1564,7 +1572,8 @@ def _course_availability(slug):
         if cached:
             cache_ttl = (
                 COURSE_UNAVAILABLE_TTL
-                if cached['result']['status'] in ('unavailable', 'missing')
+                if cached['result']['status'] in (
+                    'unavailable', 'missing', 'migration_required')
                 else COURSE_AVAILABILITY_TTL
             )
             if now - cached['checked_at'] < cache_ttl:
@@ -1643,16 +1652,15 @@ def healthz():
                 connection = sqlite3.connect(db_uri, uri=True, timeout=1)
                 connection.row_factory = sqlite3.Row
                 connection.execute('PRAGMA query_only = ON')
-                recorded_version = validate_schema_compatibility(
+                recorded_version = inspect_schema_version(
                     connection, allow_unversioned=True
                 )
                 if recorded_version is None:
                     validate_legacy_adoption_candidate(connection)
-                else:
-                    validate_data_version_schema(connection)
-                course_schema_versions[slug] = (
-                    recorded_version or BASELINE_SCHEMA_VERSION
-                )
+                actual_schema_version = recorded_version or BASELINE_SCHEMA_VERSION
+                if actual_schema_version == SCHEMA_VERSION:
+                    validate_current_schema(connection)
+                course_schema_versions[slug] = actual_schema_version
                 has_course = connection.execute(
                     'SELECT 1 FROM courses LIMIT 1'
                 ).fetchone()
@@ -1686,10 +1694,12 @@ def healthz():
         for version in course_schema_versions.values()
     ):
         payload['schema_migration_pending'] = True
+        payload['status'] = 'unavailable'
         payload['course_database_schema_versions'] = {
             slug: public_version(version)
             for slug, version in sorted(course_schema_versions.items())
         }
+        return jsonify(payload), 503
     return jsonify(payload)
 
 
@@ -2130,10 +2140,16 @@ def instructor_course(slug):
          state['active_question_id'] if state else None]
     )
     cutoff = (_utcnow() - timedelta(minutes=3)).strftime('%Y-%m-%d %H:%M:%S')
+    participation_counts = _participation_counts_by_student(
+        get_db(slug), course['id'], [student['id'] for student in students]
+    )
     students_enhanced = []
     for s in students:
         d = dict(s)
         d['is_online'] = s['last_active_at'] and s['last_active_at'] > cutoff
+        counts = participation_counts.get(s['id'], {})
+        d['presentation_count'] = counts.get('presentation_count', 0)
+        d['challenger_count'] = counts.get('challenger_count', 0)
         students_enhanced.append(d)
 
     # End session stats
@@ -2279,6 +2295,7 @@ _SESSION_ACTIVITY_TABLES = (
     'presentation_ratings',
     'challenge_rounds',
     'challenge_ratings',
+    'presentation_participants',
 )
 _ROSTER_FROZEN_MESSAGE = (
     'This session already has saved activity. End Session, then start a new '
@@ -2334,6 +2351,82 @@ def _session_roster_mutation_guard(db, course_id, state):
             db, course_id, state['session_key'] or 0):
         return _ROSTER_FROZEN_MESSAGE, 409
     return None
+
+
+def _participation_counts_by_student(db, course_id, student_ids=None):
+    """Return trustworthy course-wide participation counts by roster row."""
+    target_ids = []
+    if student_ids is not None:
+        for student_id in student_ids:
+            if student_id is None:
+                continue
+            try:
+                target_ids.append(int(student_id))
+            except (TypeError, ValueError):
+                continue
+        target_ids = list(dict.fromkeys(target_ids))
+        if not target_ids:
+            return {}
+
+    target_filter = ''
+    params = [course_id]
+    if target_ids:
+        placeholders = ','.join('?' * len(target_ids))
+        target_filter = f' AND id IN ({placeholders})'
+        params.extend(target_ids)
+    params.extend([
+        course_id, SCHEMA_VERSION,
+        course_id, SCHEMA_VERSION,
+    ])
+    rows = db.execute(
+        f'''WITH target_students AS (
+                SELECT id FROM students
+                WHERE course_id = ? {target_filter}
+            ),
+            presentation_counts AS (
+                SELECT participant.student_id, COUNT(*) AS presentation_count
+                FROM presentation_participants participant
+                JOIN target_students target
+                  ON target.id = participant.student_id
+                WHERE participant.course_id = ?
+                  AND typeof(participant.week_num) = 'integer'
+                  AND participant.week_num > 0
+                  AND popping_version_compatible(
+                          participant.data_version, ?) = 1
+                GROUP BY participant.student_id
+            ),
+            challenger_counts AS (
+                SELECT challenge.challenger_id AS student_id,
+                       COUNT(*) AS challenger_count
+                FROM challenge_rounds challenge
+                JOIN target_students target
+                  ON target.id = challenge.challenger_id
+                WHERE challenge.course_id = ?
+                  AND typeof(challenge.week_num) = 'integer'
+                  AND challenge.week_num > 0
+                  AND popping_version_compatible(
+                          challenge.data_version, ?) = 1
+                GROUP BY challenge.challenger_id
+            )
+            SELECT target.id AS student_id,
+                   COALESCE(presentation.presentation_count, 0)
+                       AS presentation_count,
+                   COALESCE(challenger.challenger_count, 0)
+                       AS challenger_count
+            FROM target_students target
+            LEFT JOIN presentation_counts presentation
+              ON presentation.student_id = target.id
+            LEFT JOIN challenger_counts challenger
+              ON challenger.student_id = target.id''',
+        params,
+    ).fetchall()
+    return {
+        row['student_id']: {
+            'presentation_count': int(row['presentation_count'] or 0),
+            'challenger_count': int(row['challenger_count'] or 0),
+        }
+        for row in rows
+    }
 
 
 # Thumbs-up during discussion recognizes a teammate for the whole discussion
@@ -2760,17 +2853,44 @@ def _compute_state(slug, include_poll_count=True, known_question_id=None,
                        WHERE hand.course_id = ? AND hand.presentation_key = ?
                        ORDER BY hand.raised_at''',
                     [cid, pres_key])
+                active_challenges = result.get('active_challenges') or []
+                participation_ids = [hand['student_id'] for hand in hands]
+                participation_ids.extend(
+                    challenge.get('challenger_id')
+                    for challenge in active_challenges
+                    if isinstance(challenge, dict)
+                )
+                participation_counts = _participation_counts_by_student(
+                    get_db(slug), cid, participation_ids
+                )
                 result['challenge_hands'] = [
                     {'student_id': h['student_id'],
                      'student_name': h['student_name'],
                      'student_team_id': h['student_team_id'],
-                     'student_team_name': h['student_team_name']}
+                     'student_team_name': h['student_team_name'],
+                     **participation_counts.get(h['student_id'], {
+                         'presentation_count': 0,
+                         'challenger_count': 0,
+                     })}
                     for h in hands
                 ]
-                active_challenges = result.get('active_challenges') or []
+                result['active_challenges'] = [
+                    {
+                        **challenge,
+                        **participation_counts.get(
+                            challenge.get('challenger_id'), {
+                                'presentation_count': 0,
+                                'challenger_count': 0,
+                            }
+                        ),
+                    }
+                    for challenge in active_challenges
+                    if isinstance(challenge, dict)
+                ]
                 challenge_keys = list(dict.fromkeys(
                     str(ch.get('challenge_key'))
-                    for ch in active_challenges if ch.get('challenge_key')
+                    for ch in result['active_challenges']
+                    if ch.get('challenge_key')
                 ))
                 challenge_summaries = {
                     key: {
@@ -2857,10 +2977,12 @@ def _compute_state(slug, include_poll_count=True, known_question_id=None,
 
 
 def _compute_teams(slug, course_id, max_teams=None, member_team_id=None,
-                   include_all_members=True):
+                   include_all_members=True,
+                   include_participation_counts=False):
     """Compute the teams + members list for the versioned roster endpoint.
 
-    Uses 2 queries total (teams + all members) instead of N+1.
+    Uses two roster queries instead of N+1, plus one aggregate participation
+    query when instructor-only counts are requested.
     Pass ``max_teams`` when the caller already has the visible-team limit.
     """
     if max_teams is None:
@@ -2883,12 +3005,24 @@ def _compute_teams(slug, course_id, max_teams=None, member_team_id=None,
     if visible_member_team_ids:
         placeholders = ','.join('?' * len(visible_member_team_ids))
         all_members = query_db(slug,
-            f'''SELECT student_id, name, team_id FROM students
+            f'''SELECT id, student_id, name, team_id FROM students
                 WHERE team_id IN ({placeholders}) AND is_active = 1''',
             visible_member_team_ids)
+    participation_counts = {}
+    if include_participation_counts:
+        participation_counts = _participation_counts_by_student(
+            get_db(slug), course_id, [member['id'] for member in all_members]
+        )
     members_by_team = {}
     for m in all_members:
-        members_by_team.setdefault(m['team_id'], []).append({'student_id': m['student_id'], 'name': m['name']})
+        member = {'student_id': m['student_id'], 'name': m['name']}
+        if include_participation_counts:
+            member['id'] = m['id']
+            member.update(participation_counts.get(m['id'], {
+                'presentation_count': 0,
+                'challenger_count': 0,
+            }))
+        members_by_team.setdefault(m['team_id'], []).append(member)
     return [
         {'id': team['id'], 'name': team['name'], 'color': team['color'],
          'member_count': team['member_count'],
@@ -2906,7 +3040,10 @@ def api_teams():
         return jsonify({'error': 'Not logged in'}), 401
     course = query_db(slug, 'SELECT * FROM courses LIMIT 1', one=True)
     if role == 'instructor':
-        return jsonify(_compute_teams(slug, course['id']))
+        return jsonify(_compute_teams(
+            slug, course['id'],
+            include_participation_counts=True,
+        ))
     student = query_db(
         slug,
         '''SELECT team_id FROM students
@@ -3401,6 +3538,28 @@ def my_responses():
 # Instructor API
 # ---------------------------------------------------------------------------
 
+def _presentation_history_match(state, presentation_key):
+    """Classify a history key as belonging to this or another session."""
+    try:
+        history = json.loads(state['presentation_history'] or '[]')
+    except (TypeError, ValueError):
+        return None
+    current_session_key = state['session_key'] or 0
+    matched_other_session = False
+    for item in history:
+        if (not isinstance(item, dict) or
+                _history_presentation_key(item) != presentation_key):
+            continue
+        try:
+            item_session_key = int(item.get('session_key') or 0)
+        except (TypeError, ValueError):
+            item_session_key = 0
+        if item_session_key == current_session_key:
+            return 'current_session'
+        matched_other_session = True
+    return 'other_session' if matched_other_session else None
+
+
 def _finalize_active_presentation(slug, course_id, db=None):
     """Append the active presentation to history and clear it in one transaction."""
     owns_transaction = db is None
@@ -3431,6 +3590,30 @@ def _finalize_active_presentation(slug, course_id, db=None):
                 [state['active_question_id'], course_id]
             ).fetchone()
             presentation_key = active_presentation_key(state)
+            team_name = team['name'] if team else 'Unknown'
+            # Deliberate dedup: finalizing the same presentation_key twice
+            # (e.g. a double-finalize race) must not grant a second turn.
+            # Genuine re-presentations always get a fresh pres-<uuid> key
+            # from start_presentation, so they still count separately.
+            db.execute(
+                '''INSERT INTO presentation_participants
+                   (course_id, session_key, week_num, presentation_key,
+                    student_id, student_identifier, student_name,
+                    team_id, team_name, data_version)
+                   SELECT student.course_id, ?, ?, ?, student.id,
+                          student.student_id,
+                          COALESCE(NULLIF(TRIM(student.name), ''),
+                                   student.student_id),
+                          ?, ?, ?
+                   FROM students student
+                   WHERE student.course_id = ? AND student.team_id = ?
+                     AND student.is_active = 1
+                   ON CONFLICT(course_id, presentation_key, student_id)
+                   DO NOTHING''',
+                [state['session_key'] or 0, state['discussion_week'] or 1,
+                 presentation_key, state['active_team_id'], team_name,
+                 APP_VERSION, course_id, state['active_team_id']]
+            )
             count = db.execute(
                 '''SELECT COUNT(DISTINCT student_id) AS c FROM presentation_ratings
                    WHERE course_id = ? AND question_key = ?
@@ -3447,7 +3630,7 @@ def _finalize_active_presentation(slug, course_id, db=None):
                 'week_num': state['discussion_week'] or 1,
                 'title': title,
                 'team_id': state['active_team_id'],
-                'team': team['name'] if team else 'Unknown',
+                'team': team_name,
                 'responses': count['c'] if count else 0,
                 'started_at': started_at,
                 'question_id': state['active_question_id'],
@@ -3899,9 +4082,12 @@ def _session_has_week_scoped_activity(
                          WHERE course_id = ? AND session_key = ?)
                OR EXISTS(SELECT 1 FROM challenge_ratings
                          WHERE course_id = ? AND session_key = ?)
+               OR EXISTS(SELECT 1 FROM presentation_participants
+                         WHERE course_id = ? AND session_key = ?)
            ) AS found''',
         [course_id, session_key, course_id, session_key,
-         course_id, session_key, course_id, session_key],
+         course_id, session_key, course_id, session_key,
+         course_id, session_key],
     ).fetchone()
     if recorded and recorded['found']:
         return True
@@ -5625,13 +5811,39 @@ def next_presentation():
     db.execute('BEGIN IMMEDIATE')
     try:
         state = db.execute('SELECT * FROM course_state LIMIT 1').fetchone()
+        displayed_presentation = str(
+            data.get('presentation_key') or ''
+        ).strip()
         if (state and state['phase'] == 'competition' and
                 not state['active_team_id'] and
                 not state['active_question_id'] and
                 not active_presentation_key(state) and
-                str(data.get('presentation_key') or '').strip()):
+                displayed_presentation):
+            guard = _expected_state_guard(data, state)
+            if guard:
+                db.rollback()
+                return jsonify({'error': guard[0]}), guard[1]
+            history_match = _presentation_history_match(
+                state, displayed_presentation
+            )
             db.rollback()
-            return jsonify({'success': True, 'already_finished': True})
+            if history_match == 'current_session':
+                return jsonify({'success': True, 'already_finished': True})
+            if history_match == 'other_session':
+                return jsonify({
+                    'error': (
+                        'This presentation belongs to an earlier session. '
+                        'Reload before continuing.'
+                    ),
+                    'outcome': 'stale_session',
+                }), 409
+            return jsonify({
+                'error': (
+                    'Another page canceled this presentation. '
+                    'No participation was recorded.'
+                ),
+                'outcome': 'canceled',
+            }), 409
         guard = _presentation_guard(data, state)
         if guard:
             db.rollback()
@@ -5807,13 +6019,39 @@ def cancel_presentation():
     db.execute('BEGIN IMMEDIATE')
     try:
         state = db.execute('SELECT * FROM course_state LIMIT 1').fetchone()
+        displayed_presentation = str(
+            data.get('presentation_key') or ''
+        ).strip()
         if (state and state['phase'] == 'competition' and
                 not state['active_team_id'] and
                 not state['active_question_id'] and
                 not active_presentation_key(state) and
-                str(data.get('presentation_key') or '').strip()):
+                displayed_presentation):
+            guard = _expected_state_guard(data, state)
+            if guard:
+                db.rollback()
+                return jsonify({'error': guard[0]}), guard[1]
+            history_match = _presentation_history_match(
+                state, displayed_presentation
+            )
             db.rollback()
-            return jsonify({'success': True, 'already_finished': True})
+            if history_match == 'current_session':
+                return jsonify({
+                    'error': (
+                        'Another page already finished this presentation. '
+                        'Its participation records were kept.'
+                    ),
+                    'outcome': 'finished',
+                }), 409
+            if history_match == 'other_session':
+                return jsonify({
+                    'error': (
+                        'This presentation belongs to an earlier session. '
+                        'Reload before continuing.'
+                    ),
+                    'outcome': 'stale_session',
+                }), 409
+            return jsonify({'success': True, 'already_canceled': True})
         guard = _presentation_guard(data, state)
         if guard:
             db.rollback()
@@ -6442,7 +6680,13 @@ def api_students():
     search = request.args.get('search', '').strip()
     team_filter = request.args.get('team', '')
 
-    allowed_sorts = {'student_id': 's.student_id', 'name': 's.name', 'last_active_at': 's.last_active_at'}
+    allowed_sorts = {
+        'student_id': 's.student_id',
+        'name': 's.name',
+        'last_active_at': 's.last_active_at',
+        'presentation_count': 'presentation_count',
+        'challenger_count': 'challenger_count',
+    }
     if sort_col not in allowed_sorts:
         sort_col = 'student_id'
     sort_sql = allowed_sorts[sort_col]
@@ -6480,14 +6724,44 @@ def api_students():
     offset = (page - 1) * per_page
 
     rows = query_db(slug,
-        f'''SELECT s.id, s.student_id, s.name, s.team_id,
+        f'''WITH presentation_counts AS (
+                SELECT student_id, COUNT(*) AS presentation_count
+                FROM presentation_participants
+                WHERE course_id = ?
+                  AND typeof(week_num) = 'integer'
+                  AND week_num > 0
+                  AND popping_version_compatible(data_version, ?) = 1
+                GROUP BY student_id
+            ),
+            challenger_counts AS (
+                SELECT challenger_id AS student_id,
+                       COUNT(*) AS challenger_count
+                FROM challenge_rounds
+                WHERE course_id = ?
+                  AND typeof(week_num) = 'integer'
+                  AND week_num > 0
+                  AND popping_version_compatible(data_version, ?) = 1
+                GROUP BY challenger_id
+            )
+            SELECT s.id, s.student_id, s.name, s.team_id,
                    t.name as team_name, t.color as team_color,
-                   s.last_login_at, s.last_active_at, s.last_team_joined_at
-            FROM students s LEFT JOIN teams t ON s.team_id = t.id
+                   s.last_login_at, s.last_active_at, s.last_team_joined_at,
+                   COALESCE(presentation.presentation_count, 0)
+                       AS presentation_count,
+                   COALESCE(challenger.challenger_count, 0)
+                       AS challenger_count
+            FROM students s
+            LEFT JOIN teams t ON s.team_id = t.id
+            LEFT JOIN presentation_counts presentation
+              ON presentation.student_id = s.id
+            LEFT JOIN challenger_counts challenger
+              ON challenger.student_id = s.id
             WHERE s.course_id = ? AND s.is_active = 1 {where_clause}
-            ORDER BY {sort_sql} {order_sql}
+            ORDER BY {sort_sql} {order_sql},
+                     s.student_id COLLATE NOCASE ASC, s.id ASC
             LIMIT ? OFFSET ?''',
-        params + [per_page, offset]
+        [course['id'], SCHEMA_VERSION, course['id'], SCHEMA_VERSION]
+        + params + [per_page, offset]
     )
 
     students = []
@@ -6820,6 +7094,8 @@ def reset_data():
         db.execute('DELETE FROM challenge_hands WHERE course_id = ?', [course_id])
         db.execute('DELETE FROM challenge_rounds WHERE course_id = ?', [course_id])
         db.execute('DELETE FROM challenge_ratings WHERE course_id = ?', [course_id])
+        db.execute(
+            'DELETE FROM presentation_participants WHERE course_id = ?', [course_id])
         if 'discussion_responses' in optional_tables:
             db.execute('DELETE FROM discussion_responses WHERE course_id = ?', [course_id])
         if 'discussion_selections' in optional_tables:
@@ -6958,6 +7234,15 @@ def export_legacy_feedback(slug):
                 ORDER BY p.created_at, p.id''',
             [course['id'], SCHEMA_VERSION],
         ).fetchall()
+        participant_rows = db.execute(
+            f'''SELECT p.session_key, p.week_num, p.presentation_key,
+                       p.student_identifier, p.student_name,
+                       p.team_id, p.team_name, p.created_at, p.data_version
+                FROM presentation_participants p
+                WHERE {legacy_where}
+                ORDER BY p.created_at, p.id''',
+            [course['id'], SCHEMA_VERSION],
+        ).fetchall()
         challenge_round_rows = db.execute(
             f'''SELECT p.session_key, p.week_num, p.challenge_key,
                        p.presentation_key, p.challenge_num,
@@ -7090,7 +7375,9 @@ def export_legacy_feedback(slug):
         'challenge_key', 'presentation_key', 'challenge_number',
         'challenger_id', 'challenger_name', 'challenger_team_id',
         'challenger_team', 'rater_id', 'rater_name', 'rater_team_id',
-        'rater_team', 'score_1to5', 'data_version', 'legacy_reason',
+        'rater_team', 'score_1to5', 'participant_id', 'participant_name',
+        'participant_team_id', 'participant_team',
+        'data_version', 'legacy_reason',
         'exported_by_website_version', 'database_schema_version',
         'export_format_version', 'exported_at_utc', 'history_json',
     ]
@@ -7105,7 +7392,7 @@ def export_legacy_feedback(slug):
             row['week_num'] if row['week_num'] is not None else 'unknown',
             row['question_key'], row['source_question_key'],
             row['question_title'], row['created_at'],
-            *([''] * 12), *metadata_values(row), '',
+            *([''] * 12), *([''] * 4), *metadata_values(row), '',
         ])
     for row in rating_rows:
         write_row([
@@ -7116,8 +7403,35 @@ def export_legacy_feedback(slug):
             row['q1_developed'], row['q2_easy'], row['session_key'],
             row['week_num'] if row['week_num'] is not None else 'unknown',
             row['question_key'], '', row['question_title'], row['created_at'],
-            *([''] * 12), *metadata_values(row), '',
+            *([''] * 12), *([''] * 4), *metadata_values(row), '',
         ])
+    for row in participant_rows:
+        values = {
+            'record_type': 'presentation_participant',
+            'presenting_team_id': row['team_id'],
+            'presenting_team': row['team_name'],
+            'session_key': row['session_key'],
+            'lecture_week': (
+                row['week_num']
+                if row['week_num'] is not None else 'unknown'
+            ),
+            'question_key': row['presentation_key'],
+            'time': row['created_at'],
+            'presentation_key': row['presentation_key'],
+            'participant_id': row['student_identifier'],
+            'participant_name': row['student_name'],
+            'participant_team_id': row['team_id'],
+            'participant_team': row['team_name'],
+            'data_version': _export_data_version(row['data_version']),
+            'legacy_reason': _legacy_data_reason(
+                row['week_num'], row['data_version']
+            ),
+            'exported_by_website_version': website_version,
+            'database_schema_version': schema_version,
+            'export_format_version': export_format_version,
+            'exported_at_utc': exported_at,
+        }
+        write_row([values.get(header, '') for header in legacy_headers])
     for row in challenge_round_rows:
         write_row([
             'challenge_round', '', '', '', '', '', '', '', '',
@@ -7128,7 +7442,8 @@ def export_legacy_feedback(slug):
             row['created_at'], row['challenge_key'], row['presentation_key'],
             row['challenge_num'], row['challenger_id'], row['challenger_name'],
             row['challenger_team_id'], row['challenger_team_name'],
-            '', '', '', '', '', *metadata_values(row), '',
+            '', '', '', '', '', *([''] * 4),
+            *metadata_values(row), '',
         ])
     for row in challenge_rating_rows:
         write_row([
@@ -7142,7 +7457,8 @@ def export_legacy_feedback(slug):
             row['challenge_num'], row['challenger_id'], row['challenger_name'],
             row['challenger_team_id'], row['challenger_team_name'],
             row['rater_id'], row['rater_name'], row['rater_team_id'],
-            row['rater_team_name'], row['score'], *metadata_values(row), '',
+            row['rater_team_name'], row['score'], *([''] * 4),
+            *metadata_values(row), '',
         ])
 
     for history_row in history_rows:
@@ -7189,7 +7505,8 @@ def export_data(slug):
         flash('Unauthorized', 'error')
         return redirect(url_for('index'))
     if request.args.get('weeks', '').lower() == 'all':
-        return 'Only the current lecture week can be exported here.', 400
+        return ('Export one week at a time: use ?week=N for a specific '
+                'lecture week.'), 400
 
     try:
         from openpyxl import Workbook
@@ -7232,6 +7549,21 @@ def export_data(slug):
             state_row['discussion_week'] if state_row else None
         ) or 1
         max_teams = (state_row['max_teams'] if state_row else None) or 6
+
+        # Optional ?week=N exports a previous lecture week with the exact
+        # same workbook layout as the current week.
+        requested_week = (request.args.get('week') or '').strip()
+        if requested_week:
+            try:
+                requested_week_num = int(requested_week)
+            except ValueError:
+                return 'Invalid week parameter.', 400
+            if not 1 <= requested_week_num <= current_week:
+                return (
+                    f'Week must be between 1 and the current week '
+                    f'({current_week}).'
+                ), 400
+            current_week = requested_week_num
 
         export_weeks = [current_week]
         week_ph = ','.join('?' * len(export_weeks))
@@ -7300,6 +7632,10 @@ def export_data(slug):
                     WHERE course_id = ? AND week_num IN ({week_ph})
                       AND popping_version_compatible(data_version, ?) = 1)
                        AS ratings,
+                   (SELECT COUNT(*) FROM presentation_participants
+                    WHERE course_id = ? AND week_num IN ({week_ph})
+                      AND popping_version_compatible(data_version, ?) = 1)
+                       AS presentation_participants,
                    (SELECT COUNT(*) FROM challenge_rounds
                     WHERE course_id = ? AND week_num IN ({week_ph})
                       AND popping_version_compatible(data_version, ?) = 1)
@@ -7313,10 +7649,11 @@ def export_data(slug):
                 + [cid] + export_weeks + [SCHEMA_VERSION]
                 + [cid] + export_weeks + [SCHEMA_VERSION]
                 + [cid] + export_weeks + [SCHEMA_VERSION]
+                + [cid] + export_weeks + [SCHEMA_VERSION]
             ),
             one=True
         )
-        if sum(row_counts) > MAX_EXPORT_ROWS:
+        if sum(row_counts) + row_counts['students'] > MAX_EXPORT_ROWS:
             db.rollback()
             snapshot_open = False
             flash('The export is too large. Please contact the administrator.', 'error')
@@ -7332,6 +7669,9 @@ def export_data(slug):
                    ELSE COALESCE(s.team_id, s.last_team_id) END
                WHERE s.course_id = ? ORDER BY s.name''',
             [cid],
+        )
+        participation_counts = _participation_counts_by_student(
+            db, cid, [student['id'] for student in students]
         )
         teams = query_db(
             slug,
@@ -7377,6 +7717,24 @@ def export_data(slug):
                ORDER BY pr.question_key, pr.created_at''',
             [cid] + export_weeks + [SCHEMA_VERSION],
         )
+        presentation_participants = query_db(
+            slug,
+            f'''SELECT participant.session_key, participant.week_num,
+                      participant.presentation_key,
+                      participant.student_identifier, participant.student_name,
+                      participant.team_id, participant.team_name,
+                      participant.created_at, participant.data_version
+               FROM presentation_participants participant
+               WHERE participant.course_id = ?
+                 AND typeof(participant.week_num) = 'integer'
+                 AND participant.week_num > 0
+                 AND participant.week_num IN ({week_ph})
+                 AND popping_version_compatible(
+                         participant.data_version, ?) = 1
+               ORDER BY participant.session_key,
+                        participant.presentation_key, participant.id''',
+            [cid] + export_weeks + [SCHEMA_VERSION],
+        )
         challenge_rounds = query_db(
             slug,
             f'''SELECT ch.session_key, ch.week_num, ch.challenge_key,
@@ -7396,9 +7754,17 @@ def export_data(slug):
                LEFT JOIN challenge_ratings rating
                  ON rating.course_id = ch.course_id
                 AND rating.challenge_key = ch.challenge_key
+                AND rating.session_key = ch.session_key
+                AND rating.presentation_key = ch.presentation_key
+                AND rating.challenger_id = ch.challenger_id
+                AND rating.week_num = ch.week_num
+                AND typeof(rating.week_num) = 'integer'
+                AND rating.week_num > 0
                 AND popping_version_compatible(
                         rating.data_version, ?) = 1
                WHERE ch.course_id = ? AND ch.week_num IN ({week_ph})
+                 AND typeof(ch.week_num) = 'integer'
+                 AND ch.week_num > 0
                  AND popping_version_compatible(ch.data_version, ?) = 1
                GROUP BY ch.id
                ORDER BY ch.session_key, ch.presentation_key, ch.challenge_num''',
@@ -7431,12 +7797,38 @@ def export_data(slug):
                LEFT JOIN challenge_rounds ch
                  ON ch.course_id = cr.course_id
                 AND ch.challenge_key = cr.challenge_key
+                AND ch.session_key = cr.session_key
+                AND ch.presentation_key = cr.presentation_key
+                AND ch.challenger_id = cr.challenger_id
+                AND ch.week_num = cr.week_num
+                AND typeof(ch.week_num) = 'integer'
+                AND ch.week_num > 0
                 AND popping_version_compatible(ch.data_version, ?) = 1
                WHERE cr.course_id = ? AND cr.week_num IN ({week_ph})
+                 AND typeof(cr.week_num) = 'integer'
+                 AND cr.week_num > 0
                  AND popping_version_compatible(cr.data_version, ?) = 1
                ORDER BY cr.challenge_key, cr.created_at''',
             [SCHEMA_VERSION, cid] + export_weeks + [SCHEMA_VERSION],
         )
+        coursewide_participation_versions = query_db(
+            slug,
+            '''SELECT DISTINCT data_version
+               FROM presentation_participants
+               WHERE course_id = ?
+                 AND typeof(week_num) = 'integer'
+                 AND week_num > 0
+                 AND popping_version_compatible(data_version, ?) = 1
+               UNION
+               SELECT DISTINCT data_version
+               FROM challenge_rounds
+               WHERE course_id = ?
+                 AND typeof(week_num) = 'integer'
+                 AND week_num > 0
+                 AND popping_version_compatible(data_version, ?) = 1''',
+            [cid, SCHEMA_VERSION, cid, SCHEMA_VERSION],
+        )
+
 
         question_weeks = {
             row['id']: (
@@ -7479,10 +7871,14 @@ def export_data(slug):
         included_data_versions = history_data_versions | {
             row['data_version']
             for rows in (
-                peer_reviews, ratings, challenge_rounds, challenge_ratings
+                peer_reviews, ratings, presentation_participants,
+                challenge_rounds, challenge_ratings
             )
             for row in rows
         }
+        included_data_versions.update(
+            row['data_version'] for row in coursewide_participation_versions
+        )
         included_data_versions = sorted(
             included_data_versions, key=parse_version
         )
@@ -7534,6 +7930,8 @@ def export_data(slug):
             ('Semester', course['semester'] or ''),
             ('Lecture Week', current_week),
             ('Export Scope', f'Week {current_week}'),
+            ('Participation Roster Scope',
+             'Course-wide compatible participation through export time'),
             ('Website Version', public_version(APP_VERSION)),
             ('Database Schema Version', public_version(SCHEMA_VERSION)),
             ('Export Format Version', public_version(EXPORT_FORMAT_VERSION)),
@@ -7545,6 +7943,8 @@ def export_data(slug):
             ('Current Visible Teams', len(teams)),
             ('Week Peer Reviews (thumbs)', len(peer_reviews)),
             ('Week Presentation Ratings', len(ratings)),
+            ('Week Presentation Participants',
+             len(presentation_participants)),
             ('Week Challenge Rounds', len(challenge_rounds)),
             ('Week Challenge Ratings', len(challenge_ratings)),
         ]
@@ -7622,11 +8022,12 @@ def export_data(slug):
         ws1.column_dimensions['G'].width = 14
 
         # ════════════════════════════════════════════════════════════════════
-        # TAB 2: Students — one row per student, gradebook-ready
+        # TAB 2: Students, one row per student, gradebook-ready
         # ════════════════════════════════════════════════════════════════════
         ws2 = wb.create_sheet('Students')
         s_headers = [
             'student_id', 'name', 'team', 'status',
+            'course_presentation_team_turns', 'course_challenger_turns',
             'thumbs_given', 'thumbs_received',
             'presentation_ratings_given',
             'challenges_rated',
@@ -7647,6 +8048,10 @@ def export_data(slug):
                 stu['name'] or '',
                 stu['team_name'] or '',
                 'active' if stu['is_active'] else 'archived',
+                participation_counts.get(stu['id'], {}).get(
+                    'presentation_count', 0),
+                participation_counts.get(stu['id'], {}).get(
+                    'challenger_count', 0),
                 thumbs_given.get(stu['id'], 0),
                 thumbs_recv.get(stu['id'], 0),
                 ratings_given.get(stu['id'], 0),
@@ -7662,7 +8067,39 @@ def export_data(slug):
         set_col_widths(ws2, s_headers, s_rows)
 
         # ════════════════════════════════════════════════════════════════════
-        # TAB 3: Teams — one row per team with aggregates
+        # TAB 3: Participation Roster, latest course-wide totals
+        # ════════════════════════════════════════════════════════════════════
+        ws_participation_roster = wb.create_sheet('Participation Roster')
+        participation_roster_headers = [
+            'student_id', 'name', 'team', 'status',
+            'course_presentation_team_turns', 'course_challenger_turns',
+        ]
+        style_header(
+            ws_participation_roster, participation_roster_headers
+        )
+        participation_roster_rows = []
+        for student in students:
+            counts = participation_counts.get(student['id'], {})
+            participation_roster_rows.append([
+                student['student_id'],
+                student['name'] or '',
+                student['team_name'] or '',
+                'active' if student['is_active'] else 'archived',
+                counts.get('presentation_count', 0),
+                counts.get('challenger_count', 0),
+            ])
+        for i, row in enumerate(participation_roster_rows, 2):
+            for col, value in enumerate(row, 1):
+                ws_participation_roster.cell(
+                    row=i, column=col, value=value
+                )
+        set_col_widths(
+            ws_participation_roster, participation_roster_headers,
+            participation_roster_rows,
+        )
+
+        # ════════════════════════════════════════════════════════════════════
+        # TAB 4: Teams, one row per team with aggregates
         # ════════════════════════════════════════════════════════════════════
         ws3 = wb.create_sheet('Teams')
         t_headers = ['team_id', 'team_name', 'rank', 'member_count', 'presentations',
@@ -7687,7 +8124,7 @@ def export_data(slug):
         set_col_widths(ws3, t_headers, t_rows)
 
         # ════════════════════════════════════════════════════════════════════
-        # TAB 4: Peer Reviews — raw thumbs-up data
+        # TAB 5: Peer Reviews, raw thumbs-up data
         # ════════════════════════════════════════════════════════════════════
         ws4 = wb.create_sheet('Peer Reviews')
         pr_headers = [
@@ -7717,7 +8154,7 @@ def export_data(slug):
         set_col_widths(ws4, pr_headers, pr_rows)
 
         # ════════════════════════════════════════════════════════════════════
-        # TAB 5: Presentation Ratings — raw star ratings
+        # TAB 6: Presentation Ratings, raw star ratings
         # ════════════════════════════════════════════════════════════════════
         ws5 = wb.create_sheet('Presentation Ratings')
         rt_headers = ['session_key', 'week', 'presentation_key', 'question_id',
@@ -7752,7 +8189,38 @@ def export_data(slug):
         set_col_widths(ws5, rt_headers, rt_rows)
 
         # ════════════════════════════════════════════════════════════════════
-        # TAB 6: Challenge Ratings — raw 1-5 ratings of challenge questions
+        # TAB 7: Presentation Participants, finalized team membership
+        # ════════════════════════════════════════════════════════════════════
+        ws_participants = wb.create_sheet('Presentation Participants')
+        participant_headers = [
+            'session_key', 'week', 'presentation_key', 'participant_id',
+            'participant_name', 'team_id', 'team_name', 'data_version', 'time',
+        ]
+        style_header(ws_participants, participant_headers)
+
+        participant_rows = []
+        for participant in presentation_participants:
+            participant_rows.append([
+                participant['session_key'],
+                participant['week_num'],
+                participant['presentation_key'],
+                participant['student_identifier'],
+                participant['student_name']
+                or participant['student_identifier'],
+                participant['team_id'],
+                participant['team_name'] or '',
+                _export_data_version(participant['data_version']),
+                participant['created_at'],
+            ])
+        for i, row in enumerate(participant_rows, 2):
+            for col, val in enumerate(row, 1):
+                ws_participants.cell(row=i, column=col, value=val)
+        set_col_widths(
+            ws_participants, participant_headers, participant_rows
+        )
+
+        # ════════════════════════════════════════════════════════════════════
+        # TABS 8-9: Challenge rounds and raw 1-5 ratings
         # ════════════════════════════════════════════════════════════════════
         ws6 = wb.create_sheet('Challenge Rounds')
         round_headers = [

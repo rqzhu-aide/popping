@@ -115,6 +115,9 @@ def upload_env(tmp_path, monkeypatch):
         (course_id, SESSION_KEY),
     )
     db.commit()
+    db.execute("BEGIN IMMEDIATE")
+    database.migrate_schema_connection(db)
+    db.commit()
     db.close()
 
     env = {
@@ -298,10 +301,10 @@ def test_reorder_and_edit_preserve_identity_visibility_and_saved_rating(
             (upload_env["course_id"], beta_key),
         )
         db.execute(
-            """INSERT INTO presentation_ratings
-               (course_id, student_id, question_key, session_key, week_num,
+            f"""INSERT INTO presentation_ratings
+               (data_version, course_id, student_id, question_key, session_key, week_num,
                 question_id, question_title, q1_developed, q2_easy)
-               VALUES (?, ?, 'historic-presentation', ?, 1, ?, 'Alpha', 4, 5)""",
+               VALUES ('{app_module.APP_VERSION}', ?, ?, 'historic-presentation', ?, 1, ?, 'Alpha', 4, 5)""",
             (
                 upload_env["course_id"], upload_env["student_id"],
                 SESSION_KEY, alpha_row["id"],

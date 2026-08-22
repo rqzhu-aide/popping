@@ -368,6 +368,40 @@ def test_restore_rejects_source_without_interaction_tables(
     assert not (live_db.parent / "restore-backups").exists()
 
 
+def test_restore_accepts_source_without_optional_legacy_peer_reviews(
+    restore_course_db_module, tmp_path, monkeypatch
+):
+    data_dir = tmp_path / "data"
+    live_db = data_dir / "safe101" / "popping.db"
+    source_db = tmp_path / "without-peer-reviews.db"
+    create_course_db(live_db, "safe101", "current-teacher")
+    create_course_db(source_db, "safe101", "restored-teacher")
+    with sqlite3.connect(source_db) as db:
+        db.execute("DROP TABLE peer_reviews")
+    monkeypatch.setenv("DATA_DIR", str(data_dir))
+
+    result = run_restore(
+        restore_course_db_module,
+        monkeypatch,
+        "safe101",
+        source_db,
+        ["safe101", "SERVICE STOPPED"],
+    )
+
+    assert result == 0
+    assert instructor_username(live_db) == "restored-teacher"
+    with sqlite3.connect(live_db) as db:
+        tables = {
+            row[0]
+            for row in db.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            )
+        }
+    assert "peer_reviews" not in tables
+    assert "presentation_ratings" in tables
+    assert "teammate_thumbs" in tables
+
+
 def test_restore_preserves_corrupt_live_database_as_unverified_snapshot(
     restore_course_db_module, tmp_path, monkeypatch, capsys
 ):

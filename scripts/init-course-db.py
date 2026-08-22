@@ -52,6 +52,7 @@ if PROJECT_ROOT not in sys.path:
 from database import (
     upgrade_schema_connection,
     validate_data_version_schema,
+    validate_current_schema,
     validate_legacy_adoption_candidate,
     validate_schema_compatibility,
 )
@@ -292,6 +293,8 @@ def validate_course_database(path, expected_slug, require_current_version=False)
             )
         if recorded_version is None:
             validate_legacy_adoption_candidate(conn)
+        elif recorded_version == SCHEMA_VERSION:
+            validate_current_schema(conn)
         else:
             validate_data_version_schema(conn)
 

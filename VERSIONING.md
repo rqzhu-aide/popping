@@ -31,6 +31,43 @@ independently of their data version.
 A single database may therefore contain several data versions. The database
 schema version must not be used as a replacement for per-record data versions.
 
+## v1.1.0 participation history
+
+`v1.1.0` introduces two course-wide instructor counts. They are derived from
+durable events rather than stored as editable totals:
+
+- **Team turns** count each finalized presentation for every student who was an
+  active member of the presenting team when the presentation was finalized.
+  Finalization records the membership even when the presentation received zero
+  ratings. Cancelling an active presentation does not create a team turn.
+- **Challenge turns** count retained challenger selections. Selection creates
+  the turn immediately, even when the challenge receives zero ratings. **Clear**
+  removes that challenge turn. **Cancel Presentation** removes every challenge
+  turn belonging to the cancelled presentation.
+
+Each separate finalized presentation and each separate retained challenger
+selection counts again, including repeated participation by the same student.
+Counts belong to one course offering database and persist across classroom
+sessions. Archiving and reactivating the same roster record preserves its
+history. A full course-data reset or database reinitialization erases the live
+counts, although the safety backup created by the reset retains the old events.
+
+Tracking starts at `v1.1.0`. The `v1.0.x` migration creates empty participation
+event tables and performs no historical backfill. Ratings alone cannot prove
+the exact team membership at finalization or whether a challenger selection
+was later cleared, so inferred counts would not be trustworthy.
+
+Current Week Results includes a **Participation Roster** sheet with every active
+and archived student and the latest course-wide Team turns and Challenge turns
+at export time.
+In this sheet, `team` is the current team for an active student and the last
+known team for an archived student.
+It also includes finalized membership in **Presentation Participants** and
+retained selections in **Challenge Rounds** for the selected
+week. Complete course backup bundles include both event tables in `popping.db`.
+These records carry their own data versions and follow the normal current versus
+legacy export rule after a future compatibility-line change.
+
 ## Version bump rules
 
 - A website-only change increments PATCH, such as `v1.0.0` to `v1.0.1`.
@@ -50,9 +87,26 @@ ephemeral state is active, because mixing an old active presentation or
 challenge with newly versioned durable rows would make the session internally
 inconsistent.
 
+Setup is a safe migration window only when the current session has no saved
+presentation history, thumbs, ratings, challenges, or presentation membership.
+If it does, end the session or fully reset it before migrating.
+
 If a schema-line release is accidentally deployed during a session, roll the
 application back to the previous compatible release, end or reset the session,
 then deploy the new release again. Do not bypass the migration-window check.
+
+For the `v1.0.x` to `v1.1.0` transition, stop all web workers and run the
+following command once for each existing course before starting the `v1.1.0`
+service:
+
+```bash
+python scripts/migrate-course-db.py <course_slug>
+```
+
+The command requires the course slug and `SERVICE STOPPED` confirmations,
+creates a validated pre-migration snapshot, and applies the registered
+migration transactionally. A normal web request is not a substitute for this
+offline step.
 
 ## Release checklist
 

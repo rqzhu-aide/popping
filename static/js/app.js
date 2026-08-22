@@ -231,6 +231,25 @@ function formatStudentDisplay(name, studentId) {
         : studentId;
 }
 
+function normalizedParticipationCount(value) {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? Math.max(0, Math.trunc(parsed)) : 0;
+}
+
+function participationBadgesHtml(record) {
+    if (!record ||
+            !Object.prototype.hasOwnProperty.call(record, 'presentation_count') ||
+            !Object.prototype.hasOwnProperty.call(record, 'challenger_count')) {
+        return '';
+    }
+    const presentationCount = normalizedParticipationCount(record.presentation_count);
+    const challengerCount = normalizedParticipationCount(record.challenger_count);
+    return `<span class="participation-badges" aria-label="Participation history">
+        <span class="participation-badge${presentationCount === 0 ? ' is-zero' : ''}">Team turns: <strong>${presentationCount}</strong></span>
+        <span class="participation-badge${challengerCount === 0 ? ' is-zero' : ''}">Challenge turns: <strong>${challengerCount}</strong></span>
+    </span>`;
+}
+
 /**
  * Rebuild a roster grid from a teams array.  Skips rebuild if data hasn't
  * changed (signature comparison).  Shared by student + instructor panels.
@@ -249,9 +268,11 @@ function renderRosterGrid(container, teams, myId) {
         const membersHtml = members.map(m => {
             const display = formatStudentDisplay(m.name, m.student_id);
             const isYou = myId && m.student_id === myId;
+            const badgesHtml = participationBadgesHtml(m);
             return `<div class="roster-member">
                 <span class="team-dot" style="background:${escapeAttrValue(team.color)}"></span>
-                <span class="${isYou ? 'you' : ''}">${escapeHtmlValue(display)}${isYou ? ' (You)' : ''}</span>
+                <span class="roster-member-name ${isYou ? 'you' : ''}">${escapeHtmlValue(display)}${isYou ? ' (You)' : ''}</span>
+                ${badgesHtml}
             </div>`;
         }).join('');
         const memberCount = Number(team.member_count) || members.length;
@@ -329,6 +350,15 @@ function showToast(msg, type) {
 /* ===== NAV DROPDOWN ===== */
 window.toggleToolsDropdown = function() {
     const menu = document.getElementById('tools-menu');
+    if (menu) menu.classList.toggle('open');
+};
+
+/* Touch/keyboard fallback for the Download Results flyout (hover opens it
+   on pointer devices via CSS). */
+window.toggleDownloadResults = function(e) {
+    e.preventDefault();
+    e.stopPropagation();
+    const menu = document.getElementById('download-results-menu');
     if (menu) menu.classList.toggle('open');
 };
 
@@ -3005,6 +3035,246 @@ function renderTopChallengers(topChallengers) {
     }
 }
 
+const _knownParticipationPresentationKeys = new Set();
+let _participationHistorySeeded = false;
+
+function participationHistoryIdentity(item) {
+    if (!item || typeof item !== 'object') return '';
+    return String(item.presentation_key ||
+        `${item.started_at || ''}:${item.team_id || ''}:${item.question_id || ''}`);
+}
+
+function seedCompetitionPresentationHistory(history) {
+    _knownParticipationPresentationKeys.clear();
+    if (Array.isArray(history)) {
+        history.forEach(item => {
+            const key = participationHistoryIdentity(item);
+            if (key) _knownParticipationPresentationKeys.add(key);
+        });
+    }
+    _participationHistorySeeded = true;
+}
+
+function competitionTeamOption(teamId) {
+    const select = document.getElementById('comp-team');
+    if (!select) return null;
+    return Array.from(select.options).find(option =>
+        option.value && String(option.value) === String(teamId)
+    ) || null;
+}
+
+function updateCompetitionTeamOptionLabel(option) {
+    if (!option || !option.value) return;
+    const teamName = option.dataset.baseLabel ||
+        option.dataset.teamName ||
+        option.textContent.trim().replace(/ \(empty\)$/, '');
+    option.dataset.baseLabel = teamName;
+    const memberCount = normalizedParticipationCount(option.dataset.memberCount);
+    const neverCount = normalizedParticipationCount(option.dataset.neverCount);
+    if (memberCount === 0) {
+        option.textContent = `${teamName} (empty)`;
+        return;
+    }
+    const completed = option.dataset.completed === '1' ? ' · completed' : '';
+    option.textContent = `${teamName} · ${neverCount}/${memberCount} no prior turn${completed}`;
+}
+
+function updateCompetitionTeamSummary(section) {
+    if (!section) return;
+    const members = Array.from(
+        section.querySelectorAll('.team-participation-member')
+    );
+    const neverCount = members.filter(member =>
+        normalizedParticipationCount(member.dataset.presentationCount) === 0
+    ).length;
+    const summary = section.querySelector('[data-role="team-summary"]');
+    if (summary) {
+        summary.textContent = members.length
+            ? `${neverCount} of ${members.length} members have no completed team turns.`
+            : 'No members.';
+    }
+    const option = competitionTeamOption(section.dataset.teamId);
+    if (option) {
+        option.dataset.memberCount = String(members.length);
+        option.dataset.neverCount = String(neverCount);
+        updateCompetitionTeamOptionLabel(option);
+    }
+}
+
+function setMemberParticipationCount(member, kind, value) {
+    const count = normalizedParticipationCount(value);
+    const isPresentation = kind === 'presentation';
+    const datasetKey = isPresentation ? 'presentationCount' : 'challengerCount';
+    const valueSelector = isPresentation ? '.team-turn-count' : '.challenge-turn-count';
+    member.dataset[datasetKey] = String(count);
+    const valueElement = member.querySelector(valueSelector);
+    if (!valueElement) return;
+    valueElement.textContent = String(count);
+    valueElement.closest('.participation-badge')?.classList.toggle('is-zero', count === 0);
+}
+
+function applyStudentParticipationCounts(record) {
+    const studentId = record?.student_id ?? record?.challenger_id;
+    if (studentId == null) return;
+    const hasPresentation = Object.prototype.hasOwnProperty.call(
+        record, 'presentation_count'
+    );
+    const hasChallenge = Object.prototype.hasOwnProperty.call(
+        record, 'challenger_count'
+    );
+    if (!hasPresentation && !hasChallenge) return;
+    document.querySelectorAll('.team-participation-member').forEach(member => {
+        if (String(member.dataset.studentId) !== String(studentId)) return;
+        if (hasPresentation) {
+            setMemberParticipationCount(
+                member, 'presentation', record.presentation_count
+            );
+        }
+        if (hasChallenge) {
+            setMemberParticipationCount(
+                member, 'challenge', record.challenger_count
+            );
+        }
+        updateCompetitionTeamSummary(member.closest('.team-participation-team'));
+    });
+}
+
+
+const COMPETITION_PARTICIPATION_READBACK_ATTEMPTS = 2;
+const COMPETITION_PARTICIPATION_READBACK_RETRY_MS = 300;
+const COMPETITION_PARTICIPATION_LATER_RETRY_MS = 5000;
+let _competitionParticipationReadbackSerial = 0;
+let _competitionParticipationReadbackAppliedSerial = 0;
+let _competitionParticipationReadbackDirty = false;
+let _competitionParticipationNextRetryAt = 0;
+let _competitionParticipationWarningShown = false;
+let _competitionParticipationStateIdentity = null;
+
+function markCompetitionParticipationCountsDirty() {
+    _competitionParticipationReadbackDirty = true;
+    _competitionParticipationNextRetryAt = 0;
+}
+
+async function refreshCompetitionParticipationCounts() {
+    const requestSerial = ++_competitionParticipationReadbackSerial;
+    try {
+        const { res, data } = await fetchJSONWithTimeout('/api/teams');
+        if (!res.ok || !Array.isArray(data)) return false;
+        // Only the newest response may update the DOM. If a newer successful
+        // readback already applied, this request is also satisfied. A newer
+        // failed readback leaves the counts dirty for a later instructor poll.
+        if (requestSerial !== _competitionParticipationReadbackSerial) {
+            return _competitionParticipationReadbackAppliedSerial > requestSerial;
+        }
+        data.forEach(team => {
+            const members = Array.isArray(team.members) ? team.members : [];
+            members.forEach(member => applyStudentParticipationCounts({
+                student_id: member.id,
+                presentation_count: member.presentation_count,
+                challenger_count: member.challenger_count,
+            }));
+        });
+        _competitionParticipationReadbackAppliedSerial = requestSerial;
+        _competitionParticipationReadbackDirty = false;
+        _competitionParticipationNextRetryAt = 0;
+        _competitionParticipationWarningShown = false;
+        return true;
+    } catch (error) {
+        return false;
+    }
+}
+
+async function reconcileCompetitionParticipationCounts(
+        { markDirty = true } = {}) {
+    if (markDirty) markCompetitionParticipationCountsDirty();
+    if (!_competitionParticipationReadbackDirty) return true;
+    for (let attempt = 0;
+            attempt < COMPETITION_PARTICIPATION_READBACK_ATTEMPTS;
+            attempt += 1) {
+        if (await refreshCompetitionParticipationCounts()) return true;
+        if (attempt + 1 < COMPETITION_PARTICIPATION_READBACK_ATTEMPTS) {
+            await new Promise(resolve => window.setTimeout(
+                resolve, COMPETITION_PARTICIPATION_READBACK_RETRY_MS
+            ));
+        }
+    }
+    _competitionParticipationReadbackDirty = true;
+    _competitionParticipationNextRetryAt =
+        Date.now() + COMPETITION_PARTICIPATION_LATER_RETRY_MS;
+    if (!_competitionParticipationWarningShown) {
+        _competitionParticipationWarningShown = true;
+        showToast(
+            'Participation counts may be stale. Retrying automatically.',
+            'warning'
+        );
+    }
+    return false;
+}
+
+function retryCompetitionParticipationCountsIfDirty() {
+    if (!_competitionParticipationReadbackDirty ||
+            Date.now() < _competitionParticipationNextRetryAt) return;
+    _competitionParticipationNextRetryAt =
+        Date.now() + COMPETITION_PARTICIPATION_LATER_RETRY_MS;
+    void reconcileCompetitionParticipationCounts({ markDirty: false });
+}
+
+function competitionParticipationStateIdentity(state) {
+    const challengeKeys = Array.isArray(state?.active_challenges)
+        ? state.active_challenges
+            .map(challenge => String(challenge?.challenge_key || ''))
+            .filter(Boolean)
+            .sort()
+        : [];
+    return JSON.stringify([
+        state?.phase || '',
+        Number(state?.session_key) || 0,
+        state?.poll_question_key || '',
+        state?.active_team_id ?? '',
+        state?.active_question_id ?? '',
+        challengeKeys,
+    ]);
+}
+
+function syncCompetitionParticipationStateIdentity(state) {
+    if (!state || !document.getElementById('team-participation-preview')) return;
+    const identity = competitionParticipationStateIdentity(state);
+    if (identity === _competitionParticipationStateIdentity) return;
+    _competitionParticipationStateIdentity = identity;
+    markCompetitionParticipationCountsDirty();
+}
+function syncCompetitionPresentationHistory(history) {
+    if (!Array.isArray(history)) return;
+    if (!_participationHistorySeeded) {
+        seedCompetitionPresentationHistory(history);
+        return;
+    }
+    let historyChanged = false;
+    history.forEach(item => {
+        const key = participationHistoryIdentity(item);
+        if (!key || _knownParticipationPresentationKeys.has(key)) return;
+        _knownParticipationPresentationKeys.add(key);
+        historyChanged = true;
+    });
+    if (historyChanged) markCompetitionParticipationCountsDirty();
+}
+
+function showCompetitionTeamParticipation(teamId) {
+    const container = document.getElementById('team-participation-preview');
+    if (!container) return;
+    const normalizedTeamId = teamId == null ? '' : String(teamId);
+    let found = false;
+    container.querySelectorAll('.team-participation-team').forEach(section => {
+        const visible = normalizedTeamId !== '' &&
+            String(section.dataset.teamId) === normalizedTeamId;
+        section.hidden = !visible;
+        found = found || visible;
+    });
+    const placeholder = document.getElementById('team-participation-placeholder');
+    if (placeholder) placeholder.hidden = found;
+    container.dataset.visibleTeamId = found ? normalizedTeamId : '';
+}
+
 function renderInstructorChallenge(state) {
     const panel = document.getElementById('challenge-instructor-panel');
     if (!panel) return;
@@ -3021,10 +3291,14 @@ function renderInstructorChallenge(state) {
         } else {
             handsDiv.innerHTML = '';
             for (const h of hands) {
+
+                const challengeTurns = normalizedParticipationCount(h.challenger_count);
                 const row = document.createElement('div');
                 row.className = 'challenge-hand-row';
-                row.style.cssText = 'display:flex;align-items:center;gap:8px;margin:4px 0;';
-                row.innerHTML = `<span>${escapeHtml(h.student_name)} (${escapeHtml(h.student_team_name || '')})</span>`;
+                row.innerHTML = `<span class="challenge-hand-details">
+                    <span>${escapeHtml(h.student_name)} (${escapeHtml(h.student_team_name || '')})</span>
+                    <span class="participation-badge${challengeTurns === 0 ? ' is-zero' : ''}">Challenge turns: <strong>${challengeTurns}</strong></span>
+                </span>`;
                 const btn = document.createElement('button');
                 btn.className =
                     'btn btn-sm btn-primary challenge-mutating-btn';
@@ -3046,6 +3320,8 @@ function renderInstructorChallenge(state) {
             activeDiv.innerHTML = '';
             for (const ch of challenges) {
                 const summary = summaries[ch.challenge_key];
+
+                const challengeTurns = normalizedParticipationCount(ch.challenger_count);
                 const submitted = Number(summary?.submitted_count) || 0;
                 const eligible = Number(summary?.eligible_count) || 0;
                 const ratingText =
@@ -3055,6 +3331,7 @@ function renderInstructorChallenge(state) {
                 row.innerHTML = `<span class="challenge-active-details">
                     <strong>Challenger ${ch.challenge_num}:</strong>
                     ${escapeHtml(ch.challenger_name)} (${escapeHtml(ch.challenger_team_name || '')})
+                    <span class="participation-badge${challengeTurns === 0 ? ' is-zero' : ''}">Challenge turns: <strong>${challengeTurns}</strong></span>
                     <span class="hint">${ratingText}</span>
                 </span>`;
                 const btn = document.createElement('button');
@@ -3094,6 +3371,7 @@ window.selectChallenger = async function(studentId) {
                     'warning'
                 );
             }
+            await reconcileCompetitionParticipationCounts();
             window.instructorPollOnce?.();
         }
     } finally {
@@ -3128,6 +3406,9 @@ window.clearChallenger = async function(challengeKey) {
                 data,
                 'Failed to clear challenger'
             );
+        } else {
+            await reconcileCompetitionParticipationCounts();
+            window.instructorPollOnce?.();
         }
     } finally {
         _instructorActionInFlight = false;
@@ -3141,12 +3422,23 @@ if (instructor) {
         const initialHistory = JSON.parse(
             instructor.dataset.presentationHistory || '[]'
         );
-        instructor.dataset.presentationHistory = JSON.stringify(
-            Array.isArray(initialHistory) ? initialHistory : []
-        );
+        const normalizedHistory = Array.isArray(initialHistory) ? initialHistory : [];
+        instructor.dataset.presentationHistory = JSON.stringify(normalizedHistory);
+        seedCompetitionPresentationHistory(normalizedHistory);
     } catch (e) {
         instructor.dataset.presentationHistory = '[]';
+        seedCompetitionPresentationHistory([]);
     }
+
+    const competitionTeamSelect = document.getElementById('comp-team');
+    if (competitionTeamSelect) {
+        competitionTeamSelect.addEventListener('change', () => {
+            showCompetitionTeamParticipation(competitionTeamSelect.value);
+        });
+    }
+    showCompetitionTeamParticipation(
+        instructor.dataset.activeTeamId || competitionTeamSelect?.value || ''
+    );
 
     // Active question rendering is handled by instructorPollOnce() below,
     // which fires immediately and includes the same state data. No need
@@ -3362,6 +3654,12 @@ if (instructor) {
                 window.location.reload();
                 return;
             }
+            if (state && instructor.dataset.phase === 'competition') {
+                const selectedTeamId = state.active_team?.id ??
+                    document.getElementById('comp-team')?.value ?? '';
+                showCompetitionTeamParticipation(selectedTeamId);
+            }
+
 
             if (document.getElementById('disc-questions-list') &&
                     (Number(state.discussion_questions_version) || 0) !== renderedDiscQuestionsVersion) {
@@ -3529,12 +3827,15 @@ if (instructor) {
                 const historySignature = JSON.stringify(state.presentation_history);
                 if (instructor.dataset.presentationHistory !== historySignature) {
                     instructor.dataset.presentationHistory = historySignature;
+                    syncCompetitionPresentationHistory(state.presentation_history);
                     renderHistory();
                 }
             }
 
             // --- Challenge feature: raised hands + active challengers ---
+            syncCompetitionParticipationStateIdentity(state);
             renderInstructorChallenge(state);
+            retryCompetitionParticipationCountsIfDirty();
 
             if (data.poll_interval) interval = data.poll_interval;
             if (data.stop_polling) _instrPollStopped = true;
@@ -3777,14 +4078,23 @@ window.setPhase = async function(phase) {
         const leavingActivePresentation = phase !== 'competition' &&
             currentPhase === 'competition' && instructor?.dataset?.activeTeamId;
         let confirmEndSession = false;
+        const permanentParticipationWarning =
+            'The team presentation turn and any challenger turns will be ' +
+            'permanently recorded. Use Cancel Mistake first if anything is ' +
+            'incorrect.';
         if (phase === 'ended' && currentPhase !== 'ended') {
             const message = leavingActivePresentation
-                ? 'End this session and finalize the active presentation? This closes the current classroom session.'
+                ? 'End this session and finalize the active presentation? ' +
+                  permanentParticipationWarning
                 : 'End this classroom session?';
             if (!confirm(message)) return;
             confirmEndSession = true;
         } else if (leavingActivePresentation &&
-                   !confirm('A presentation is still active. Leave this phase and finalize the current presentation?')) {
+                   !confirm(
+                       'A presentation is still active. Leave this phase and ' +
+                       'finalize the current presentation? ' +
+                       permanentParticipationWarning
+                   )) {
             return;
         }
         const phasePayload = instructorStatePayload({
@@ -3911,7 +4221,8 @@ window.loadStudentTable = async function() {
     } catch (error) {
         const tbody = document.getElementById('student-tbody');
         if (tbody && !tbody.querySelector('tr[data-id]')) {
-            tbody.innerHTML = '<tr><td colspan="6" class="empty">Could not load students. Retrying automatically.</td></tr>';
+            const columnCount = tbody.closest?.('table')?.querySelectorAll('thead th').length || 8;
+            tbody.innerHTML = `<tr><td colspan="${columnCount}" class="empty">Could not load students. Retrying automatically.</td></tr>`;
         }
         if (!_studentTableLoadFailed) {
             showToast(
@@ -3958,6 +4269,8 @@ window.loadStudentTable = async function() {
             ? '<span class="online-dot"></span> Online'
             : '<span class="offline-dot"></span> Offline';
         const loginTime = s.last_login_at ? s.last_login_at.substring(0, 19) : 'Not yet';
+        const presentationCount = normalizedParticipationCount(s.presentation_count);
+        const challengerCount = normalizedParticipationCount(s.challenger_count);
         const name = s.name || s.student_id;
         const actionCell = isDemoInstructor
             ? ''
@@ -3969,6 +4282,8 @@ window.loadStudentTable = async function() {
             <td>${escapeHtmlValue(s.student_id)}</td>
             <td>${escapeHtmlValue(name)}</td>
             <td>${teamHtml}</td>
+            <td class="participation-table-count">${presentationCount}</td>
+            <td class="participation-table-count">${challengerCount}</td>
             <td>${statusHtml}</td>
             <td class="text-muted small">${escapeHtmlValue(loginTime)}</td>
             ${actionCell}
@@ -3976,10 +4291,18 @@ window.loadStudentTable = async function() {
         tbody.appendChild(tr);
     });
 
-    // Update sort arrows
-    document.querySelectorAll('#student-table .sort-arrow').forEach(el => el.textContent = '');
-    const activeHeader = document.querySelector(`#student-table [data-sort="${studentSort}"] .sort-arrow`);
-    if (activeHeader) activeHeader.textContent = studentOrder === 'asc' ? ' ▲' : ' ▼';
+    // Update sort arrows and announce the active order to assistive technology.
+    document.querySelectorAll('#student-table [data-sort]').forEach(header => {
+        header.setAttribute('aria-sort', 'none');
+        const arrow = header.querySelector('.sort-arrow');
+        if (arrow) arrow.textContent = '';
+    });
+    const activeColumn = document.querySelector(`#student-table [data-sort="${studentSort}"]`);
+    if (activeColumn) {
+        activeColumn.setAttribute('aria-sort', studentOrder === 'asc' ? 'ascending' : 'descending');
+        const arrow = activeColumn.querySelector('.sort-arrow');
+        if (arrow) arrow.textContent = studentOrder === 'asc' ? ' ▲' : ' ▼';
+    }
 
     // Pagination
     const pag = document.getElementById('student-pagination');
@@ -4001,6 +4324,12 @@ window.sortStudents = function(col) {
     }
     studentPage = 1;
     loadStudentTable();
+};
+
+window.studentSortHeaderKeydown = function(event, col) {
+    if (event.key !== 'Enter' && event.key !== ' ') return;
+    event.preventDefault();
+    window.sortStudents(col);
 };
 
 window.goToStudentPage = function(p) {
@@ -4398,10 +4727,16 @@ window.resetTimer = async function() {
 
 window.nextPresentation = async function() {
     if (_instructorActionInFlight || ratingsSettlementBlocksAction()) return;
+    if (!confirm(
+            'Finish this presentation? The team presentation turn and any ' +
+            'challenger turns will be permanently recorded. Use Cancel ' +
+            'Mistake first if anything is incorrect.')) return;
+
     _instructorActionInFlight = true;
     try {
         const data = await postJSON('/api/next_presentation', instructorStatePayload());
         if (data.success) {
+            await reconcileCompetitionParticipationCounts();
             if (typeof window.instructorPollOnce === 'function') {
                 window.instructorPollOnce();
             } else {
@@ -4454,6 +4789,7 @@ window.cancelPresentation = async function() {
             );
         }
         if (data.success) {
+            await reconcileCompetitionParticipationCounts();
             if (typeof window.instructorPollOnce === 'function') {
                 window.instructorPollOnce();
             } else {
@@ -5381,22 +5717,24 @@ function renderHistory() {
     try {
         history = JSON.parse(instructorEl.dataset.presentationHistory || '[]');
     } catch(e) {}
+    const completedTeams = [...new Set(history.map(h => h.team).filter(Boolean))];
+    const completedTeamIds = new Set(
+        history.map(h => String(h.team_id ?? '')).filter(Boolean)
+    );
+    const completedSet = new Set(completedTeams);
+    document.querySelectorAll('#comp-team option[value]').forEach(option => {
+        const completed = completedTeamIds.has(String(option.value)) ||
+            completedSet.has(option.dataset.teamName || '');
+        option.dataset.completed = completed ? '1' : '0';
+        updateCompetitionTeamOptionLabel(option);
+    });
+
     if (!history.length) {
         container.innerHTML = '<p class="hint">No presentations yet.</p>';
         const teamSummary = document.getElementById('completed-teams-summary');
         if (teamSummary) teamSummary.textContent = 'No teams have completed a presentation.';
         return;
     }
-    const completedTeams = [...new Set(history.map(h => h.team).filter(Boolean))];
-    const completedSet = new Set(completedTeams);
-    document.querySelectorAll('#comp-team option[value]').forEach(option => {
-        // Empty teams render as "Team N (empty)"; strip the suffix so the
-        // stored base label matches history team names.
-        const baseLabel = option.dataset.baseLabel ||
-            option.textContent.trim().replace(/ \(empty\)$/, '');
-        option.dataset.baseLabel = baseLabel;
-        option.textContent = completedSet.has(baseLabel) ? `${baseLabel} (completed)` : baseLabel;
-    });
     const teamSummary = document.getElementById('completed-teams-summary');
     if (teamSummary) {
         teamSummary.textContent = completedTeams.length

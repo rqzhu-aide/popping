@@ -52,7 +52,7 @@ def _write_config(env, folder_slug, *, declared_slug=None, active=True):
     )
 
 
-def _write_database(env, slug, *, course_active=1):
+def _write_database(env, slug, *, course_active=1, current_schema=True):
     db_dir = env["data_dir"] / slug
     db_dir.mkdir(parents=True)
     db_path = db_dir / "popping.db"
@@ -72,6 +72,8 @@ def _write_database(env, slug, *, course_active=1):
         "INSERT INTO course_state (course_id) VALUES (?)",
         (course_id,),
     )
+    if current_schema:
+        database.upgrade_schema_connection(db)
     db.commit()
     db.close()
     database._schema_checked.discard(slug)
@@ -257,20 +259,37 @@ def test_database_missing_a_required_column_is_rejected(catalog_env):
     assert app_module._course_availability(slug)["status"] == "invalid"
 
 
-def test_legacy_database_is_available_then_migrated_on_login(catalog_env):
-    slug = "legacy_course"
+def test_current_database_missing_participation_index_is_not_ready(
+    catalog_env,
+):
+    slug = "missing_participation_index"
     _write_config(catalog_env, slug)
     db_path = _write_database(catalog_env, slug)
     with sqlite3.connect(db_path) as db:
+        db.execute(
+            "DROP INDEX idx_presentation_participants_student"
+        )
+    app_module._clear_course_availability_cache(slug)
+
+    assert app_module._course_availability(slug)["status"] == "invalid"
+    assert app_module.app.test_client().get("/healthz").status_code == 503
+
+
+def test_legacy_database_requires_offline_migration_without_login_writes(
+    catalog_env,
+):
+    slug = "legacy_course"
+    _write_config(catalog_env, slug)
+    db_path = _write_database(catalog_env, slug, current_schema=False)
+    with sqlite3.connect(db_path) as db:
         db.execute("DROP TABLE schema_migrations")
-        db.execute("DROP TABLE teammate_thumbs")
-        db.execute("DROP TABLE presentation_ratings")
-        db.execute("ALTER TABLE students DROP COLUMN is_active")
     database._schema_checked.discard(slug)
     app_module._clear_course_availability_cache(slug)
 
-    assert app_module._course_availability(slug)["status"] == "ready"
-    assert app_module.app.test_client().get(f"/login/{slug}").status_code == 200
+    assert app_module._course_availability(slug)["status"] == (
+        "migration_required"
+    )
+    assert app_module.app.test_client().get(f"/login/{slug}").status_code == 302
 
     with sqlite3.connect(db_path) as db:
         tables = {
@@ -278,27 +297,14 @@ def test_legacy_database_is_available_then_migrated_on_login(catalog_env):
                 "SELECT name FROM sqlite_master WHERE type = 'table'"
             )
         }
-        student_columns = {
-            row[1] for row in db.execute("PRAGMA table_info(students)")
-        }
-        thumb_columns = {
-            row[1] for row in db.execute("PRAGMA table_info(teammate_thumbs)")
-        }
-        rating_columns = {
-            row[1] for row in db.execute(
-                "PRAGMA table_info(presentation_ratings)"
-            )
-        }
-    assert {"teammate_thumbs", "presentation_ratings"}.issubset(tables)
-    assert "is_active" in student_columns
-    assert "week_num" in thumb_columns
-    assert "week_num" in rating_columns
+    assert "schema_migrations" not in tables
+    assert "presentation_participants" not in tables
 
 
 def test_activity_week_migration_backfills_only_inferable_rows(catalog_env):
     slug = "legacy_activity_weeks"
     _write_config(catalog_env, slug)
-    db_path = _write_database(catalog_env, slug)
+    db_path = _write_database(catalog_env, slug, current_schema=False)
     with sqlite3.connect(db_path) as db:
         course_id = db.execute("SELECT id FROM courses").fetchone()[0]
         team_id = db.execute(
@@ -358,6 +364,12 @@ def test_activity_week_migration_backfills_only_inferable_rows(catalog_env):
             (course_id, student_1),
         )
         db.commit()
+    with sqlite3.connect(db_path) as db:
+        db.row_factory = sqlite3.Row
+        db.execute("BEGIN IMMEDIATE")
+        database.migrate_schema_connection(db)
+        db.commit()
+
     database._schema_checked.discard(slug)
     app_module._clear_course_availability_cache(slug)
 
@@ -600,7 +612,7 @@ def test_pending_schema_upgrade_with_active_session_is_unavailable(
 ):
     slug = "active_schema_upgrade"
     _write_config(catalog_env, slug)
-    db_path = _write_database(catalog_env, slug)
+    db_path = _write_database(catalog_env, slug, current_schema=False)
     with sqlite3.connect(db_path) as db:
         db.execute(f"UPDATE course_state SET {state_update}", params)
 
@@ -615,7 +627,7 @@ def test_pending_schema_upgrade_with_active_session_is_unavailable(
     )
     app_module._clear_course_availability_cache(slug)
 
-    assert app_module._course_availability(slug)["status"] == "invalid"
+    assert app_module._course_availability(slug)["status"] == "migration_required"
     assert app_module.app.test_client().get("/healthz").status_code == 503
 
 def test_safe_pending_schema_health_reports_actual_database_version(
@@ -624,7 +636,7 @@ def test_safe_pending_schema_health_reports_actual_database_version(
 ):
     slug = "safe_schema_upgrade"
     _write_config(catalog_env, slug)
-    _write_database(catalog_env, slug)
+    _write_database(catalog_env, slug, current_schema=False)
     monkeypatch.setattr(database, "SCHEMA_VERSION", "1.1.0")
     monkeypatch.setattr(
         database, "SCHEMA_VERSION_HISTORY", ("1.0.0", "1.1.0")
@@ -639,9 +651,9 @@ def test_safe_pending_schema_health_reports_actual_database_version(
 
     response = app_module.app.test_client().get("/healthz")
 
-    assert response.status_code == 200
+    assert response.status_code == 503
     assert response.get_json() == {
-        "status": "ok",
+        "status": "unavailable",
         "courses_checked": 1,
         "website_version": app_module.public_version(app_module.APP_VERSION),
         "database_schema_version": "v1.0.0",
@@ -652,7 +664,7 @@ def test_safe_pending_schema_health_reports_actual_database_version(
 def test_unadoptable_legacy_database_is_not_ready(catalog_env):
     slug = "unadoptable_legacy"
     _write_config(catalog_env, slug)
-    db_path = _write_database(catalog_env, slug)
+    db_path = _write_database(catalog_env, slug, current_schema=False)
     with sqlite3.connect(db_path) as db:
         db.execute("DROP TABLE schema_migrations")
         db.execute(

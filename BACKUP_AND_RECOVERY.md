@@ -70,11 +70,47 @@ It also reads presentation-history versions. Missing versions use the baseline.
 Malformed durable version strings stay unchanged in `popping.db`, are omitted from
 the semantic version list, and set `contains_unclassified_data` to `true`.
 
+## Participation history in backups and exports
+
+Starting with `v1.1.0`, the displayed Team turns and Challenge turns are derived
+from durable rows, not stored as independent totals. A complete bundle includes
+the `presentation_participants` and `challenge_rounds` tables inside its SQLite
+snapshot. Restoring that snapshot on a compatible release therefore restores
+the course-wide counts across sessions, including retained zero-rating events.
+
+Current Week Results includes a **Participation Roster** sheet with every active
+and archived roster member and the latest course-wide Team turns and Challenge
+turns at export time.
+In this sheet, `team` is the current team for an active student and the last
+known team for an archived student.
+It also includes the underlying evidence for the selected week in the
+**Presentation Participants** and **Challenge Rounds** sheets. A finalized team
+appears in the first evidence sheet even if nobody rated it. A retained
+challenger appears in the second evidence sheet even if its
+`ratings_submitted` value is zero. The dedicated roster sheet is current when
+the ZIP is generated, but one weekly workbook is still not a complete
+replacement for a course backup.
+
+The `v1.0.x` schema did not record these events, so its database and exports
+cannot provide a trustworthy participation backfill. After future schema-line
+changes, incompatible event rows remain available through **Download Legacy
+Data** under the normal compatibility policy.
+
 Before restoring, compare the recorded database schema version with the running
 release. A backup on the same major/minor compatibility line can be restored
 directly. An older compatibility line must go through the supported database
 migration so that its record versions remain available through Download Legacy
 Data. Verification checks the archive; it does not migrate the database.
+
+For an existing `v1.0.x` database, keep all workers stopped and run this from
+the `v1.1.0` repository root before starting the web service:
+
+```bash
+python scripts/migrate-course-db.py 432fall2026
+```
+
+The migration command creates its own validated pre-migration snapshot. It does
+not infer participation events from old ratings.
 
 ## Restore a complete bundle
 

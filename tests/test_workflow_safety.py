@@ -135,6 +135,9 @@ def course_env(tmp_path, monkeypatch):
         (course_id, SESSION_KEY),
     )
     db.commit()
+    db.execute("BEGIN IMMEDIATE")
+    database.migrate_schema_connection(db)
+    db.commit()
     db.close()
 
     env = {
@@ -305,10 +308,10 @@ def _activate_presentation(env, **overrides):
 def _seed_response_history(env, session_key=SESSION_KEY):
     with _connect(env) as db:
         db.execute(
-            """INSERT INTO teammate_thumbs
-               (course_id, session_key, week_num, question_key,
+            f"""INSERT INTO teammate_thumbs
+               (data_version, course_id, session_key, week_num, question_key,
                 grader_id, recipient_id)
-               VALUES (?, ?, ?, ?, ?, ?)""",
+               VALUES ('{app_module.APP_VERSION}', ?, ?, ?, ?, ?, ?)""",
             (
                 env["course_id"],
                 session_key,
@@ -319,12 +322,12 @@ def _seed_response_history(env, session_key=SESSION_KEY):
             ),
         )
         db.execute(
-            """INSERT INTO presentation_ratings
-               (course_id, student_id, question_key, session_key, week_num,
+            f"""INSERT INTO presentation_ratings
+               (data_version, course_id, student_id, question_key, session_key, week_num,
                 presenting_team_id, presenting_team_name, question_id,
                 question_title, rater_team_id, rater_team_name,
                 q1_developed, q2_easy)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               VALUES ('{app_module.APP_VERSION}', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 env["course_id"],
                 env["students"]["s1"],
@@ -544,7 +547,11 @@ def test_next_presentation_waits_for_open_poll(course_env, monkeypatch):
         poll_started_at=clock["now"].strftime("%Y-%m-%d %H:%M:%S.%f"),
     )
     client = _instructor_client(course_env)
-    payload = {"presentation_key": "pres-current"}
+    payload = {
+        "presentation_key": "pres-current",
+        "expected_phase": "competition",
+        "expected_session_key": SESSION_KEY,
+    }
     before = _presentation_snapshot(course_env)
 
     blocked = client.post("/api/next_presentation", json=payload)
@@ -1422,8 +1429,9 @@ def test_non_lock_operational_error_remains_json_500(
 def test_discussion_question_visibility_and_version(course_env):
     """Hiding a question removes it from the student list and bumps the
     version students use to refetch; showing it restores it."""
-    _set_state(course_env, phase="discussion")
     instructor = _instructor_client(course_env)
+    assert instructor.get("/api/state").status_code == 200
+    _set_state(course_env, phase="discussion")
     student = _student_client(course_env, "s1")
 
     added = instructor.post(
@@ -1720,12 +1728,12 @@ def _seed_tied_team_ratings(env):
     with _connect(env) as db:
         for index, (team_name, score) in enumerate(rating_specs, start=1):
             db.execute(
-                """INSERT INTO presentation_ratings
-                   (course_id, student_id, question_key, session_key,
+                f"""INSERT INTO presentation_ratings
+                   (data_version, course_id, student_id, question_key, session_key,
                     presenting_team_id, presenting_team_name, question_id,
                     question_title, rater_team_id, rater_team_name,
                     q1_developed, q2_easy)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   VALUES ('{app_module.APP_VERSION}', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     env["course_id"],
                     env["students"]["s1"],
@@ -1783,12 +1791,12 @@ def test_recorded_activity_progress_uses_aggregate_counts_only(course_env):
             (old_activity, course_env["course_id"]),
         )
         db.execute(
-            """INSERT INTO presentation_ratings
-               (course_id, student_id, question_key, session_key,
+            f"""INSERT INTO presentation_ratings
+               (data_version, course_id, student_id, question_key, session_key,
                 presenting_team_id, presenting_team_name, question_id,
                 question_title, rater_team_id, rater_team_name,
                 q1_developed, q2_easy)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               VALUES ('{app_module.APP_VERSION}', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 course_env["course_id"],
                 course_env["students"]["s4"],
@@ -2045,11 +2053,11 @@ def test_export_workbook_activity_is_scoped_to_selected_week(course_env):
             grader = course_env["students"]["s1" if index != 1 else "s2"]
             recipient = course_env["students"]["s2" if index != 1 else "s1"]
             db.execute(
-                """INSERT INTO teammate_thumbs
-                   (course_id, session_key, week_num, question_key,
+                f"""INSERT INTO teammate_thumbs
+                   (data_version, course_id, session_key, week_num, question_key,
                     source_question_key, question_title, grader_id,
                     recipient_id)
-                   VALUES (?, ?, ?, ?, ?, 'Question', ?, ?)""",
+                   VALUES ('{app_module.APP_VERSION}', ?, ?, ?, ?, ?, 'Question', ?, ?)""",
                 (
                     course_env["course_id"], session_key, week, question_key,
                     source_key, grader, recipient,
@@ -2078,31 +2086,42 @@ def test_export_workbook_activity_is_scoped_to_selected_week(course_env):
             presenting_team_id, presenting_team_name, developed, easy,
         ) in rating_rows:
             db.execute(
-                """INSERT INTO presentation_ratings
-                   (course_id, student_id, question_key, session_key, week_num,
+                f"""INSERT INTO presentation_ratings
+                   (data_version, course_id, student_id, question_key, session_key, week_num,
                     presenting_team_id, presenting_team_name, question_id,
                     question_title, q1_developed, q2_easy)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'Question', ?, ?)""",
+                   VALUES ('{app_module.APP_VERSION}', ?, ?, ?, ?, ?, ?, ?, ?, 'Question', ?, ?)""",
                 (
                     course_env["course_id"], student_id, question_key,
                     session_key, week, presenting_team_id,
                     presenting_team_name, question_id, developed, easy,
                 ),
             )
+        db.execute(
+            "UPDATE teammate_thumbs SET data_version = ?",
+            (app_module.APP_VERSION,),
+        )
+        db.execute(
+            "UPDATE presentation_ratings SET data_version = ?",
+            (app_module.APP_VERSION,),
+        )
         history = [
             {
                 "presentation_key": "pres-week-1",
+                    "data_version": app_module.APP_VERSION,
                 "week_num": 1,
                 "team": "Team 2",
                 "question_id": course_env["question_id"],
             },
             {
                 "presentation_key": "pres-week-2-a",
+                    "data_version": app_module.APP_VERSION,
                 "team": "Team 2",
                 "question_id": week_2_question_id,
             },
             {
                 "presentation_key": "pres-week-2-b",
+                    "data_version": app_module.APP_VERSION,
                 "team": "Team 1",
                 "question_id": None,
             },
@@ -2169,7 +2188,7 @@ def test_export_all_weeks_parameter_is_rejected(course_env):
     )
 
     assert response.status_code == 400
-    assert b"Only the current lecture week" in response.data
+    assert b"Export one week at a time" in response.data
 
 
 def test_legacy_feedback_export_contains_only_unknown_week_rows(course_env):
@@ -2179,10 +2198,10 @@ def test_legacy_feedback_export_contains_only_unknown_week_rows(course_env):
             (1, "week-1-current"),
         ):
             db.execute(
-                """INSERT INTO teammate_thumbs
-                   (course_id, session_key, week_num, question_key,
+                f"""INSERT INTO teammate_thumbs
+                   (data_version, course_id, session_key, week_num, question_key,
                     source_question_key, grader_id, recipient_id)
-                   VALUES (?, 0, ?, ?, ?, ?, ?)""",
+                   VALUES ('{app_module.APP_VERSION}', ?, 0, ?, ?, ?, ?, ?)""",
                 (
                     course_env["course_id"],
                     week_num,
@@ -2197,11 +2216,11 @@ def test_legacy_feedback_export_contains_only_unknown_week_rows(course_env):
             (1, "week-1-rating"),
         ):
             db.execute(
-                """INSERT INTO presentation_ratings
-                   (course_id, student_id, question_key, session_key,
+                f"""INSERT INTO presentation_ratings
+                   (data_version, course_id, student_id, question_key, session_key,
                     week_num, presenting_team_id, presenting_team_name,
                     rater_team_id, rater_team_name, q1_developed, q2_easy)
-                   VALUES (?, ?, ?, 0, ?, ?, 'Team 2', ?, 'Team 1', 3, 4)""",
+                   VALUES ('{app_module.APP_VERSION}', ?, ?, ?, 0, ?, ?, 'Team 2', ?, 'Team 1', 3, 4)""",
                 (
                     course_env["course_id"],
                     course_env["students"]["s1"],
@@ -2211,6 +2230,14 @@ def test_legacy_feedback_export_contains_only_unknown_week_rows(course_env):
                     course_env["teams"]["Team 1"],
                 ),
             )
+        db.execute(
+            "UPDATE teammate_thumbs SET data_version = ?",
+            (app_module.APP_VERSION,),
+        )
+        db.execute(
+            "UPDATE presentation_ratings SET data_version = ?",
+            (app_module.APP_VERSION,),
+        )
         db.commit()
 
     response = _instructor_client(course_env).get(
@@ -2246,10 +2273,10 @@ def test_legacy_export_keeps_one_snapshot_across_concurrent_reset(
     _set_state(course_env, phase="ended")
     with _connect(course_env) as db:
         db.execute(
-            """INSERT INTO teammate_thumbs
-               (course_id, session_key, week_num, question_key,
+            f"""INSERT INTO teammate_thumbs
+               (data_version, course_id, session_key, week_num, question_key,
                 source_question_key, grader_id, recipient_id)
-               VALUES (?, ?, NULL, 'before-thumb', 'before-thumb', ?, ?)""",
+               VALUES ('{app_module.APP_VERSION}', ?, ?, NULL, 'before-thumb', 'before-thumb', ?, ?)""",
             (
                 course_env["course_id"],
                 SESSION_KEY,
@@ -2258,11 +2285,11 @@ def test_legacy_export_keeps_one_snapshot_across_concurrent_reset(
             ),
         )
         db.execute(
-            """INSERT INTO presentation_ratings
-               (course_id, student_id, question_key, session_key, week_num,
+            f"""INSERT INTO presentation_ratings
+               (data_version, course_id, student_id, question_key, session_key, week_num,
                 presenting_team_id, presenting_team_name,
                 rater_team_id, rater_team_name, q1_developed, q2_easy)
-               VALUES (?, ?, 'before-rating', ?, NULL, ?, 'Team 2',
+               VALUES ('{app_module.APP_VERSION}', ?, ?, 'before-rating', ?, NULL, ?, 'Team 2',
                        ?, 'Team 1', 4, 5)""",
             (
                 course_env["course_id"],
@@ -2402,12 +2429,12 @@ def test_export_limits_normal_team_views_but_keeps_historical_ratings(course_env
     with _connect(course_env) as db:
         db.execute("UPDATE course_state SET max_teams = 2")
         db.execute(
-            """INSERT INTO presentation_ratings
-               (course_id, student_id, question_key, session_key, week_num,
+            f"""INSERT INTO presentation_ratings
+               (data_version, course_id, student_id, question_key, session_key, week_num,
                 presenting_team_id, presenting_team_name, question_id,
                 question_title, rater_team_id, rater_team_name,
                 q1_developed, q2_easy)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               VALUES ('{app_module.APP_VERSION}', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 course_env["course_id"],
                 course_env["students"]["s1"],
@@ -2423,6 +2450,10 @@ def test_export_limits_normal_team_views_but_keeps_historical_ratings(course_env
                 4,
                 4,
             ),
+        )
+        db.execute(
+            "UPDATE presentation_ratings SET data_version = ?",
+            (app_module.APP_VERSION,),
         )
         db.commit()
 
@@ -2667,11 +2698,11 @@ def test_cancel_presentation_requires_explicit_rating_discard(course_env):
     _activate_presentation(course_env)
     with _connect(course_env) as db:
         db.execute(
-            """INSERT INTO presentation_ratings
-               (course_id, student_id, question_key, session_key,
+            f"""INSERT INTO presentation_ratings
+               (data_version, course_id, student_id, question_key, session_key,
                 presenting_team_id, presenting_team_name, question_id,
                 question_title, q1_developed, q2_easy)
-               VALUES (?, ?, 'pres-current', ?, ?, 'Team 1', ?,
+               VALUES ('{app_module.APP_VERSION}', ?, ?, 'pres-current', ?, ?, 'Team 1', ?,
                        'Question One', 4, 4)""",
             (
                 course_env["course_id"],
@@ -3012,10 +3043,10 @@ def test_week_change_rejects_current_session_teammate_thumbs_without_mutation(
     _write_catalog_week(course_env, 2)
     with _connect(course_env) as db:
         db.execute(
-            """INSERT INTO teammate_thumbs
-               (course_id, session_key, week_num, question_key,
+            f"""INSERT INTO teammate_thumbs
+               (data_version, course_id, session_key, week_num, question_key,
                 grader_id, recipient_id)
-               VALUES (?, ?, 1, 'discussion', ?, ?)""",
+               VALUES ('{app_module.APP_VERSION}', ?, ?, 1, 'discussion', ?, ?)""",
             (
                 course_env["course_id"],
                 SESSION_KEY,
@@ -3073,10 +3104,10 @@ def test_week_change_rejects_other_current_session_ratings(course_env):
     _write_catalog_week(course_env, 2)
     with _connect(course_env) as db:
         db.execute(
-            """INSERT INTO presentation_ratings
-               (course_id, student_id, question_key, session_key, week_num,
+            f"""INSERT INTO presentation_ratings
+               (data_version, course_id, student_id, question_key, session_key, week_num,
                 q1_developed, q2_easy)
-               VALUES (?, ?, 'pres-existing', ?, 1, 4, 5)""",
+               VALUES ('{app_module.APP_VERSION}', ?, ?, 'pres-existing', ?, 1, 4, 5)""",
             (
                 course_env["course_id"],
                 course_env["students"]["s1"],
@@ -3204,10 +3235,10 @@ def test_same_week_selection_is_idempotent_after_current_session_activity(
     _write_catalog_week(course_env, 1)
     with _connect(course_env) as db:
         db.execute(
-            """INSERT INTO teammate_thumbs
-               (course_id, session_key, week_num, question_key,
+            f"""INSERT INTO teammate_thumbs
+               (data_version, course_id, session_key, week_num, question_key,
                 grader_id, recipient_id)
-               VALUES (?, ?, 1, 'discussion', ?, ?)""",
+               VALUES ('{app_module.APP_VERSION}', ?, ?, 1, 'discussion', ?, ?)""",
             (
                 course_env["course_id"],
                 SESSION_KEY,
@@ -3241,10 +3272,10 @@ def test_old_session_activity_does_not_block_week_change(course_env):
     _write_catalog_week(course_env, 2)
     with _connect(course_env) as db:
         db.execute(
-            """INSERT INTO teammate_thumbs
-               (course_id, session_key, week_num, question_key,
+            f"""INSERT INTO teammate_thumbs
+               (data_version, course_id, session_key, week_num, question_key,
                 grader_id, recipient_id)
-               VALUES (?, ?, 1, 'discussion', ?, ?)""",
+               VALUES ('{app_module.APP_VERSION}', ?, ?, 1, 'discussion', ?, ?)""",
             (
                 course_env["course_id"],
                 SESSION_KEY - 1,
@@ -3278,10 +3309,10 @@ def test_new_session_allows_week_change_after_prior_session_activity(course_env)
     _write_catalog_week(course_env, 2)
     with _connect(course_env) as db:
         db.execute(
-            """INSERT INTO teammate_thumbs
-               (course_id, session_key, week_num, question_key,
+            f"""INSERT INTO teammate_thumbs
+               (data_version, course_id, session_key, week_num, question_key,
                 grader_id, recipient_id)
-               VALUES (?, ?, 1, 'discussion', ?, ?)""",
+               VALUES ('{app_module.APP_VERSION}', ?, ?, 1, 'discussion', ?, ?)""",
             (
                 course_env["course_id"],
                 SESSION_KEY,
@@ -3380,9 +3411,9 @@ def test_appendix_delete_uses_stable_id_and_unposts_current_question(course_env)
     )
     with _connect(course_env) as db:
         db.execute(
-            """INSERT INTO teammate_thumbs
-               (course_id, session_key, question_key, grader_id, recipient_id)
-               VALUES (?, ?, ?, ?, ?)""",
+            f"""INSERT INTO teammate_thumbs
+               (data_version, course_id, session_key, question_key, grader_id, recipient_id)
+               VALUES ('{app_module.APP_VERSION}', ?, ?, ?, ?, ?)""",
             (
                 course_env["course_id"],
                 SESSION_KEY,
@@ -4044,10 +4075,10 @@ def test_instructor_sees_per_team_discussion_thumb_progress(course_env):
         )
         # Historical data stays stored but must not enter this session's count.
         db.execute(
-            """INSERT INTO teammate_thumbs
-               (course_id, session_key, week_num, question_key,
+            f"""INSERT INTO teammate_thumbs
+               (data_version, course_id, session_key, week_num, question_key,
                 grader_id, recipient_id, grader_team_id, recipient_team_id)
-               VALUES (?, ?, 1, 'discussion', ?, ?, ?, ?)""",
+               VALUES ('{app_module.APP_VERSION}', ?, ?, 1, 'discussion', ?, ?, ?, ?)""",
             (
                 course_env["course_id"], SESSION_KEY - 1,
                 course_env["students"]["s2"],
@@ -4238,13 +4269,13 @@ def test_instructor_sees_per_challenge_submission_and_eligibility_counts(
     with _connect(course_env) as db:
         for challenge in challenges:
             db.execute(
-                """INSERT INTO challenge_rounds
-                   (course_id, session_key, week_num, presentation_key,
+                f"""INSERT INTO challenge_rounds
+                   (data_version, course_id, session_key, week_num, presentation_key,
                     challenge_key, challenge_num, challenger_id,
                     challenger_name, challenger_team_id,
                     challenger_team_name, presenting_team_id,
                     presenting_team_name, question_id, question_title)
-                   VALUES (?, ?, 1, 'pres-current', ?, ?, ?, ?, ?, ?, ?,
+                   VALUES ('{app_module.APP_VERSION}', ?, ?, 1, 'pres-current', ?, ?, ?, ?, ?, ?, ?,
                            'Team 1', ?, 'Question One')""",
                 (
                     course_env["course_id"], SESSION_KEY,
@@ -4571,12 +4602,12 @@ def _seed_live_challenge(env):
     }
     with _connect(env) as db:
         db.execute(
-            """INSERT INTO challenge_rounds
-               (course_id, session_key, week_num, presentation_key,
+            f"""INSERT INTO challenge_rounds
+               (data_version, course_id, session_key, week_num, presentation_key,
                 challenge_key, challenge_num, challenger_id, challenger_name,
                 challenger_team_id, challenger_team_name, presenting_team_id,
                 presenting_team_name, question_id, question_title)
-               VALUES (?, ?, 1, 'pres-current', ?, 1, ?, 'Dana', ?, 'Team 2',
+               VALUES ('{app_module.APP_VERSION}', ?, ?, 1, 'pres-current', ?, 1, ?, 'Dana', ?, 'Team 2',
                        ?, 'Team 1', ?, 'Question One')""",
             (
                 env["course_id"], SESSION_KEY, challenge["challenge_key"],
@@ -4606,7 +4637,11 @@ def test_stop_poll_cutoff_is_idempotent_and_new_poll_reopens_scopes(
     )
     _seed_live_challenge(course_env)
     instructor = _instructor_client(course_env)
-    payload = {"presentation_key": "pres-current"}
+    payload = {
+        "presentation_key": "pres-current",
+        "expected_phase": "competition",
+        "expected_session_key": SESSION_KEY,
+    }
 
     first = instructor.post("/api/stop_poll", json=payload)
     assert first.status_code == 200
@@ -4649,7 +4684,11 @@ def test_challenge_rating_uses_arrival_time_across_transition_lock(
         db.commit()
 
     instructor = _instructor_client(course_env)
-    payload = {"presentation_key": "pres-current"}
+    payload = {
+        "presentation_key": "pres-current",
+        "expected_phase": "competition",
+        "expected_session_key": SESSION_KEY,
+    }
     closing = instructor.post("/api/next_presentation", json=payload)
     assert closing.status_code == 409
     assert closing.get_json()["ratings_settling_remaining"] == 3
@@ -5066,13 +5105,13 @@ def test_cancel_presentation_reports_both_rating_types_before_discard(
             ),
         )
         db.execute(
-            """INSERT INTO challenge_rounds
-               (course_id, session_key, week_num, presentation_key,
+            f"""INSERT INTO challenge_rounds
+               (data_version, course_id, session_key, week_num, presentation_key,
                 challenge_key, challenge_num, challenger_id, challenger_name,
                 challenger_team_id, challenger_team_name,
                 presenting_team_id, presenting_team_name,
                 question_id, question_title)
-               VALUES (?, ?, 1, 'pres-current', 'pres-current-ch1', 1,
+               VALUES ('{app_module.APP_VERSION}', ?, ?, 1, 'pres-current', 'pres-current-ch1', 1,
                        ?, 'Dana', ?, 'Team 2', ?, 'Team 1', ?,
                        'Question One')""",
             (
@@ -5084,10 +5123,10 @@ def test_cancel_presentation_reports_both_rating_types_before_discard(
             ),
         )
         db.execute(
-            """INSERT INTO presentation_ratings
-               (course_id, student_id, question_key, session_key, week_num,
+            f"""INSERT INTO presentation_ratings
+               (data_version, course_id, student_id, question_key, session_key, week_num,
                 q1_developed, q2_easy)
-               VALUES (?, ?, 'pres-current', ?, 1, 4, 5)""",
+               VALUES ('{app_module.APP_VERSION}', ?, ?, 'pres-current', ?, 1, 4, 5)""",
             (
                 course_env["course_id"],
                 course_env["students"]["s4"],
@@ -5095,12 +5134,12 @@ def test_cancel_presentation_reports_both_rating_types_before_discard(
             ),
         )
         db.execute(
-            """INSERT INTO challenge_ratings
-               (course_id, session_key, week_num, challenge_key,
+            f"""INSERT INTO challenge_ratings
+               (data_version, course_id, session_key, week_num, challenge_key,
                 presentation_key, challenger_id, challenger_name,
                 challenger_team_id, challenger_team_name,
                 rater_id, rater_name, rater_team_id, rater_team_name, score)
-               VALUES (?, ?, 1, 'pres-current-ch1', 'pres-current',
+               VALUES ('{app_module.APP_VERSION}', ?, ?, 1, 'pres-current-ch1', 'pres-current',
                        ?, 'Dana', ?, 'Team 2', ?, 'Alice', ?, 'Team 1', 4)""",
             (
                 course_env["course_id"], SESSION_KEY,
@@ -5158,13 +5197,13 @@ def test_export_includes_current_week_challenge_rounds_and_context(course_env):
         )
         for week, challenge_key, presentation_key, challenge_num in rounds:
             db.execute(
-                """INSERT INTO challenge_rounds
-                   (course_id, session_key, week_num, presentation_key,
+                f"""INSERT INTO challenge_rounds
+                   (data_version, course_id, session_key, week_num, presentation_key,
                     challenge_key, challenge_num, challenger_id,
                     challenger_name, challenger_team_id,
                     challenger_team_name, presenting_team_id,
                     presenting_team_name, question_id, question_title)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, 'Team 2', ?,
+                   VALUES ('{app_module.APP_VERSION}', ?, ?, ?, ?, ?, ?, ?, NULL, ?, 'Team 2', ?,
                            'Team 1', ?, 'Question One')""",
                 (
                     course_env["course_id"], SESSION_KEY, week,
@@ -5176,12 +5215,12 @@ def test_export_includes_current_week_challenge_rounds_and_context(course_env):
                 ),
             )
         db.execute(
-            """INSERT INTO challenge_ratings
-               (course_id, session_key, week_num, challenge_key,
+            f"""INSERT INTO challenge_ratings
+               (data_version, course_id, session_key, week_num, challenge_key,
                 presentation_key, challenger_id, challenger_name,
                 challenger_team_id, challenger_team_name,
                 rater_id, rater_name, rater_team_id, rater_team_name, score)
-               VALUES (?, ?, 1, 'pres-current-ch1', 'pres-current', ?,
+               VALUES ('{app_module.APP_VERSION}', ?, ?, 1, 'pres-current-ch1', 'pres-current', ?,
                        NULL, ?, 'Team 2', ?, 'Alice', ?, 'Team 1', 4)""",
             (
                 course_env["course_id"], SESSION_KEY,
@@ -5190,6 +5229,14 @@ def test_export_includes_current_week_challenge_rounds_and_context(course_env):
                 course_env["students"]["s1"],
                 course_env["teams"]["Team 1"],
             ),
+        )
+        db.execute(
+            "UPDATE challenge_rounds SET data_version = ?",
+            (app_module.APP_VERSION,),
+        )
+        db.execute(
+            "UPDATE challenge_ratings SET data_version = ?",
+            (app_module.APP_VERSION,),
         )
         db.commit()
 
@@ -5569,10 +5616,10 @@ def test_select_challenger_remains_available_while_main_poll_is_open(
 def _seed_current_session_thumb(env):
     with _connect(env) as db:
         db.execute(
-            """INSERT INTO teammate_thumbs
-               (course_id, session_key, week_num, question_key,
+            f"""INSERT INTO teammate_thumbs
+               (data_version, course_id, session_key, week_num, question_key,
                 source_question_key, grader_id, recipient_id)
-               VALUES (?, ?, 1, 'discussion', 'discussion', ?, ?)""",
+               VALUES ('{app_module.APP_VERSION}', ?, ?, 1, 'discussion', 'discussion', ?, ?)""",
             (
                 env["course_id"],
                 SESSION_KEY,
@@ -5820,10 +5867,10 @@ def test_exports_are_phase_gated_and_neutralize_spreadsheet_formulas(
             (malicious_name, course_env["students"]["s1"]),
         )
         db.execute(
-            """INSERT INTO teammate_thumbs
-               (course_id, session_key, week_num, question_key,
+            f"""INSERT INTO teammate_thumbs
+               (data_version, course_id, session_key, week_num, question_key,
                 source_question_key, grader_id, recipient_id)
-               VALUES (?, ?, NULL, 'legacy', 'legacy', ?, ?)""",
+               VALUES ('{app_module.APP_VERSION}', ?, ?, NULL, 'legacy', 'legacy', ?, ?)""",
             (
                 course_env["course_id"],
                 SESSION_KEY,
@@ -5874,8 +5921,8 @@ def test_healthz_checks_active_course_storage(course_env):
     assert healthy.get_json() == {
         "status": "ok",
         "courses_checked": 1,
-        "website_version": "v1.0.0",
-        "database_schema_version": "v1.0.0",
+        "website_version": f"v{app_module.APP_VERSION}",
+        "database_schema_version": f"v{app_module.SCHEMA_VERSION}",
     }
 
     offline_path = Path(str(course_env["db_path"]) + ".offline")
@@ -5905,3 +5952,527 @@ def test_existing_database_migration_adds_session_activity_indexes(course_env):
             )
         }
     assert expected.issubset(actual)
+
+
+def _participant_rows(env):
+    with _connect(env) as db:
+        return [
+            dict(row) for row in db.execute(
+                """SELECT session_key, week_num, presentation_key,
+                          student_id, student_identifier, student_name,
+                          team_id, team_name, data_version
+                   FROM presentation_participants
+                   WHERE course_id = ?
+                   ORDER BY presentation_key, student_identifier""",
+                (env["course_id"],),
+            )
+        ]
+
+
+def _management_student(env, student_sid):
+    response = _instructor_client(env).get(
+        "/api/students",
+        query_string={"search": student_sid, "per_page": 100},
+    )
+    assert response.status_code == 200
+    matches = [
+        student for student in response.get_json()["students"]
+        if student["student_id"].casefold() == student_sid.casefold()
+    ]
+    assert len(matches) == 1
+    return matches[0]
+
+
+def _activate_current_schema_presentation(env, **overrides):
+    preflight = _instructor_client(env).get("/api/state")
+    assert preflight.status_code == 200
+    _activate_presentation(env, **overrides)
+
+
+def _post_after_rating_grace(client, path, payload, clock):
+    settling = client.post(path, json=payload)
+    assert settling.status_code == 409
+    assert settling.get_json()["ratings_settling"] is True
+    clock["now"] += timedelta(
+        seconds=app_module.POLL_SUBMISSION_GRACE_SECONDS,
+        milliseconds=1,
+    )
+    return client.post(path, json=payload)
+
+
+def test_malformed_active_challenger_id_does_not_break_instructor_state(
+        course_env):
+    instructor = _instructor_client(course_env)
+    assert instructor.get("/api/state").status_code == 200
+    _activate_presentation(course_env)
+    with _connect(course_env) as db:
+        db.execute(
+            "UPDATE course_state SET active_challenges_json = ?",
+            (json.dumps([{
+                "challenge_key": "malformed-challenger",
+                "challenge_num": 1,
+                "challenger_id": "not-an-integer",
+                "challenger_name": "Malformed",
+                "challenger_team_id": None,
+                "challenger_team_name": None,
+            }]),),
+        )
+        db.commit()
+
+    response = instructor.get("/api/state")
+
+    assert response.status_code == 200
+    challenge = response.get_json()["active_challenges"][0]
+    assert challenge["presentation_count"] == 0
+    assert challenge["challenger_count"] == 0
+
+
+def test_student_state_and_poll_omit_all_participation_counts(course_env):
+    _activate_current_schema_presentation(course_env)
+    _select_test_challenger(course_env, "s4")
+
+    instructor_state = _instructor_client(course_env).get(
+        "/api/state"
+    ).get_json()
+    assert len(instructor_state["active_challenges"]) == 1
+    instructor_challenge = instructor_state["active_challenges"][0]
+    assert instructor_challenge["presentation_count"] == 0
+    assert instructor_challenge["challenger_count"] == 1
+
+    student = _student_client(course_env, "s4")
+    state_response = student.get("/api/state")
+    poll_response = student.get("/api/poll")
+    assert state_response.status_code == 200
+    assert poll_response.status_code == 200
+
+    student_states = (
+        state_response.get_json(),
+        poll_response.get_json()["state"],
+    )
+    for state in student_states:
+        assert "presentation_count" not in state
+        assert "challenger_count" not in state
+        assert len(state["active_challenges"]) == 1
+        challenge = state["active_challenges"][0]
+        assert "presentation_count" not in challenge
+        assert "challenger_count" not in challenge
+
+
+def test_direct_end_session_finalizes_team_and_challenger_once(
+        course_env, monkeypatch):
+    clock = {"now": datetime(2026, 8, 22, 12, 0, 0)}
+    monkeypatch.setattr(app_module, "_utcnow", lambda: clock["now"])
+    _activate_current_schema_presentation(course_env)
+    challenge_key = _select_test_challenger(course_env, "s4")
+    instructor = _instructor_client(course_env)
+    assert _participant_rows(course_env) == []
+    assert _management_student(course_env, "s4")["challenger_count"] == 1
+
+    end_payload = {
+        "phase": "ended",
+        "expected_phase": "competition",
+        "expected_session_key": SESSION_KEY,
+        "presentation_key": "pres-current",
+        "confirm_end_session": True,
+    }
+    ended = _post_after_rating_grace(
+        instructor, "/api/set_phase", end_payload, clock
+    )
+
+    assert ended.status_code == 200
+    participants = _participant_rows(course_env)
+    assert len(participants) == 2
+    assert {
+        (row["student_identifier"], row["presentation_key"])
+        for row in participants
+    } == {("s1", "pres-current"), ("s2", "pres-current")}
+    with _connect(course_env) as db:
+        challenge_rows = [
+            dict(row) for row in db.execute(
+                """SELECT challenge_key, presentation_key, challenger_id
+                   FROM challenge_rounds WHERE course_id = ?""",
+                (course_env["course_id"],),
+            )
+        ]
+    assert challenge_rows == [{
+        "challenge_key": challenge_key,
+        "presentation_key": "pres-current",
+        "challenger_id": course_env["students"]["s4"],
+    }]
+    assert _management_student(course_env, "s1")["presentation_count"] == 1
+    assert _management_student(course_env, "s2")["presentation_count"] == 1
+    assert _management_student(course_env, "s4")["challenger_count"] == 1
+
+    repeated = instructor.post("/api/set_phase", json=end_payload)
+    assert repeated.status_code == 409
+    assert len(_participant_rows(course_env)) == 2
+    with _connect(course_env) as db:
+        assert db.execute(
+            """SELECT COUNT(*) FROM challenge_rounds
+               WHERE course_id = ? AND challenge_key = ?""",
+            (course_env["course_id"], challenge_key),
+        ).fetchone()[0] == 1
+    assert _management_student(course_env, "s1")["presentation_count"] == 1
+    assert _management_student(course_env, "s4")["challenger_count"] == 1
+
+
+def test_finalizing_zero_rating_presentation_snapshots_members_once(
+        course_env):
+    _activate_current_schema_presentation(course_env)
+    instructor = _instructor_client(course_env)
+
+    finished = instructor.post(
+        "/api/next_presentation",
+        json={"presentation_key": "pres-current"},
+    )
+
+    assert finished.status_code == 200
+    assert _participant_rows(course_env) == [
+        {
+            "session_key": SESSION_KEY,
+            "week_num": 1,
+            "presentation_key": "pres-current",
+            "student_id": course_env["students"]["s1"],
+            "student_identifier": "s1",
+            "student_name": "Alice",
+            "team_id": course_env["teams"]["Team 1"],
+            "team_name": "Team 1",
+            "data_version": app_module.APP_VERSION,
+        },
+        {
+            "session_key": SESSION_KEY,
+            "week_num": 1,
+            "presentation_key": "pres-current",
+            "student_id": course_env["students"]["s2"],
+            "student_identifier": "s2",
+            "student_name": "Bob",
+            "team_id": course_env["teams"]["Team 1"],
+            "team_name": "Team 1",
+            "data_version": app_module.APP_VERSION,
+        },
+    ]
+    assert _management_student(course_env, "s1")["presentation_count"] == 1
+    assert _management_student(course_env, "s2")["presentation_count"] == 1
+    assert _management_student(course_env, "s4")["presentation_count"] == 0
+    sorted_presenters = instructor.get(
+        "/api/students",
+        query_string={
+            "sort": "presentation_count", "order": "desc", "per_page": 100,
+        },
+    ).get_json()["students"]
+    assert [student["student_id"] for student in sorted_presenters] == [
+        "s1", "s2", "s3", "s4",
+    ]
+
+    repeated = instructor.post(
+        "/api/next_presentation",
+        json={
+            "presentation_key": "pres-current",
+            "expected_phase": "competition",
+            "expected_session_key": SESSION_KEY,
+        },
+    )
+    assert repeated.status_code == 200
+    assert repeated.get_json()["already_finished"] is True
+    assert len(_participant_rows(course_env)) == 2
+
+    instructor_teams = instructor.get("/api/teams").get_json()
+    team_1 = next(team for team in instructor_teams if team["name"] == "Team 1")
+    counts = {
+        member["student_id"]: (
+            member["presentation_count"], member["challenger_count"]
+        )
+        for member in team_1["members"]
+    }
+    assert counts == {"s1": (1, 0), "s2": (1, 0)}
+
+    student_teams = _student_client(course_env, "s4").get(
+        "/api/teams"
+    ).get_json()
+    assert all(
+        "presentation_count" not in member and "challenger_count" not in member
+        for team in student_teams for member in team["members"]
+    )
+
+
+def test_cancelling_presentation_does_not_create_participant_history(course_env):
+    _activate_current_schema_presentation(course_env)
+
+    cancelled = _instructor_client(course_env).post(
+        "/api/cancel_presentation",
+        json={"presentation_key": "pres-current"},
+    )
+
+    assert cancelled.status_code == 200
+    assert _participant_rows(course_env) == []
+    assert _management_student(course_env, "s1")["presentation_count"] == 0
+
+
+def test_finish_then_cancel_reports_conflict_and_keeps_participation(course_env):
+    _activate_current_schema_presentation(course_env)
+    instructor = _instructor_client(course_env)
+    payload = {
+        "presentation_key": "pres-current",
+        "expected_phase": "competition",
+        "expected_session_key": SESSION_KEY,
+    }
+
+    finished = instructor.post("/api/next_presentation", json=payload)
+    assert finished.status_code == 200
+
+    missing_state_guard = instructor.post(
+        "/api/cancel_presentation",
+        json={"presentation_key": "pres-current"},
+    )
+    assert missing_state_guard.status_code == 400
+    assert "expected phase" in missing_state_guard.get_json()["error"].lower()
+
+    conflict = instructor.post("/api/cancel_presentation", json=payload)
+    assert conflict.status_code == 409
+    assert conflict.get_json()["outcome"] == "finished"
+    assert "already finished" in conflict.get_json()["error"].lower()
+    assert len(json.loads(_state_row(course_env)["presentation_history"])) == 1
+    assert len(_participant_rows(course_env)) == 2
+
+
+def test_cancel_then_finish_reports_conflict_without_participation(course_env):
+    _activate_current_schema_presentation(course_env)
+    instructor = _instructor_client(course_env)
+    payload = {
+        "presentation_key": "pres-current",
+        "expected_phase": "competition",
+        "expected_session_key": SESSION_KEY,
+    }
+
+    cancelled = instructor.post("/api/cancel_presentation", json=payload)
+    assert cancelled.status_code == 200
+
+    repeated = instructor.post("/api/cancel_presentation", json=payload)
+    assert repeated.status_code == 200
+    assert repeated.get_json()["already_canceled"] is True
+
+    conflict = instructor.post("/api/next_presentation", json=payload)
+    assert conflict.status_code == 409
+    assert conflict.get_json()["outcome"] == "canceled"
+    assert "canceled" in conflict.get_json()["error"].lower()
+    assert json.loads(_state_row(course_env)["presentation_history"]) == []
+    assert _participant_rows(course_env) == []
+
+
+@pytest.mark.parametrize(
+    "route", ("/api/next_presentation", "/api/cancel_presentation")
+)
+def test_inactive_presentation_key_from_prior_session_is_not_idempotent(
+        course_env, route):
+    _activate_current_schema_presentation(course_env)
+    instructor = _instructor_client(course_env)
+    assert instructor.post(
+        "/api/next_presentation",
+        json={"presentation_key": "pres-current"},
+    ).status_code == 200
+    _set_state(course_env, session_key=SESSION_KEY + 1)
+
+    stale = instructor.post(
+        route,
+        json={
+            "presentation_key": "pres-current",
+            "expected_phase": "competition",
+            "expected_session_key": SESSION_KEY + 1,
+        },
+    )
+
+    assert stale.status_code == 409
+    assert stale.get_json()["outcome"] == "stale_session"
+    assert "earlier session" in stale.get_json()["error"].lower()
+    assert len(_participant_rows(course_env)) == 2
+
+
+def test_challenger_counts_follow_retained_rounds_across_clear_and_cancel(
+        course_env, monkeypatch):
+    clock = {"now": datetime(2026, 8, 21, 12, 0, 0)}
+    monkeypatch.setattr(app_module, "_utcnow", lambda: clock["now"])
+    _activate_current_schema_presentation(course_env)
+    instructor = _instructor_client(course_env)
+
+    first_key = _select_test_challenger(course_env, "s4")
+    assert _management_student(course_env, "s4")["challenger_count"] == 1
+    sorted_challengers = instructor.get(
+        "/api/students",
+        query_string={
+            "sort": "challenger_count", "order": "desc", "per_page": 100,
+        },
+    ).get_json()["students"]
+    assert [student["student_id"] for student in sorted_challengers] == [
+        "s4", "s1", "s2", "s3",
+    ]
+
+    cleared = _post_after_rating_grace(
+        instructor,
+        "/api/clear_challenger",
+        {
+            "presentation_key": "pres-current",
+            "challenge_key": first_key,
+        },
+        clock,
+    )
+    assert cleared.status_code == 200
+    assert _management_student(course_env, "s4")["challenger_count"] == 0
+
+    second_key = _select_test_challenger(course_env, "s4")
+    raised_again = _student_client(course_env, "s4").post(
+        "/api/raise_hand", json={"presentation_key": "pres-current"}
+    )
+    assert raised_again.status_code == 200
+    state = instructor.get("/api/state").get_json()
+    hand = next(
+        item for item in state["challenge_hands"]
+        if item["student_id"] == course_env["students"]["s4"]
+    )
+    assert hand["presentation_count"] == 0
+    assert hand["challenger_count"] == 1
+
+    selected_again = instructor.post(
+        "/api/select_challenger",
+        json={
+            "presentation_key": "pres-current",
+            "student_id": course_env["students"]["s4"],
+        },
+    )
+    assert selected_again.status_code == 200
+    third_key = selected_again.get_json()["challenge_key"]
+    assert third_key not in {first_key, second_key}
+    assert _management_student(course_env, "s4")["challenger_count"] == 2
+
+    active = instructor.get("/api/state").get_json()["active_challenges"]
+    assert {item["challenger_count"] for item in active} == {2}
+
+    cleared_one = _post_after_rating_grace(
+        instructor,
+        "/api/clear_challenger",
+        {
+            "presentation_key": "pres-current",
+            "challenge_key": second_key,
+        },
+        clock,
+    )
+    assert cleared_one.status_code == 200
+    assert _management_student(course_env, "s4")["challenger_count"] == 1
+
+    cancelled = _post_after_rating_grace(
+        instructor,
+        "/api/cancel_presentation",
+        {"presentation_key": "pres-current"},
+        clock,
+    )
+    assert cancelled.status_code == 200
+    assert _management_student(course_env, "s4")["challenger_count"] == 0
+
+
+def test_participation_counts_survive_new_session_archive_and_reactivation(
+        course_env):
+    _activate_current_schema_presentation(course_env)
+    instructor = _instructor_client(course_env)
+    assert instructor.post(
+        "/api/next_presentation",
+        json={"presentation_key": "pres-current"},
+    ).status_code == 200
+
+    ended = instructor.post(
+        "/api/set_phase",
+        json={
+            "phase": "ended",
+            "expected_phase": "competition",
+            "expected_session_key": SESSION_KEY,
+            "confirm_end_session": True,
+        },
+    )
+    assert ended.status_code == 200
+    setup = instructor.post(
+        "/api/set_phase",
+        json={
+            "phase": "setup",
+            "expected_phase": "ended",
+            "expected_session_key": SESSION_KEY,
+        },
+    )
+    assert setup.status_code == 200
+    assert setup.get_json()["session_key"] == SESSION_KEY + 1
+
+    original_id = course_env["students"]["s1"]
+    archived = instructor.delete(
+        f"/api/remove_student/{original_id}",
+        json={
+            "expected_phase": "setup",
+            "expected_session_key": SESSION_KEY + 1,
+            "expected_roster_version": 0,
+        },
+    )
+    assert archived.status_code == 200
+    restored = instructor.post(
+        "/api/add_student",
+        json={
+            "expected_phase": "setup",
+            "expected_session_key": SESSION_KEY + 1,
+            "expected_roster_version": 1,
+            "student_id": "S1",
+            "name": "Alice Restored",
+            "pin": "5555",
+        },
+    )
+    assert restored.status_code == 200
+    assert restored.get_json()["reactivated"] is True
+    student = _management_student(course_env, "s1")
+    assert student["id"] == original_id
+    assert student["presentation_count"] == 1
+    assert student["challenger_count"] == 0
+
+
+def test_reset_erases_counts_after_preserving_them_in_recovery_backup(
+        course_env, monkeypatch):
+    clock = {"now": datetime(2026, 8, 21, 13, 0, 0)}
+    monkeypatch.setattr(app_module, "_utcnow", lambda: clock["now"])
+    _activate_current_schema_presentation(course_env)
+    _select_test_challenger(course_env, "s4")
+    instructor = _instructor_client(course_env)
+    finalized = _post_after_rating_grace(
+        instructor,
+        "/api/next_presentation",
+        {"presentation_key": "pres-current"},
+        clock,
+    )
+    assert finalized.status_code == 200
+    assert _management_student(course_env, "s1")["presentation_count"] == 1
+    assert _management_student(course_env, "s4")["challenger_count"] == 1
+
+    ended = instructor.post(
+        "/api/set_phase",
+        json={
+            "phase": "ended",
+            "expected_phase": "competition",
+            "expected_session_key": SESSION_KEY,
+            "confirm_end_session": True,
+        },
+    )
+    assert ended.status_code == 200
+    reset = instructor.post(
+        "/api/reset_data", json=_reset_payload(course_env, "ended")
+    )
+
+    assert reset.status_code == 200
+    backup_path = (
+        Path(course_env["data_dir"])
+        / course_env["slug"]
+        / "reset-backups"
+        / reset.get_json()["backup"]
+    )
+    with sqlite3.connect(backup_path) as backup:
+        assert backup.execute(
+            "SELECT COUNT(*) FROM presentation_participants"
+        ).fetchone()[0] == 2
+        assert backup.execute(
+            "SELECT COUNT(*) FROM challenge_rounds"
+        ).fetchone()[0] == 1
+
+    assert _participant_rows(course_env) == []
+    assert _management_student(course_env, "s1")["presentation_count"] == 0
+    assert _management_student(course_env, "s4")["challenger_count"] == 0
