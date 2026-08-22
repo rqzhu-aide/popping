@@ -18,6 +18,8 @@ versions as defined in `VERSIONING.md`.
 - Added per-week results downloads: **Tools → Download Results** offers the
   current week and every previous week, each with the same workbook layout
   (the course-wide Participation Roster still pools all weeks).
+- Added **Tools → Change Instructor PIN** so the instructor can rotate their
+  PIN (4-32 digits, new + confirm) without resetting the course database.
 - Added `scripts/migrate-course-db.py` for validated, transactional offline
   migration of an existing course database.
 

@@ -25,6 +25,8 @@ def test_templates_present_version_and_unambiguous_download_labels():
     assert "week=w" in base
     assert "Download Current Week Results" in instructor
     assert "Download Legacy Data" in base
+    assert "Change Instructor PIN" in base
+    assert "change-pin-dialog" in base
     assert (
         "Older-version or unclassified records excluded from current-week results"
         in base
