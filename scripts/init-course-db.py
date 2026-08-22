@@ -450,8 +450,15 @@ def main(argv=None):
 
         username = input("Instructor username: ").strip()
         display_name = input("Instructor name: ").strip()
-        pin = getpass.getpass("Instructor PIN: ").strip()
-        if not username or not display_name or not pin:
+        # Must stay consistent with the instructor login form, which
+        # accepts numeric PINs of 4-32 digits; a PIN outside that range
+        # would be impossible to log in with.
+        while True:
+            pin = getpass.getpass("Instructor PIN (4-32 digits): ").strip()
+            if re.fullmatch(r"\d{4,32}", pin):
+                break
+            print("PIN must be 4 to 32 digits. Try again.")
+        if not username or not display_name:
             raise ValueError("All instructor fields are required")
 
         os.makedirs(db_dir, exist_ok=True)

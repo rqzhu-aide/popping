@@ -18,6 +18,9 @@ versions as defined in `VERSIONING.md`.
 - Added per-week results downloads: **Tools → Download Results** offers the
   current week and every previous week, each with the same workbook layout
   (the course-wide Participation Roster still pools all weeks).
+- Added `scripts/set-instructor-pin.py` for command-line instructor PIN
+  rotation and recovery (no website login required; updates every course by
+  default or one course when given a slug).
 - Added `scripts/migrate-course-db.py` for validated, transactional offline
   migration of an existing course database.
 
@@ -36,6 +39,12 @@ versions as defined in `VERSIONING.md`.
 - Existing `v1.0.x` participation is not backfilled. Stop all web workers and
   run `python scripts/migrate-course-db.py <course_slug>` for every existing
   course before starting `v1.1.0`.
+
+### Fixed
+
+- Instructor login now accepts numeric PINs of 4-32 digits (previously clipped
+  at 4 characters, which locked out instructors who set a longer PIN at
+  course initialization). `init-course-db.py` validates the same range.
 
 ## [v1.0.0] - 2026-08-15
 

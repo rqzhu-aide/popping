@@ -32,6 +32,31 @@ def test_templates_present_version_and_unambiguous_download_labels():
     assert "Download Legacy Feedback (week unknown)" not in base
 
 
+def test_instructor_login_accepts_longer_pins():
+    """Instructor PINs may be 4-32 digits; init-db must enforce the same.
+
+    Regression: init-course-db.py once accepted any PIN (e.g. 8 digits)
+    while the login form clipped input at 4 characters, locking the
+    instructor out of a freshly initialized course.
+    """
+    login = (PROJECT_ROOT / "templates" / "instructor_login.html").read_text(
+        encoding="utf-8"
+    )
+    init_db = (PROJECT_ROOT / "scripts" / "init-course-db.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert 'maxlength="32"' in login
+    assert 'pattern="[0-9]{4,32}"' in login
+    assert 'maxlength="4"' not in login
+    assert r'\d{4,32}' in init_db
+    # Student PINs intentionally remain exactly 4 digits (roster contract).
+    student_login = (PROJECT_ROOT / "templates" / "login.html").read_text(
+        encoding="utf-8"
+    )
+    assert 'maxlength="4"' in student_login
+
+
 def test_versioning_policy_documents_patch_compatibility_and_legacy_boundary():
     policy = (PROJECT_ROOT / "VERSIONING.md").read_text(encoding="utf-8")
     changelog = (PROJECT_ROOT / "CHANGELOG.md").read_text(encoding="utf-8")

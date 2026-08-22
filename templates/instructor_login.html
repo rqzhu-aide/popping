@@ -25,8 +25,9 @@
             <div class="form-group">
                 <label for="pin">PIN</label>
                 <input type="password" id="pin" name="pin" required
-                       placeholder="Enter your PIN" inputmode="numeric"
-                       pattern="[0-9]*" maxlength="4" autocomplete="off"
+                       placeholder="Enter your PIN (4-32 digits)" inputmode="numeric"
+                       pattern="[0-9]{4,32}" maxlength="32" autocomplete="off"
+                       title="4 to 32 digits"
                        enterkeyhint="go">
             </div>
             <button type="submit" class="btn btn-primary btn-full">Log In</button>
