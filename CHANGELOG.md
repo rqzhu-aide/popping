@@ -3,6 +3,14 @@
 All notable changes to Popping are recorded here. Releases use semantic
 versions as defined in `VERSIONING.md`.
 
+## [v1.1.8] - 2026-08-23
+
+### Changed
+
+- Renamed the third classroom phase from Group Presentation to Present and
+  Challenge across instructor and student views, phase guidance, and related
+  validation messages.
+
 ## [v1.1.7] - 2026-08-23
 
 ### Changed

@@ -108,7 +108,8 @@
     <section class="card" id="weekly-question-upload-card">
         <h2>Weekly Questions</h2>
         <p class="hint" id="weekly-question-upload-help">
-            Upload one Markdown file for a lecture week. Discussion and Presentation will use the exact same questions, in the same order.
+            Upload one Markdown file for a lecture week. The two question-based phases use the exact same questions,
+            in the same order: Group Discussion and Present and Challenge.
         </p>
         <div class="weekly-question-upload-form">
             <div class="weekly-question-upload-field weekly-question-week-field">
@@ -131,8 +132,9 @@
              aria-live="polite">
             <h3 id="weekly-question-upload-preview-title"></h3>
             <p>
-                These questions will become the common question set for both
-                Discussion and Presentation. Existing appendix questions are kept.
+                These questions will become the common question set for the two question-based
+                phases: Group Discussion and Present and Challenge. Existing appendix
+                questions are kept.
             </p>
             <ol id="weekly-question-upload-preview-list"></ol>
             <p class="weekly-question-replace-warning">
@@ -259,7 +261,9 @@
 
     <section class="card">
         <h2>Discussion Questions</h2>
-        <p class="hint">These same questions, in this order, are used in Discussion and Presentation.</p>
+        <p class="hint">
+            These same questions, in this order, are also used in Present and Challenge.
+        </p>
         <p id="question-readiness-warning" class="hint question-readiness-warning" role="status" aria-live="polite" hidden></p>
         <div class="disc-questions-list" id="disc-questions-list">
             <p class="loading">Loading questions...</p>
@@ -290,7 +294,7 @@
     {% elif state.phase == 'competition' %}
 
     <section class="card">
-        <h2>🎯 Group Presentation</h2>
+        <h2>🎯 Present and Challenge</h2>
         <p id="question-readiness-warning" class="hint question-readiness-warning"
            role="status" aria-live="polite"{% if state.presentation_catalog_ready %} hidden{% endif %}>
             {% if not state.presentation_catalog_ready %}Week {{ state.discussion_week or 1 }} has no validated weekly question set. Appendix questions remain available.{% endif %}

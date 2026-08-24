@@ -202,7 +202,7 @@ def test_weekly_question_upload_previews_then_resends_same_file_on_confirm():
     assert "appendInstructorStateForm(formData);" in source
     assert "const trackInstructorSave = beginInstructorSave();" in source
     assert "finishInstructorSave(trackInstructorSave, confirmedSuccess);" in source
-    assert "Discussion and Presentation will use these exact ${count} questions" in source
+    assert "uploaded with ${count} shared questions for both question-based phases" in source
 
     card_position = template.index('id="weekly-question-upload-card"')
     demo_guard = template.rfind(
@@ -211,7 +211,8 @@ def test_weekly_question_upload_previews_then_resends_same_file_on_confirm():
     assert demo_guard >= 0
     assert 'accept=".md,text/markdown,text/plain"' in template
     assert 'id="weekly-question-upload-preview" hidden' in template
-    assert "Discussion and Presentation will use the exact same questions" in template
+    assert "The two question-based phases use the exact same questions" in template
+    assert "Group Discussion and Present and Challenge" in template
 
 
 def test_question_load_surfaces_server_error_message():

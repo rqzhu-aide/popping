@@ -3670,7 +3670,10 @@ def test_appendix_edit_rejected_during_presentations(course_env):
         },
     )
     assert edited.status_code == 409
-    assert "cannot be edited during presentations" in edited.get_json()["error"]
+    assert (
+        "cannot be edited during the Present and Challenge phase"
+        in edited.get_json()["error"]
+    )
 
 
 def test_start_presentation_reports_clamped_time_cap(course_env):

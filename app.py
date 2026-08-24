@@ -147,7 +147,7 @@ PHASES = ['setup', 'discussion', 'competition', 'ended']
 PHASE_LABELS = {
     'setup': 'Setup',
     'discussion': 'Group Discussion',
-    'competition': 'Group Presentation',
+    'competition': 'Present and Challenge',
     'ended': 'End Session'
 }
 
@@ -4222,7 +4222,7 @@ def start_session_timer():
             return jsonify({'error': guard[0]}), guard[1]
         if state['phase'] not in ('setup', 'discussion'):
             db.rollback()
-            return jsonify({'error': 'The session timer is only available before presentations'}), 409
+            return jsonify({'error': f"The session timer is only available before the {PHASE_LABELS['competition']} phase"}), 409
         db.execute(
             '''UPDATE course_state
                SET session_started_at = COALESCE(session_started_at, CURRENT_TIMESTAMP)
@@ -5276,7 +5276,7 @@ def delete_appendix_question():
             return jsonify({'error': guard[0]}), guard[1]
         if state and state['phase'] == 'competition':
             db.rollback()
-            return jsonify({'error': 'Appendix questions cannot be deleted during presentations'}), 409
+            return jsonify({'error': f"Appendix questions cannot be deleted during the {PHASE_LABELS['competition']} phase"}), 409
         week = state['discussion_week'] if state and state['discussion_week'] else 1
         if requested_week != week:
             db.rollback()
@@ -5421,7 +5421,7 @@ def edit_appendix_question():
             return jsonify({'error': guard[0]}), guard[1]
         if state and state['phase'] == 'competition':
             db.rollback()
-            return jsonify({'error': 'Appendix questions cannot be edited during presentations'}), 409
+            return jsonify({'error': f"Appendix questions cannot be edited during the {PHASE_LABELS['competition']} phase"}), 409
         week = state['discussion_week'] if state and state['discussion_week'] else 1
         if requested_week != week:
             db.rollback()
@@ -5881,7 +5881,7 @@ def start_presentation():
             return jsonify({'error': guard[0]}), guard[1]
         if not state or state['phase'] != 'competition':
             db.rollback()
-            return jsonify({'error': 'Switch to Group Presentation first'}), 409
+            return jsonify({'error': f"Switch to the {PHASE_LABELS['competition']} phase first"}), 409
         if state and (state['active_team_id'] or state['active_question_id']):
             db.rollback()
             return jsonify({'error': 'Finish the active presentation first'}), 409
@@ -6462,7 +6462,7 @@ def raise_hand():
         state = db.execute('SELECT * FROM course_state LIMIT 1').fetchone()
         if not state or state['phase'] != 'competition':
             db.rollback()
-            return jsonify({'error': 'Not in presentation phase'}), 403
+            return jsonify({'error': f"Not in the {PHASE_LABELS['competition']} phase"}), 403
         pres_key = active_presentation_key(state)
         if not pres_key or pres_key != expected_key:
             db.rollback()
@@ -6527,7 +6527,7 @@ def lower_hand():
         state = db.execute('SELECT * FROM course_state LIMIT 1').fetchone()
         if not state or state['phase'] != 'competition':
             db.rollback()
-            return jsonify({'error': 'Not in presentation phase'}), 403
+            return jsonify({'error': f"Not in the {PHASE_LABELS['competition']} phase"}), 403
         pres_key = active_presentation_key(state)
         if not pres_key or pres_key != expected_key:
             db.rollback()
@@ -6819,7 +6819,7 @@ def submit_challenge_rating():
         state = db.execute('SELECT * FROM course_state LIMIT 1').fetchone()
         if not state or state['phase'] != 'competition':
             db.rollback()
-            return jsonify({'error': 'Not in presentation phase'}), 403
+            return jsonify({'error': f"Not in the {PHASE_LABELS['competition']} phase"}), 403
         pres_key = active_presentation_key(state)
         if not pres_key:
             db.rollback()

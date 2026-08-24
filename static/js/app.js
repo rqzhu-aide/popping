@@ -183,7 +183,7 @@ function escapeAttrValue(value) {
 
 // Discussion question cards keep expansion state by stable question key.
 // Display numbers come from the server so instructors and students share one
-// canonical sequence in both classroom phases.
+// canonical sequence in both question-based phases.
 const _discQuestionExpanded = new Set();
 
 function discussionQuestionKey(q) {
@@ -833,7 +833,7 @@ window.confirmWeeklyQuestionUpload = async function() {
             weekSelect.value = String(week);
         }
         showToast(
-            `Week ${week} uploaded. Discussion and Presentation will use these exact ${count} questions. Select Apply Week when ready.`,
+            `Week ${week} uploaded with ${count} shared questions for both question-based phases. Select Apply Week when ready.`,
             'success'
         );
     } catch (error) {
@@ -864,7 +864,7 @@ window.confirmWeeklyQuestionUpload = async function() {
 const PHASE_LABELS = {
     setup: 'Setup',
     discussion: 'Group Discussion',
-    competition: 'Group Presentation',
+    competition: 'Present and Challenge',
     ended: 'End Session'
 };
 
@@ -5307,7 +5307,7 @@ window.setDiscussionWeek = async function() {
         const detail = Number.isFinite(count)
             ? ` with ${count} questions` : '';
         showToast(
-            `Week ${week} selected${detail} for Discussion and Presentation`,
+            `Week ${week} selected${detail} for both question-based phases`,
             'success'
         );
         window.setTimeout(() => window.location.reload(), 250);

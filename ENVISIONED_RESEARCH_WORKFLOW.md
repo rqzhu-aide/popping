@@ -1381,7 +1381,7 @@ research interpretation should change.
 | Appendix question | Emerging objection, follow-up, or unplanned risk |
 | Group discussion | Evidence development and challenge |
 | Teammate thumbs-up | Lightweight contribution recognition only |
-| Group presentation | Proposal or result defense |
+| Present and Challenge | Proposal or result defense with structured challenge |
 | Presentation rating | Criterion-specific independent review |
 | Ended phase | Decision, handoff, and archive |
 | Weekly export | Versioned, append-only decision-cycle package |

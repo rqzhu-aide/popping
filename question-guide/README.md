@@ -1,10 +1,10 @@
 # Weekly Question Authoring Guide
 
-## One file for both classroom phases
+## One file for both question-based phases
 
-For each week, prepare and upload one UTF-8 Markdown file. The discussion phase
-and the group presentation phase read the exact same ordered question set from
-that file.
+For each week, prepare and upload one UTF-8 Markdown file. The two question-based phases
+read the exact same ordered question set from that file: Group Discussion and
+Present and Challenge.
 
 Use this filename for a bundled course file:
 
@@ -24,9 +24,10 @@ is the order of the blocks in the Markdown file.
 Keep one Markdown file per week. Do not split the questions across files.
 Do not provide raw HTML. One canonical file preserves ordering, supports safe
 Markdown and equation rendering, and lets the server accept or reject the
-entire week atomically. Preview, persistence, readiness, Discussion, and
-Presentation all use the same strict parse result. If any question block is
-invalid, the whole upload is rejected and the previous valid source remains.
+entire week atomically. Preview, persistence, readiness, and the two question-based
+phases, Group Discussion and Present and Challenge, use the same strict parse
+result. If any question block is invalid, the whole upload is rejected and the
+previous valid source remains.
 
 If you manage questions in GitHub, commit the bundled file and deploy it. The
 application loads it automatically and the browser formats its Markdown,
@@ -85,8 +86,8 @@ import numpy as np
 5. Check that the Setup page reports the week as ready.
 
 No server restart is needed. If appendix questions are added in the instructor
-page, they are appended to the same classroom question set for both discussion
-and presentation.
+page, they are appended to the same classroom question set in both Group
+Discussion and Present and Challenge.
 
 ## Legacy files are not used
 

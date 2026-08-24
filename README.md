@@ -9,9 +9,10 @@ Each course lives in its own folder with its own SQLite database. This keeps cou
 - **Per-Course Databases**: Each course has its own folder (`data/{slug}/`) with its own `popping.db`.
 - **Team Selection**: Students log in with ID + PIN and pick a team.
 - **Live Roster**: Real-time view of who joined which team (3-second polling).
-- **Discussion Phase**: Students discuss instructor questions with their teams.
+- **Group Discussion**: Students discuss instructor questions with their teams.
 - **Teammate Recognition**: Students give thumbs-up to teammates during discussion.
-- **Competition Mode**: Teams present; instructor selects active team.
+- **Present and Challenge**: Teams present, peers challenge, and the instructor
+  coordinates both.
 - **Presentation Ratings**: Non-presenting students rate the active presentation.
 - **Instructor Panel**: Control phases, pick presenting team, manage students.
 - **Participation History**: Instructors can compare course-wide presentation-team
@@ -97,7 +98,7 @@ After creating a course, you get:
 classes/432fall2026/
 ├── course.yaml          # Course metadata (name, code, active teams, etc.)
 ├── init-db.sh           # Script to reset/reinitialize this course's DB
-└── week-1-questions.md  # Bundled questions for both classroom phases
+└── week-1-questions.md  # Questions for both question-based phases
 
 data/432fall2026/
 ├── popping.db           # The SQLite database (created by init-db.sh)
@@ -111,9 +112,10 @@ For each week, provide one UTF-8 Markdown file named
 `week-N-questions.md`, where `N` is the week number. You can commit it under
 `classes/{slug}/` and deploy it through GitHub, or upload it from the instructor
 Setup page. The application loads a bundled GitHub file automatically, and the
-browser formats its Markdown, equations, and fenced code blocks. The discussion
-phase and group presentation phase read the exact same ordered set from this
-file. The presentation index is the parsed file order, so there is no separate
+browser formats its Markdown, equations, and fenced code blocks. The two
+question-based phases read the exact same ordered set from this file: Group
+Discussion and Present and Challenge. The presentation index is the parsed file
+order, so there is no separate
 `index.md` or `qNN.html` source.
 
 Each question is one YAML-frontmatter block followed by its Markdown content:
@@ -140,9 +142,10 @@ Do not split questions into separate files and do not provide raw HTML. The
 single Markdown file gives the server one atomic, ordered document to validate
 and gives the browser safe Markdown, equation, and code rendering.
 
-The same strict parser drives upload preview, saving, readiness, Discussion,
-and Presentation. If any block is malformed, the whole upload is rejected and
-the previous valid source remains in place. A confirmed valid upload is saved
+The same strict parser drives upload preview, saving, readiness, and the two
+question-based phases: Group Discussion and Present and Challenge. If any block
+is malformed, the whole upload is rejected and the previous valid source
+remains in place. A confirmed valid upload is saved
 under `data/{slug}/questions/week-N-questions.md` and overrides the bundled
 file with the same name under `classes/{slug}/`, including after later GitHub
 deploys. Do not use both sources for the same week unless that override is
@@ -283,8 +286,8 @@ transaction. The migration deliberately does not infer participation from
 `v1.0.x` ratings. Presentation-team and challenger counts begin with activity
 recorded by `v1.1.0`.
 
-Website release `v1.1.7` still uses database schema and export format
-`v1.1.0`. Updating from any earlier `v1.1.x` website to `v1.1.7` does not require a
+Website release `v1.1.8` still uses database schema and export format
+`v1.1.0`. Updating from any earlier `v1.1.x` website to `v1.1.8` does not require a
 database migration.
 
 Normal web traffic and `/healthz` only validate an exact current schema. They
@@ -366,7 +369,7 @@ popping/
 
 1. Visit the site → see list of active courses.
 2. Click **Student Login** on your course → enter Student ID + PIN.
-3. Select a team (during **SETUP** phase).
+3. Select a team during **Setup**.
 4. Participate in discussion, peer grading, or team grading as phases change.
 
 ### Instructors
@@ -378,11 +381,14 @@ popping/
 
 ## Course Flow
 
-1. **SETUP** → Students log in and select teams.
-2. **DISCUSSION** → Instructor posts a question; students discuss and peer-grade.
-3. **COMPETITION** → Teams present one at a time (instructor selects active team).
-4. **COMPETITION** → Non-presenting teams rate the active presentation.
-5. **ENDED** → Instructor exports Current Week Results and uploads the workbook to Canvas.
+1. **Setup** → Students log in and select teams.
+2. **Group Discussion** → Instructor posts a question; students discuss and peer-grade.
+3. **Present and Challenge** → Teams present one at a time; students from other
+   teams may challenge.
+4. **Present and Challenge** → Non-presenting students rate the active
+   presentation and selected challengers.
+5. **End Session** → Instructor exports Current Week Results and uploads the workbook
+   to Canvas.
 
 ## Managing Courses
 

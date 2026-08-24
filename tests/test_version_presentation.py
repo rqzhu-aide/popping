@@ -32,6 +32,30 @@ def test_templates_present_version_and_unambiguous_download_labels():
     assert "Download Legacy Feedback (week unknown)" not in base
 
 
+def test_present_and_challenge_phase_label_is_shared_across_surfaces():
+    instructor = (PROJECT_ROOT / "templates" / "instructor.html").read_text(
+        encoding="utf-8"
+    )
+    demo = (PROJECT_ROOT / "templates" / "demo.html").read_text(
+        encoding="utf-8"
+    )
+    client = (PROJECT_ROOT / "static" / "js" / "app.js").read_text(
+        encoding="utf-8"
+    )
+    server = (PROJECT_ROOT / "app.py").read_text(encoding="utf-8")
+
+    assert app_module.PHASE_LABELS["competition"] == "Present and Challenge"
+    assert app_module.phase_label_filter("competition") == (
+        "Present and Challenge"
+    )
+    assert "competition: 'Present and Challenge'" in client
+    assert "<h2>🎯 Present and Challenge</h2>" in instructor
+    assert "<h3>Present and Challenge</h3>" in demo
+    assert "Group Presentation" not in server
+    assert "Group Presentation" not in client
+    assert "Group Presentation" not in instructor
+
+
 def test_instructor_login_accepts_longer_ascii_digit_pins():
     """Instructor PINs may be 4-32 ASCII digits everywhere.
 

@@ -41,7 +41,7 @@ def _provenance_schema(default_clause, future=False):
 
 @pytest.mark.parametrize(
     "default_clause",
-    ("", " DEFAULT '1.1.7'"),
+    ("", " DEFAULT '1.1.8'"),
 )
 def test_future_schema_accepts_explicit_only_or_compatible_default(
     monkeypatch,

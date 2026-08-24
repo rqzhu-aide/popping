@@ -14,7 +14,7 @@ The full automated suite passes. Current coverage includes:
 - presentation and challenger ratings arriving before a close cutoff
 - transient presence-write and demo-marker failures
 - retry and read-back behavior after interrupted vote responses
-- exact Discussion/Presentation question parity across edits and deploys
+- exact question parity between Group Discussion and Present and Challenge
 - current-week and previous-week presentation, challenge, and
   teammate-thumb exports with identical workbook layout
 - v1.0 to v1.1 schema migration, backup, restore, and export routing
