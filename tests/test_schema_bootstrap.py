@@ -44,7 +44,11 @@ def _ledger_versions(connection):
     ]
 
 
-_CURRENT_MIGRATION = database._SCHEMA_MIGRATIONS[("1.0.0", "1.1.0")]
+_CURRENT_SCHEMA_VERSION = database.SCHEMA_VERSION
+_CURRENT_SCHEMA_HISTORY = database.SCHEMA_VERSION_HISTORY
+_CURRENT_MIGRATIONS = dict(database._SCHEMA_MIGRATIONS)
+_FUTURE_SCHEMA_VERSION = "1.3.0"
+_FUTURE_SCHEMA_HISTORY = (*_CURRENT_SCHEMA_HISTORY, _FUTURE_SCHEMA_VERSION)
 
 
 def _future_migration(connection):
@@ -52,15 +56,17 @@ def _future_migration(connection):
 
 
 def _configure_future(monkeypatch, future_migration=None):
-    migrations = {("1.0.0", "1.1.0"): _CURRENT_MIGRATION}
+    migrations = dict(_CURRENT_MIGRATIONS)
     if future_migration is not None:
-        migrations[("1.1.0", "1.2.0")] = future_migration
-    monkeypatch.setattr(database, "APP_VERSION", "1.2.0")
-    monkeypatch.setattr(database, "SCHEMA_VERSION", "1.2.0")
+        migrations[(_CURRENT_SCHEMA_VERSION, _FUTURE_SCHEMA_VERSION)] = (
+            future_migration
+        )
+    monkeypatch.setattr(database, "APP_VERSION", _FUTURE_SCHEMA_VERSION)
+    monkeypatch.setattr(database, "SCHEMA_VERSION", _FUTURE_SCHEMA_VERSION)
     monkeypatch.setattr(
         database,
         "SCHEMA_VERSION_HISTORY",
-        ("1.0.0", "1.1.0", "1.2.0"),
+        _FUTURE_SCHEMA_HISTORY,
     )
     monkeypatch.setattr(database, "_SCHEMA_MIGRATIONS", migrations)
 
@@ -71,8 +77,10 @@ def test_sql_remains_fixed_baseline_and_helper_builds_future_prefix(monkeypatch)
         assert _ledger_versions(connection) == ["1.0.0"]
         _configure_future(monkeypatch, _future_migration)
 
-        assert database.upgrade_schema_connection(connection) == "1.2.0"
-        assert _ledger_versions(connection) == ["1.0.0", "1.1.0", "1.2.0"]
+        assert database.upgrade_schema_connection(
+            connection
+        ) == _FUTURE_SCHEMA_VERSION
+        assert _ledger_versions(connection) == list(_FUTURE_SCHEMA_HISTORY)
         assert connection.execute(
             """SELECT 1 FROM sqlite_master
                WHERE type = 'table' AND name = 'future_schema_marker'"""
@@ -103,14 +111,6 @@ def test_upgrade_helper_resolves_complete_path_before_first_mutation(
 def test_upgrade_helper_rolls_back_all_steps_when_migration_fails(monkeypatch):
     connection = _baseline_connection()
     try:
-        monkeypatch.setattr(database, "APP_VERSION", "1.2.0")
-        monkeypatch.setattr(database, "SCHEMA_VERSION", "1.2.0")
-        monkeypatch.setattr(
-            database,
-            "SCHEMA_VERSION_HISTORY",
-            ("1.0.0", "1.1.0", "1.2.0"),
-        )
-
         def fail_second(db):
             db.execute("CREATE TABLE failed_schema_marker (id INTEGER)")
             raise RuntimeError("simulated migration failure")
@@ -140,7 +140,7 @@ def test_database_init_bootstraps_future_schema(monkeypatch, tmp_path):
 
     path = tmp_path / "data" / "future101" / "popping.db"
     with sqlite3.connect(path) as connection:
-        assert _ledger_versions(connection) == ["1.0.0", "1.1.0", "1.2.0"]
+        assert _ledger_versions(connection) == list(_FUTURE_SCHEMA_HISTORY)
         assert connection.execute(
             "SELECT 1 FROM future_schema_marker"
         ).fetchall() == []
@@ -169,7 +169,9 @@ def test_course_candidate_bootstraps_then_validates_future_schema(
     tmp_path,
 ):
     _configure_future(monkeypatch, _future_migration)
-    monkeypatch.setattr(init_course_module, "SCHEMA_VERSION", "1.2.0")
+    monkeypatch.setattr(
+        init_course_module, "SCHEMA_VERSION", _FUTURE_SCHEMA_VERSION
+    )
     path = tmp_path / "candidate.db"
     course_config = {
         "slug": "future101",
@@ -195,7 +197,7 @@ def test_course_candidate_bootstraps_then_validates_future_schema(
     )
 
     with sqlite3.connect(path) as connection:
-        assert _ledger_versions(connection) == ["1.0.0", "1.1.0", "1.2.0"]
+        assert _ledger_versions(connection) == list(_FUTURE_SCHEMA_HISTORY)
         assert connection.execute(
             "SELECT 1 FROM future_schema_marker"
         ).fetchall() == []
@@ -248,7 +250,7 @@ def test_private_demo_candidate_bootstraps_future_schema(monkeypatch, tmp_path):
 
     path = Path(demo_instance.demo_database_path(str(data_dir), slug))
     with sqlite3.connect(path) as connection:
-        assert _ledger_versions(connection) == ["1.0.0", "1.1.0", "1.2.0"]
+        assert _ledger_versions(connection) == list(_FUTURE_SCHEMA_HISTORY)
 
 
 def test_shared_demo_candidate_bootstraps_future_schema(monkeypatch, tmp_path):
@@ -259,4 +261,4 @@ def test_shared_demo_candidate_bootstraps_future_schema(monkeypatch, tmp_path):
     module._build_candidate(str(path))
 
     with sqlite3.connect(path) as connection:
-        assert _ledger_versions(connection) == ["1.0.0", "1.1.0", "1.2.0"]
+        assert _ledger_versions(connection) == list(_FUTURE_SCHEMA_HISTORY)

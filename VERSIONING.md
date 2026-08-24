@@ -68,6 +68,21 @@ week. Complete course backup bundles include both event tables in `popping.db`.
 These records carry their own data versions and follow the normal current versus
 legacy export rule after a future compatibility-line change.
 
+## v1.2.0 display names
+
+`v1.2.0` separates student-entered display names from instructor-uploaded
+roster names:
+
+- `students.display_name` is nullable and may be set or cleared by the student.
+- `students.name` remains the roster name managed by the instructor.
+- Student views resolve display name, roster name, then ID and show one item.
+  Instructor views use the same resolved name and append the student ID.
+
+The migration adds the new column without changing existing roster names. Under
+the compatibility rule, activity written by `v1.0.x` or `v1.1.x` remains in
+the database but moves to Download Legacy Data after the `v1.2.0` upgrade.
+Resetting a course instead creates an empty current-version database.
+
 ## Version bump rules
 
 - A website-only change increments PATCH, such as `v1.0.0` to `v1.0.1`.
@@ -95,8 +110,8 @@ If a schema-line release is accidentally deployed during a session, roll the
 application back to the previous compatible release, end or reset the session,
 then deploy the new release again. Do not bypass the migration-window check.
 
-For the `v1.0.x` to `v1.1.0` transition, make each affected course
-unreachable before running the following command once per course:
+For any schema transition, including `v1.1.x` to `v1.2.0`, make each
+affected course unreachable before running this command once per course:
 
 ```bash
 python scripts/migrate-course-db.py <course_slug>

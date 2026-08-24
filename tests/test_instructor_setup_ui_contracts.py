@@ -21,7 +21,7 @@ def _css_rule(css, selector):
     return match.group(1)
 
 
-def test_setup_roster_separates_id_turn_count_and_name():
+def test_setup_roster_combines_instructor_identity_with_turn_count():
     template = _read("templates/instructor.html")
     setup_roster = _between(
         template,
@@ -33,25 +33,22 @@ def test_setup_roster_separates_id_turn_count_and_name():
     assert 'class="setup-roster-member-body"' in setup_roster
     assert 'class="setup-roster-member-topline"' in setup_roster
     assert re.search(
-        r'class="setup-roster-member-id"[^>]*>\s*\{\{ s\.student_id \}\}',
+        r'class="setup-roster-member-identity"[^>]*>\s*'
+        r'\{\{ s \| instructor_display_name \}\}',
         setup_roster,
     )
     assert re.search(
         r'class="[^"]*\bsetup-roster-team-turns\b[^"]*"',
         setup_roster,
     )
-    assert re.search(
-        r'class="setup-roster-member-name"[^>]*>\s*\{\{ s\.name \}\}',
-        setup_roster,
-    )
-    assert "{% if s.name and s.name != s.student_id %}" in setup_roster
+    assert 'class="setup-roster-member-id"' not in setup_roster
+    assert 'class="setup-roster-member-name"' not in setup_roster
     assert "s | display_name" not in setup_roster
 
     # DOM order is also the screen-reader reading order.
     assert (
-        setup_roster.index("setup-roster-member-id")
+        setup_roster.index("setup-roster-member-identity")
         < setup_roster.index("setup-roster-team-turns")
-        < setup_roster.index("setup-roster-member-name")
     )
 
 
@@ -71,13 +68,12 @@ def test_setup_roster_live_refresh_uses_the_same_explicit_layout():
         "setup-roster-member",
         "setup-roster-member-body",
         "setup-roster-member-topline",
-        "setup-roster-member-id",
+        "setup-roster-member-identity",
         "setup-roster-team-turns",
-        "setup-roster-member-name",
     ):
         assert class_name in helper
-    assert "escapeHtmlValue(member.student_id)" in helper
-    assert "escapeHtmlValue(member.name)" in helper
+    assert "instructorDisplayName(member)" in helper
+    assert "escapeHtmlValue(displayName)" in helper
     assert "presentation_count" in helper
     assert "challenger_count" not in helper
     assert "formatStudentDisplay" not in helper
@@ -88,7 +84,7 @@ def test_setup_roster_live_refresh_uses_the_same_explicit_layout():
     )
     assert "options.instructorSetup === true" in source
     assert re.search(
-        r"renderRosterGrid\(\s*rosterGrid,\s*rosterData,\s*null,\s*"
+        r"renderRosterGrid\(\s*setupRosterGrid,\s*rosterData,\s*null,\s*"
         r"\{\s*instructorSetup:\s*true\s*\}\s*\)",
         source,
     )
@@ -119,15 +115,12 @@ def test_setup_roster_css_keeps_the_topline_usable_in_narrow_team_cards():
     assert "align-items: center;" in topline
     assert "min-width: 0;" in topline
 
-    student_id = _css_rule(css, ".setup-roster-member-id")
-    assert "min-width: 0;" in student_id
-    assert "overflow-wrap: anywhere;" in student_id
+    identity = _css_rule(css, ".setup-roster-member-identity")
+    assert "min-width: 0;" in identity
+    assert "overflow-wrap: anywhere;" in identity
 
     turns = _css_rule(css, ".setup-roster-team-turns")
     assert "flex: 0 0 auto;" in turns
-
-    name = _css_rule(css, ".setup-roster-member-name")
-    assert "overflow-wrap: anywhere;" in name
 
 
 def test_tools_menu_visually_and_semantically_separates_reset_action():

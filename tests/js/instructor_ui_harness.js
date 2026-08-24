@@ -689,6 +689,10 @@ function testContextualRosterBadgesAndTeamLabels() {
     const sandbox = { console };
     vm.createContext(sandbox);
     vm.runInContext(sourceSlice(
+        'function normalizedIdentityText(value) {',
+        'function initDisplayNameControls() {'
+    ), sandbox, { filename: 'app-display-name-helpers.js' });
+    vm.runInContext(sourceSlice(
         'function normalizedParticipationCount(value) {',
         'function renderRosterGrid(container, teams, myId'
     ), sandbox, { filename: 'app-participation-badges.js' });
@@ -706,7 +710,8 @@ function testContextualRosterBadgesAndTeamLabels() {
         .replace(/'/g, '&#39;');
     sandbox.setupMember = {
         student_id: 's<1>',
-        name: 'Ada & Lin',
+        display_name: 'Ada & Lin',
+        roster_name: 'Ada Roster',
         presentation_count: 0,
         challenger_count: 9,
     };
@@ -715,14 +720,12 @@ function testContextualRosterBadgesAndTeamLabels() {
         sandbox
     );
     assert.match(setupMemberHtml, /setup-roster-member-topline/);
-    assert.match(setupMemberHtml, /s&lt;1&gt;/);
-    assert.match(setupMemberHtml, /Ada &amp; Lin/);
+    assert.match(setupMemberHtml, /Ada &amp; Lin \(s&lt;1&gt;\)/);
+    assert.doesNotMatch(setupMemberHtml, /Ada Roster/);
     assert.doesNotMatch(setupMemberHtml, /Challenge turns/);
     assert(
-        setupMemberHtml.indexOf('setup-roster-member-id') <
-        setupMemberHtml.indexOf('setup-roster-team-turns') &&
-        setupMemberHtml.indexOf('setup-roster-team-turns') <
-        setupMemberHtml.indexOf('setup-roster-member-name')
+        setupMemberHtml.indexOf('setup-roster-member-identity') <
+        setupMemberHtml.indexOf('setup-roster-team-turns')
     );
 
     sandbox.record = {

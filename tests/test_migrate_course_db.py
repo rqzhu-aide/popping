@@ -15,7 +15,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 import config  # noqa: E402
-from versioning import SCHEMA_VERSION  # noqa: E402
+from versioning import SCHEMA_VERSION_HISTORY  # noqa: E402
 
 
 @pytest.fixture
@@ -117,7 +117,7 @@ def test_cli_backs_up_then_migrates_baseline_course_atomically(
     )
 
     assert result == 0
-    assert _ledger(database_path) == ["1.0.0", SCHEMA_VERSION]
+    assert _ledger(database_path) == list(SCHEMA_VERSION_HISTORY)
     with sqlite3.connect(database_path) as connection:
         participant_columns = {
             row[1] for row in connection.execute(
@@ -212,7 +212,7 @@ def test_cli_is_a_no_op_when_database_is_already_current(
     )
 
     assert migrate_course_module.main([slug]) == 0
-    assert _ledger(database_path) == ["1.0.0", SCHEMA_VERSION]
+    assert _ledger(database_path) == list(SCHEMA_VERSION_HISTORY)
     assert not (course_dir / "migration-backups").exists()
 
 
@@ -265,7 +265,7 @@ def test_cli_repairs_missing_current_schema_index_after_backup(
     )
 
     assert result == 0
-    assert _ledger(database_path) == ["1.0.0", SCHEMA_VERSION]
+    assert _ledger(database_path) == list(SCHEMA_VERSION_HISTORY)
     with sqlite3.connect(database_path) as connection:
         repaired = connection.execute(
             """SELECT 1 FROM sqlite_master
@@ -300,5 +300,5 @@ def test_cli_rejects_malformed_current_schema_before_confirmation_or_backup(
     )
 
     assert migrate_course_module.main([slug]) == 1
-    assert _ledger(database_path) == ["1.0.0", SCHEMA_VERSION]
+    assert _ledger(database_path) == list(SCHEMA_VERSION_HISTORY)
     assert not (course_dir / "migration-backups").exists()

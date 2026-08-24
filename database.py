@@ -42,6 +42,7 @@ _VERSIONED_DATA_TABLES = (
     'presentation_participants',
 )
 _PARTICIPATION_SCHEMA_VERSION = '1.1.0'
+_STUDENT_PROFILE_SCHEMA_VERSION = '1.2.0'
 _VERSIONED_DATA_TABLE_INTRODUCED = {
     'teammate_thumbs': BASELINE_SCHEMA_VERSION,
     'presentation_ratings': BASELINE_SCHEMA_VERSION,
@@ -803,6 +804,24 @@ def _validate_participation_schema(db, repair_indexes=False):
     _ensure_participation_indexes(db, repair_indexes)
 
 
+def _validate_student_profile_schema(db):
+    columns = _pragma_columns(db, 'students')
+    display_name = columns.get('display_name')
+    if display_name is None:
+        raise RuntimeError(
+            'Database table students is missing required column(s): '
+            'display_name'
+        )
+    declared_type = str(
+        _row_value(display_name, 'type', 2) or ''
+    ).strip().upper()
+    if (declared_type != 'TEXT'
+            or bool(_row_value(display_name, 'notnull', 3))):
+        raise RuntimeError(
+            'Database table students has an invalid display_name column'
+        )
+
+
 def validate_current_schema(db, repair_indexes=False):
     """Validate the complete contract for the schema served by this app."""
     recorded = inspect_schema_version(db, allow_unversioned=False)
@@ -813,6 +832,9 @@ def validate_current_schema(db, repair_indexes=False):
         _validate_participation_schema(
             db, repair_indexes=repair_indexes
         )
+    if parse_version(recorded) >= parse_version(
+            _STUDENT_PROFILE_SCHEMA_VERSION):
+        _validate_student_profile_schema(db)
     validate_data_version_schema(db)
     return recorded
 
@@ -938,6 +960,16 @@ def _migrate_1_0_0_to_1_1_0(db):
 _SCHEMA_MIGRATIONS[(
     BASELINE_SCHEMA_VERSION, _PARTICIPATION_SCHEMA_VERSION
 )] = _migrate_1_0_0_to_1_1_0
+
+
+def _migrate_1_1_0_to_1_2_0(db):
+    """Add a nullable student-entered display name beside the roster name."""
+    db.execute('ALTER TABLE students ADD COLUMN display_name TEXT')
+
+
+_SCHEMA_MIGRATIONS[(
+    _PARTICIPATION_SCHEMA_VERSION, _STUDENT_PROFILE_SCHEMA_VERSION
+)] = _migrate_1_1_0_to_1_2_0
 
 
 def _apply_schema_migration_plan(db, migration_plan):

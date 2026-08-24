@@ -131,8 +131,15 @@ a:visited:hover { color: var(--primary-hover); }
     font-size: 1.25rem;
 }
 
-.logo { font-size: 1.4rem; }
-.brand-text { letter-spacing: -0.02em; }
+.brand-logo {
+    display: block;
+    height: auto;
+    object-fit: contain;
+}
+.brand-logo-nav {
+    flex: 0 0 auto;
+    width: 62px;
+}
 .brand-tagline {
     min-width: 0;
     overflow: hidden;
@@ -356,7 +363,12 @@ a:visited:hover { color: var(--primary-hover); }
 }
 
 @media (max-width: 420px) {
-    .brand-text { display: none; }
+    .navbar {
+        gap: 8px;
+        padding: 0 8px;
+    }
+    .nav-links { gap: 8px; }
+    .brand-logo-nav { width: 48px; }
 }
 
 .container {
@@ -557,11 +569,44 @@ input:focus, textarea:focus {
 }
 
 .login-header { margin-bottom: 28px; }
-.logo-large { font-size: 3rem; display: block; margin-bottom: 12px; }
+.brand-logo-login {
+    margin: 0 auto 14px;
+    width: 136px;
+}
 .login-header h1 { margin: 0; font-size: 1.5rem; }
 .subtitle { color: var(--text-muted); margin-top: 6px; }
 
 .login-form { text-align: left; }
+.login-field-hint {
+    margin: 6px 0 0;
+    color: var(--text-muted);
+    font-size: 0.78rem;
+    line-height: 1.35;
+}
+.form-group .display-name-clear {
+    align-items: flex-start;
+    color: var(--text-muted);
+    cursor: pointer;
+    display: flex;
+    font-size: 0.8rem;
+    font-weight: 500;
+    gap: 8px;
+    line-height: 1.35;
+    margin: 10px 0 0;
+}
+.form-group .display-name-clear input[type="checkbox"] {
+    accent-color: var(--primary-solid);
+    flex: 0 0 auto;
+    height: 16px;
+    margin: 2px 0 0;
+    padding: 0;
+    width: 16px;
+}
+#display_name:disabled {
+    background: var(--bg);
+    cursor: not-allowed;
+    opacity: 0.7;
+}
 .login-footer { margin-top: 20px; font-size: 0.85rem; color: var(--text-muted); }
 
 .dash-header {
@@ -1127,9 +1172,9 @@ input:focus, textarea:focus {
     align-items: center;
     gap: 28px;
 }
-.intro-content .logo-huge {
-    font-size: 3.5rem;
+.intro-content .brand-logo-landing {
     flex-shrink: 0;
+    width: min(240px, 32vw);
 }
 .intro-text h1 {
     margin: 0 0 8px;
@@ -1140,6 +1185,13 @@ input:focus, textarea:focus {
     color: var(--text-muted);
     font-size: 0.95rem;
     line-height: 1.6;
+}
+.intro-text .intro-brand-tagline {
+    color: var(--text);
+    font-size: 1rem;
+    font-weight: 700;
+    line-height: 1.4;
+    margin-bottom: 10px;
 }
 .intro-links {
     display: flex;
@@ -1644,14 +1696,15 @@ input:focus, textarea:focus {
 }
 
 .card-name {
-    font-size: 0.85rem;
+    font-size: 0.78rem;
     font-weight: 700;
     line-height: 1.1;
     text-align: center;
     max-width: 56px;
+    max-height: 2.2em;
     overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    overflow-wrap: anywhere;
+    white-space: normal;
 }
 
 .card-id {
@@ -1666,6 +1719,12 @@ input:focus, textarea:focus {
 
 #card-you .card-circle {
     border-style: dashed;
+}
+.card-you-marker {
+    color: var(--primary);
+    font-size: 0.65rem;
+    font-weight: 700;
+    line-height: 1;
 }
 
 .thumb-btn {
@@ -1710,6 +1769,11 @@ input:focus, textarea:focus {
 .demo-hero {
     text-align: center;
     padding: 32px 24px;
+}
+
+.brand-logo-demo {
+    margin: 0 auto 12px;
+    width: 128px;
 }
 
 .demo-hero h2 {
@@ -2473,6 +2537,16 @@ body.modal-open { overflow: hidden; }
     min-width: 0;
     overflow-wrap: anywhere;
 }
+.roster-you-marker {
+    background: var(--accent-bg);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    color: var(--primary);
+    flex: 0 0 auto;
+    font-size: 0.68rem;
+    font-weight: 700;
+    padding: 2px 6px;
+}
 .participation-badges {
     display: inline-flex;
     flex: 0 0 auto;
@@ -2497,7 +2571,7 @@ body.modal-open { overflow: hidden; }
     gap: 6px;
     min-width: 0;
 }
-.setup-roster-member-id {
+.setup-roster-member-identity {
     flex: 1 1 auto;
     min-width: 0;
     font-weight: 600;
@@ -2505,12 +2579,6 @@ body.modal-open { overflow: hidden; }
 }
 .setup-roster-team-turns {
     flex: 0 0 auto;
-}
-.setup-roster-member-name {
-    margin-top: 3px;
-    color: var(--text-muted);
-    line-height: 1.35;
-    overflow-wrap: anywhere;
 }
 .participation-badge {
     align-items: center;
@@ -2612,6 +2680,23 @@ body.modal-open { overflow: hidden; }
     flex: 1;
     min-width: 0;
 }
+.challenge-hand-details > span:first-child,
+.challenge-active-details,
+.challenge-card-header strong {
+    min-width: 0;
+    overflow-wrap: anywhere;
+}
+.dash-header h1,
+.top-team-item {
+    min-width: 0;
+    overflow-wrap: anywhere;
+}
+.student-identity-list-item {
+    min-width: 0;
+    overflow-wrap: anywhere;
+}
+
+
 .challenge-hand-row .challenge-mutating-btn {
     flex: 0 0 auto;
     margin-left: auto;

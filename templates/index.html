@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 
-{% block title %}Popping - Select a Course{% endblock %}
+{% block title %}Popping - An Interactive Course Platform{% endblock %}
 
 {% block mathjax %}{% endblock %}
 
@@ -8,9 +8,12 @@
 <div class="landing">
     <section class="card intro-card">
         <div class="intro-content">
-            <span class="logo-huge">🍿</span>
+            <img class="brand-logo brand-logo-landing"
+                 src="{{ url_for('static', filename='images/popping-brand.webp') }}"
+                 width="640" height="536" alt="Popping" decoding="async">
             <div class="intro-text">
                 <h1>Popping</h1>
+                <p class="intro-brand-tagline">Discuss, Present and Challenge - An Interactive Course Platform</p>
                 <p>Run dynamic team-based classroom sessions. Students pick teams, discuss questions, present solutions, and grade each other within and across teams — all in real time. Instructors control each phase of the activity and export results with one click.</p>
                 <div class="intro-links">
                     <a href="/demo" class="btn btn-primary">See How It Works</a>

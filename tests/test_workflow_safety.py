@@ -2700,6 +2700,256 @@ def test_student_login_matches_id_case_insensitively(course_env):
     assert client.get("/dashboard").status_code == 200
 
 
+def test_student_login_page_offers_optional_display_name(course_env):
+    page = app_module.app.test_client().get(
+        f"/login/{course_env['slug']}"
+    )
+    html = page.get_data(as_text=True)
+
+    assert page.status_code == 200
+    assert '<label for="display_name">Display Name' in html
+    assert 'name="display_name"' in html
+    assert 'maxlength="200"' in html
+    assert 'autocomplete="nickname"' in html
+    assert 'name="clear_display_name"' in html
+    assert 'value="1"' in html
+
+
+def test_student_login_saves_display_name_and_refreshes_rosters(course_env):
+    client = app_module.app.test_client()
+    response = client.post(
+        f"/login/{course_env['slug']}",
+        data={
+            "student_id": "s1",
+            "pin": "1111",
+            "display_name": "  <b>Kit</b>  ",
+        },
+    )
+
+    assert response.status_code == 302
+    assert response.headers["Location"].endswith("/dashboard")
+    with client.session_transaction() as flask_session:
+        assert flask_session["name"] == "<b>Kit</b>"
+    with _connect(course_env) as db:
+        student = db.execute(
+            """SELECT name, display_name FROM students
+               WHERE student_id = 's1'"""
+        ).fetchone()
+        state = db.execute(
+            "SELECT roster_version FROM course_state WHERE course_id = ?",
+            (course_env["course_id"],),
+        ).fetchone()
+    assert dict(student) == {
+        "name": "Alice",
+        "display_name": "<b>Kit</b>",
+    }
+    assert state["roster_version"] == 1
+
+    dashboard = client.get("/dashboard").get_data(as_text=True)
+    assert "data-current-student-display>&lt;b&gt;Kit&lt;/b&gt;</span>" in dashboard
+    assert "&lt;b&gt;Kit&lt;/b&gt; (s1)" not in dashboard
+    assert "Hello, <b>Kit</b>" not in dashboard
+
+    teams = client.get("/api/teams").get_json()
+    member = next(
+        member
+        for team in teams
+        for member in team["members"]
+        if member["student_id"] == "s1"
+    )
+    assert member["name"] == "<b>Kit</b>"
+    poll = client.get("/api/poll", query_string={"since": 0}).get_json()
+    assert poll["changed"] is True
+    assert poll["state"]["roster_version"] == 1
+
+
+def test_blank_or_unchanged_display_name_keeps_saved_value(course_env):
+    route = f"/login/{course_env['slug']}"
+    with _connect(course_env) as db:
+        db.execute(
+            "UPDATE students SET display_name = 'Kit' WHERE student_id = 's1'"
+        )
+        db.commit()
+
+    for submitted_name in ("", "  Kit  "):
+        response = app_module.app.test_client().post(
+            route,
+            data={
+                "student_id": "s1",
+                "pin": "1111",
+                "display_name": submitted_name,
+            },
+        )
+        assert response.headers["Location"].endswith("/dashboard")
+
+    with _connect(course_env) as db:
+        student = db.execute(
+            """SELECT name, display_name FROM students
+               WHERE student_id = 's1'"""
+        ).fetchone()
+        state = db.execute(
+            "SELECT roster_version FROM course_state WHERE course_id = ?",
+            (course_env["course_id"],),
+        ).fetchone()
+    assert dict(student) == {"name": "Alice", "display_name": "Kit"}
+    assert state["roster_version"] == 0
+
+
+def test_explicit_display_name_clear_falls_back_to_roster_name(course_env):
+    route = f"/login/{course_env['slug']}"
+    with _connect(course_env) as db:
+        db.execute(
+            "UPDATE students SET display_name = 'Kit' WHERE student_id = 's1'"
+        )
+        db.commit()
+
+    client = app_module.app.test_client()
+    response = client.post(
+        route,
+        data={
+            "student_id": "s1",
+            "pin": "1111",
+            "display_name": "",
+            "clear_display_name": "1",
+        },
+    )
+
+    assert response.status_code == 302
+    assert response.headers["Location"].endswith("/dashboard")
+    with client.session_transaction() as flask_session:
+        assert flask_session["name"] == "Alice"
+    with _connect(course_env) as db:
+        student = db.execute(
+            """SELECT name, display_name FROM students
+               WHERE student_id = 's1'"""
+        ).fetchone()
+        roster_version = db.execute(
+            "SELECT roster_version FROM course_state WHERE course_id = ?",
+            (course_env["course_id"],),
+        ).fetchone()[0]
+    assert dict(student) == {"name": "Alice", "display_name": None}
+    assert roster_version == 1
+    dashboard = client.get("/dashboard").get_data(as_text=True)
+    assert "data-current-student-display>Alice</span>" in dashboard
+    assert "data-current-student-display>Alice (s1)</span>" not in dashboard
+
+
+@pytest.mark.parametrize(
+    ("student", "student_label", "instructor_label"),
+    (
+        (
+            {
+                "student_id": "s1",
+                "name": " Alice ",
+                "display_name": " Kit ",
+            },
+            "Kit",
+            "Kit (s1)",
+        ),
+        (
+            {
+                "student_id": "s1",
+                "name": " Alice ",
+                "display_name": "   ",
+            },
+            "Alice",
+            "Alice (s1)",
+        ),
+        (
+            {
+                "student_id": "s1",
+                "name": "   ",
+                "display_name": None,
+            },
+            "s1",
+            "s1",
+        ),
+        (
+            {
+                "student_id": "s1",
+                "name": " Alice ",
+                "display_name": " s1 ",
+            },
+            "s1",
+            "s1 (s1)",
+        ),
+        (
+            {
+                "student_id": "s1",
+                "name": " s1 ",
+                "display_name": "   ",
+            },
+            "s1",
+            "s1 (s1)",
+        ),
+    ),
+)
+def test_student_name_filters_apply_role_specific_precedence(
+        student, student_label, instructor_label):
+    assert app_module.display_name_filter(student) == student_label
+    assert app_module.instructor_display_name_filter(student) == instructor_label
+
+
+def test_invalid_or_overlong_display_name_cannot_change_student_names(
+        course_env):
+    route = f"/login/{course_env['slug']}"
+    with _connect(course_env) as db:
+        db.execute(
+            "UPDATE students SET display_name = 'Saved' WHERE student_id = 's1'"
+        )
+        db.commit()
+    invalid = app_module.app.test_client().post(
+        route,
+        data={
+            "student_id": "s1",
+            "pin": "0000",
+            "display_name": "Mallory",
+            "clear_display_name": "1",
+        },
+    )
+    assert invalid.headers["Location"].endswith(route)
+
+    overlong_client = app_module.app.test_client()
+    overlong = overlong_client.post(
+        route,
+        data={
+            "student_id": "s1",
+            "pin": "1111",
+            "display_name": "x" * 201,
+        },
+    )
+    assert overlong.headers["Location"].endswith(route)
+    page = overlong_client.get(route)
+    assert b"Display name must be 200 characters or fewer." in page.data
+
+    with _connect(course_env) as db:
+        db.execute("UPDATE students SET is_active = 0 WHERE student_id = 's1'")
+        db.commit()
+    archived = app_module.app.test_client().post(
+        route,
+        data={
+            "student_id": "s1",
+            "pin": "1111",
+            "display_name": "Archived",
+        },
+    )
+    assert archived.headers["Location"].endswith(route)
+
+    with _connect(course_env) as db:
+        student = db.execute(
+            """SELECT name, display_name, is_active FROM students
+               WHERE student_id = 's1'"""
+        ).fetchone()
+        state = db.execute(
+            "SELECT roster_version FROM course_state WHERE course_id = ?",
+            (course_env["course_id"],),
+        ).fetchone()
+    assert student["name"] == "Alice"
+    assert student["display_name"] == "Saved"
+    assert state["roster_version"] == 0
+    assert student["is_active"] == 0
+
+
 def test_failed_student_login_redirects_back_with_flash(course_env):
     client = app_module.app.test_client()
     route = f"/login/{course_env['slug']}"
@@ -3886,6 +4136,38 @@ def test_student_poll_returns_full_state_after_a_state_change(course_env):
     assert after["state"]["discussion_week"] == 2
 
 
+def test_student_full_poll_refreshes_unassigned_current_display_name(
+        course_env):
+    client = _student_client(course_env, "s3")
+    first = client.get("/api/poll").get_json()
+
+    assert first["state"]["my_team"] is None
+    assert first["state"]["current_student_display_name"] == "Unassigned"
+    stale_version = first["state_version"]
+
+    with _connect(course_env) as db:
+        db.execute(
+            "UPDATE students SET display_name = 'New Display' "
+            "WHERE student_id = 's3'"
+        )
+        db.execute(
+            """UPDATE course_state
+               SET roster_version = COALESCE(roster_version, 0) + 1
+               WHERE course_id = ?""",
+            (course_env["course_id"],),
+        )
+        db.commit()
+
+    refreshed = client.get(
+        f"/api/poll?since={stale_version}"
+    ).get_json()
+
+    assert refreshed["changed"] is True
+    assert refreshed["state_version"] > stale_version
+    assert refreshed["state"]["my_team"] is None
+    assert refreshed["state"]["current_student_display_name"] == "New Display"
+
+
 def test_student_poll_stays_compact_while_rating_window_open(
         course_env, monkeypatch):
     """Students keep their local countdown while unchanged live polls return
@@ -4538,6 +4820,118 @@ def test_student_search_escapes_like_wildcards(course_env):
         assert ids == ["50%_off"], term
         assert payload["total"] == 1
 
+    by_name = client.get(
+        "/api/students", query_string={"search": "Wildcard"}
+    ).get_json()
+    assert [
+        student["student_id"] for student in by_name["students"]
+    ] == ["50%_off"]
+
+
+def test_student_management_searches_roster_and_display_names(course_env):
+    with _connect(course_env) as db:
+        db.execute(
+            """UPDATE students
+               SET name = 'Roster Alice', display_name = 'Kit'
+               WHERE student_id = 's1'"""
+        )
+        db.commit()
+    client = _instructor_client(course_env)
+
+    for search_term in ("Roster Alice", "Kit"):
+        response = client.get(
+            "/api/students", query_string={"search": search_term}
+        )
+        assert response.status_code == 200
+        payload = response.get_json()
+        assert payload["total"] == 1
+        assert [row["student_id"] for row in payload["students"]] == ["s1"]
+
+    row = client.get(
+        "/api/students", query_string={"search": "Kit"}
+    ).get_json()["students"][0]
+    assert {
+        "roster_name": row["roster_name"],
+        "display_name": row["display_name"],
+    } == {
+        "roster_name": "Roster Alice",
+        "display_name": "Kit",
+    }
+
+    fallback_row = client.get(
+        "/api/students", query_string={"search": "Bob"}
+    ).get_json()["students"][0]
+    assert {
+        "roster_name": fallback_row["roster_name"],
+        "display_name": fallback_row["display_name"],
+    } == {"roster_name": "Bob", "display_name": None}
+
+
+def test_roster_update_and_csv_replace_preserve_display_name(course_env):
+    with _connect(course_env) as db:
+        db.execute(
+            "UPDATE students SET display_name = 'Kit' WHERE student_id = 's1'"
+        )
+        db.commit()
+    client = _instructor_client(course_env)
+
+    updated = client.post(
+        "/api/add_student",
+        json=_setup_payload(
+            student_id="s1", name="Roster Alicia", pin="1111"
+        ),
+    )
+    assert updated.status_code == 200
+    assert updated.get_json()["roster_version"] == 1
+    with _connect(course_env) as db:
+        row = db.execute(
+            """SELECT name, display_name FROM students
+               WHERE student_id = 's1'"""
+        ).fetchone()
+    assert dict(row) == {
+        "name": "Roster Alicia",
+        "display_name": "Kit",
+    }
+
+    roster = (
+        "student_id,name,pin\n"
+        "s1,CSV Alice,1111\n"
+        "s2,Bob,2222\n"
+        "s3,Unassigned,3333\n"
+        "s4,Dana,4444\n"
+    ).encode("utf-8")
+    guard = {
+        "expected_phase": "setup",
+        "expected_session_key": str(SESSION_KEY),
+        "expected_roster_version": "1",
+    }
+    preview = client.post(
+        "/api/upload_roster",
+        data={**guard, "file": (io.BytesIO(roster), "roster.csv")},
+        content_type="multipart/form-data",
+    )
+    assert preview.status_code == 200
+    preview_payload = preview.get_json()
+    assert preview_payload["requires_confirmation"] is True
+    confirmed = client.post(
+        "/api/upload_roster",
+        data={
+            **guard,
+            "confirm": "true",
+            "preview_token": preview_payload["preview_token"],
+            "file": (io.BytesIO(roster), "roster.csv"),
+        },
+        content_type="multipart/form-data",
+    )
+    assert confirmed.status_code == 200
+    assert confirmed.get_json()["roster_version"] == 2
+    with _connect(course_env) as db:
+        row = db.execute(
+            """SELECT name, display_name FROM students
+               WHERE student_id = 's1'"""
+        ).fetchone()
+    assert dict(row) == {"name": "CSV Alice", "display_name": "Kit"}
+
 
 def test_appendix_add_and_edit_return_question_id_for_select_rebuild(
         course_env):
@@ -5033,6 +5427,7 @@ def test_blank_challenger_name_uses_roster_id_and_restores_saved_controls(
     instructor = _instructor_client(course_env)
     hands = instructor.get("/api/poll").get_json()["state"]["challenge_hands"]
     assert hands[0]["student_name"] == "s4"
+    assert hands[0]["student_identifier"] == "s4"
 
     selected = instructor.post(
         "/api/select_challenger",
@@ -5050,6 +5445,7 @@ def test_blank_challenger_name_uses_roster_id_and_restores_saved_controls(
     rater = _student_client(course_env, "s5")
     card = rater.get("/api/poll").get_json()["state"]["active_challenges"][0]
     assert card["challenger_name"] == "s4"
+    assert card["challenger_student_id"] == "s4"
     assert rater.post(
         "/api/submit_challenge_rating",
         json={"challenge_key": challenge_key, "score": 4},
@@ -5062,13 +5458,73 @@ def test_blank_challenger_name_uses_roster_id_and_restores_saved_controls(
         db.commit()
     _set_state(course_env, phase="ended")
     results = rater.get("/api/poll").get_json()
-    assert results["top_challengers"] == [{"name": "s4", "rank": 1}]
+    assert results["top_challengers"] == [
+        {"name": "s4", "student_id": "s4", "rank": 1}
+    ]
     summary = instructor.get(
         f"/instructor/{course_env['slug']}"
     ).get_data(as_text=True)
     assert "session:</strong> 1" in summary
     assert "Top Challenger (by avg rating)" in summary
     assert "#1 s4: 4.0 average (1 submitted rating)" in summary
+@pytest.mark.parametrize(
+    ("roster_name", "display_name", "expected_name"),
+    (
+        ("Current Roster", "Current Display", "Current Display"),
+        ("Current Roster", None, "Current Roster"),
+    ),
+)
+def test_ended_top_challenger_uses_current_profile_without_rewriting_snapshot(
+        course_env, roster_name, display_name, expected_name):
+    historical_name = "Historical Snapshot"
+    with _connect(course_env) as db:
+        db.execute(
+            """INSERT INTO challenge_ratings
+               (data_version, course_id, session_key, week_num, challenge_key,
+                presentation_key, challenger_id, challenger_name,
+                challenger_team_id, challenger_team_name,
+                rater_id, rater_name, rater_team_id, rater_team_name, score)
+               VALUES (?, ?, ?, 1, 'pres-current-ch1', 'pres-current',
+                       ?, ?, ?, 'Team 2', ?, 'Alice', ?, 'Team 1', 4)""",
+            (
+                app_module.APP_VERSION,
+                course_env["course_id"],
+                SESSION_KEY,
+                course_env["students"]["s4"],
+                historical_name,
+                course_env["teams"]["Team 2"],
+                course_env["students"]["s1"],
+                course_env["teams"]["Team 1"],
+            ),
+        )
+        db.execute(
+            """UPDATE students SET name = ?, display_name = ?
+               WHERE student_id = 's4'""",
+            (roster_name, display_name),
+        )
+        db.commit()
+
+    _set_state(course_env, phase="ended")
+    student_results = _student_client(course_env).get("/api/poll").get_json()
+
+    assert student_results["top_challengers"] == [
+        {"name": expected_name, "student_id": "s4", "rank": 1}
+    ]
+    summary = _instructor_client(course_env).get(
+        f"/instructor/{course_env['slug']}"
+    ).get_data(as_text=True)
+    assert (
+        f"#1 {expected_name} (s4): 4.0 average (1 submitted rating)"
+        in summary
+    )
+    assert historical_name not in summary
+
+    with _connect(course_env) as db:
+        saved_snapshot = db.execute(
+            "SELECT challenger_name FROM challenge_ratings"
+        ).fetchone()[0]
+    assert saved_snapshot == historical_name
+
 
 
 def test_ended_summary_keeps_all_first_place_challenger_ties(

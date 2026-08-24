@@ -36,7 +36,9 @@ def test_private_demo_reset_adopts_missing_schema_ledger(tmp_path, monkeypatch):
     with sqlite3.connect(path) as connection:
         assert connection.execute(
             "SELECT schema_version FROM schema_migrations"
-        ).fetchall() == [("1.0.0",), ("1.1.0",)]
+        ).fetchall() == [
+            (version,) for version in database.SCHEMA_VERSION_HISTORY
+        ]
         assert connection.execute(
             "SELECT COUNT(*) FROM students"
         ).fetchone()[0] == 2

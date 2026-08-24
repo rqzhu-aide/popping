@@ -54,7 +54,7 @@ live class rather than receiving one artificial instant update.
 
 ## Check participation history
 
-Each simulator run starts with a new `v1.1.0` database, so every student's Team
+Each simulator run starts with a new `v1.2.0` database, so every student's Team
 turns and Challenge turns begin at zero. Use the normal instructor controls to
 verify the new rules:
 

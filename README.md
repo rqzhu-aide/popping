@@ -37,10 +37,11 @@ older compatibility lines remain available through **Download Legacy Data**.
 See [VERSIONING.md](VERSIONING.md) for the policy and [CHANGELOG.md](CHANGELOG.md)
 for the release history.
 
-`v1.1.0` is the first schema update. It adds durable participation events and
-requires an explicit offline migration for every existing `v1.0.x` course
-database. Do not start `v1.1.0` web workers against an existing database until
-the migration below has succeeded.
+`v1.1.0` added durable participation events. `v1.2.0` adds a separate student
+display name while preserving the instructor-uploaded roster name. Each schema
+update requires an explicit offline migration or a course reset. Do not start
+`v1.2.0` web workers against an older course database until that operation has
+succeeded.
 
 ## Quick Start (Local)
 
@@ -255,7 +256,7 @@ The reset will:
 - Atomically replace `popping.db` only after the candidate and backup pass validation
 - Keep the same course name, code, semester, and team structure from `course.yaml`
 
-### Upgrade an Existing v1.0 Course to v1.1.0
+### Upgrade an Existing Course Database to v1.2.0
 
 This is an offline operation for each affected course. Complete it between
 classes.
@@ -281,14 +282,15 @@ For Render:
    and deploy again.
 
 The command validates the course database, creates a verified snapshot under
-`data/{slug}/migration-backups/`, and applies the schema change in one
-transaction. The migration deliberately does not infer participation from
-`v1.0.x` ratings. Presentation-team and challenger counts begin with activity
-recorded by `v1.1.0`.
+`data/{slug}/migration-backups/`, and applies every required schema change in
+one transaction. A `v1.0.x` database is upgraded through both migration steps.
+The `v1.1.0` migration deliberately does not infer participation from older
+ratings. The `v1.2.0` migration adds a nullable `students.display_name` column.
 
-Website release `v1.1.8` still uses database schema and export format
-`v1.1.0`. Updating from any earlier `v1.1.x` website to `v1.1.8` does not require a
-database migration.
+Website release `v1.2.0` uses database schema and export format `v1.2.0`.
+Records written by `v1.0.x` or `v1.1.x` remain available through
+**Download Legacy Data** after the upgrade. A full course reset starts with an
+empty current-version database instead.
 
 Normal web traffic and `/healthz` only validate an exact current schema. They
 never migrate or repair a persistent course database.
@@ -368,7 +370,10 @@ popping/
 ### Students
 
 1. Visit the site → see list of active courses.
-2. Click **Student Login** on your course → enter Student ID + PIN.
+2. Click **Student Login** on your course, enter Student ID and PIN, and
+   optionally choose a display name. Leaving it blank keeps the saved display
+   name. Student pages show one name only. Instructor pages show that name with
+   the student ID.
 3. Select a team during **Setup**.
 4. Participate in discussion, peer grading, or team grading as phases change.
 

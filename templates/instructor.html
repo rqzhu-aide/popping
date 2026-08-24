@@ -167,13 +167,10 @@
                         <span class="team-dot" style="background:{{ t.color }}"></span>
                         <div class="setup-roster-member-body">
                             <div class="setup-roster-member-topline">
-                                <span class="setup-roster-member-id">{{ s.student_id }}</span>
+                                <span class="setup-roster-member-identity">{{ s | instructor_display_name }}</span>
                                 <span class="participation-badge setup-roster-team-turns{% if (s.presentation_count or 0) == 0 %} is-zero{% endif %}"
                                       title="Completed presentation-team turns">Team turns: <strong>{{ s.presentation_count or 0 }}</strong></span>
                             </div>
-                            {% if s.name and s.name != s.student_id %}
-                            <div class="setup-roster-member-name">{{ s.name }}</div>
-                            {% endif %}
                         </div>
                     </div>
                     {% endfor %}
@@ -205,7 +202,7 @@
             <label class="visually-hidden" for="new-student-id">Student ID</label>
             <input type="text" id="new-student-id" placeholder="Student ID" required>
             <label class="visually-hidden" for="new-name">Student name</label>
-            <input type="text" id="new-name" placeholder="Name (optional)">
+            <input type="text" id="new-name" placeholder="Name (optional)" maxlength="200">
             <label class="visually-hidden" for="new-pin">Student PIN, 4 to 32 digits</label>
             <input type="text" id="new-pin" placeholder="PIN (4-32 digits)" required
                    inputmode="numeric" maxlength="32" pattern="[0-9]{4,32}">
@@ -214,8 +211,8 @@
         {% endif %}
 
         <div class="table-toolbar">
-            <label class="visually-hidden" for="student-search">Search students by ID</label>
-            <input type="text" id="student-search" placeholder="Search by ID..." oninput="debouncedStudentSearch()">
+            <label class="visually-hidden" for="student-search">Search students by name or ID</label>
+            <input type="text" id="student-search" placeholder="Search by name or ID..." oninput="debouncedStudentSearch()">
             <div class="filter-group">
                 <label class="filter-label" for="team-filter-select">Filter by team</label>
                 <select class="filter-select" id="team-filter-select"
@@ -235,7 +232,7 @@
                         <th class="sortable" data-sort="student_id" aria-sort="none" tabindex="0"
                             onclick="sortStudents('student_id')" onkeydown="studentSortHeaderKeydown(event, 'student_id')">ID <span class="sort-arrow"></span></th>
                         <th class="sortable" data-sort="name" aria-sort="none" tabindex="0"
-                            onclick="sortStudents('name')" onkeydown="studentSortHeaderKeydown(event, 'name')">Name <span class="sort-arrow"></span></th>
+                            onclick="sortStudents('name')" onkeydown="studentSortHeaderKeydown(event, 'name')">Display Name (ID) <span class="sort-arrow"></span></th>
                         <th>Team</th>
                         <th class="sortable" data-sort="presentation_count" aria-sort="none" tabindex="0"
                             onclick="sortStudents('presentation_count')" onkeydown="studentSortHeaderKeydown(event, 'presentation_count')">Team turns <span class="sort-arrow"></span></th>
@@ -441,7 +438,7 @@
                             data-student-id="{{ member.id }}"
                             data-presentation-count="{{ member.presentation_count or 0 }}"
                             data-challenger-count="{{ member.challenger_count or 0 }}">
-                            <span class="team-participation-member-name">{{ member | display_name }}</span>
+                            <span class="team-participation-member-name">{{ member | instructor_display_name }}</span>
                             <span class="participation-badges" aria-label="Participation history">
                                 <span class="participation-badge{% if (member.presentation_count or 0) == 0 %} is-zero{% endif %}">Team turns: <strong class="team-turn-count">{{ member.presentation_count or 0 }}</strong></span>
                                 <span class="participation-badge{% if (member.challenger_count or 0) == 0 %} is-zero{% endif %}">Challenge turns: <strong class="challenge-turn-count">{{ member.challenger_count or 0 }}</strong></span>
@@ -503,7 +500,7 @@
         <h4>Top Challenger (by avg rating)</h4>
         <ul>
             {% for c in end_stats.top_challengers %}
-            <li>#{{ c.rank }} {{ c.name }}: {{ c.avg_score }} average ({{ c.rating_count }} submitted rating{% if c.rating_count != 1 %}s{% endif %})</li>
+            <li class="student-identity-list-item">#{{ c.rank }} {{ c | instructor_display_name }}: {{ c.avg_score }} average ({{ c.rating_count }} submitted rating{% if c.rating_count != 1 %}s{% endif %})</li>
             {% endfor %}
         </ul>
         {% endif %}

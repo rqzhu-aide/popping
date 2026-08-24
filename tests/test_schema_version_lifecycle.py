@@ -141,7 +141,9 @@ def _add_ledger(connection, schema_version="1.0.0", app_version="1.0.0"):
 
 def test_baseline_schema_contract_is_fixed():
     assert versioning.BASELINE_SCHEMA_VERSION == "1.0.0"
-    assert versioning.SCHEMA_VERSION_HISTORY == ("1.0.0", "1.1.0")
+    assert versioning.SCHEMA_VERSION_HISTORY == (
+        "1.0.0", "1.1.0", "1.2.0"
+    )
 
 
 def test_legacy_adoption_stamps_fixed_baseline_and_backfills_once():
@@ -345,10 +347,11 @@ def test_init_requires_current_metadata_for_candidate_but_accepts_legacy_backup(
     claimed_path = tmp_path / "claimed-current.db"
     claimed, _course_id = _create_course_db(claimed_path, versioned=False)
     _add_ledger(claimed)
-    claimed.execute(
+    claimed.executemany(
         """INSERT INTO schema_migrations
            (schema_version, applied_by_app_version)
-           VALUES ('1.1.0', '1.1.0')"""
+           VALUES (?, ?)""",
+        (("1.1.0", "1.1.0"), ("1.2.0", "1.2.0")),
     )
     claimed.commit()
     claimed.close()
@@ -492,7 +495,7 @@ def test_current_schema_contract_rejects_missing_participant_foreign_keys():
 @pytest.mark.parametrize(
     "schema_version, app_version, message",
     (
-        ("1.2.0", "1.1.0", "newer"),
+        ("1.3.0", "1.2.0", "newer"),
         ("0.9.0", "1.0.0", "unknown"),
         ("1.0.1", "1.0.0", "patch-level"),
         ("1.0.0", "not-a-version", "invalid version"),
@@ -532,7 +535,7 @@ def test_restore_rejects_future_source_before_confirmation_or_live_backup(
     source_path = tmp_path / "future.db"
     source, _course_id = _create_course_db(source_path)
     source.execute(
-        "UPDATE schema_migrations SET schema_version = '1.2.0'"
+        "UPDATE schema_migrations SET schema_version = '1.3.0'"
     )
     source.commit()
     source.close()

@@ -72,9 +72,9 @@ def test_create_bundle_captures_database_and_persistent_question_files(
     manifest = backup_course_module.verify_archive(archive_path)
     assert manifest["format"] == "popping-course-backup-v1"
     assert manifest["course_slug"] == "safe101"
-    assert manifest["website_version"] == "v1.1.8"
+    assert manifest["website_version"] == "v1.2.0"
     assert manifest["database_schema_version"] == "v1.0.0"
-    assert manifest["export_format_version"] == "v1.1.0"
+    assert manifest["export_format_version"] == "v1.2.0"
     assert manifest["contained_data_versions"] == []
     assert manifest["contains_unclassified_data"] is False
     assert manifest["database_integrity"] == "ok"
@@ -134,13 +134,13 @@ def test_bundle_manifest_uses_archived_database_schema_ledger(
     with sqlite3.connect(course_dir / "popping.db") as db:
         db.execute(
             """UPDATE schema_migrations
-               SET schema_version = '1.2.0',
-                   applied_by_app_version = '1.2.4'"""
+               SET schema_version = '1.3.0',
+                   applied_by_app_version = '1.3.4'"""
         )
         db.execute('CREATE TABLE "future""activity" (data_version TEXT)')
         db.executemany(
             'INSERT INTO "future""activity" (data_version) VALUES (?)',
-            [("1.2.7",), ("not-a-version",)],
+            [("1.3.7",), ("not-a-version",)],
         )
 
     destination = tmp_path / "offsite"
@@ -148,9 +148,9 @@ def test_bundle_manifest_uses_archived_database_schema_ledger(
     archive_path = backup_course_module.create_backup("safe101", destination)
 
     manifest = backup_course_module.verify_archive(archive_path)
-    assert manifest["website_version"] == "v1.1.8"
-    assert manifest["database_schema_version"] == "v1.2.0"
-    assert manifest["contained_data_versions"] == ["v1.2.7"]
+    assert manifest["website_version"] == "v1.2.0"
+    assert manifest["database_schema_version"] == "v1.3.0"
+    assert manifest["contained_data_versions"] == ["v1.3.7"]
     assert manifest["contains_unclassified_data"] is True
 
 

@@ -7,6 +7,7 @@ import hmac
 import io
 import json
 import math
+import mimetypes
 import re
 import sqlite3
 import threading
@@ -72,6 +73,8 @@ from versioning import (
     parse_version,
     public_version,
 )
+
+mimetypes.add_type('image/webp', '.webp')
 
 app = Flask(__name__)
 app.config.from_object(config)
@@ -1238,23 +1241,127 @@ def phase_label_filter(phase):
     return PHASE_LABELS.get(phase, phase.upper())
 
 
+def _student_identity_value(student, field):
+    """Return one student identity field from a row, mapping, or object."""
+    if student is None:
+        return None
+    if hasattr(student, 'keys'):
+        keys = student.keys()
+        return student[field] if field in keys else None
+    if isinstance(student, dict):
+        return student.get(field)
+    return getattr(student, field, None)
+
+
+def _normalized_identity_text(value):
+    return str(value).strip() if value is not None else ''
+
+
+def _student_display_identity(student):
+    """Resolve one public label and record which identity field supplied it."""
+    student_id = _normalized_identity_text(
+        _student_identity_value(student, 'student_id')
+    )
+    source_hint = _normalized_identity_text(
+        _student_identity_value(student, 'identity_source')
+    )
+    if source_hint == 'student_id' and student_id:
+        return student_id, 'student_id'
+
+    display_name = _normalized_identity_text(
+        _student_identity_value(student, 'display_name')
+    )
+    if display_name:
+        return display_name, 'display_name'
+
+    roster_name = _normalized_identity_text(
+        _student_identity_value(student, 'roster_name')
+    ) or _normalized_identity_text(_student_identity_value(student, 'name'))
+    if roster_name:
+        return roster_name, 'roster_name'
+
+    snapshot_name = _normalized_identity_text(
+        _student_identity_value(student, 'student_name')
+    ) or _normalized_identity_text(
+        _student_identity_value(student, 'challenger_name')
+    )
+    if snapshot_name:
+        source = source_hint or (
+            'student_id' if snapshot_name == student_id else 'snapshot_name'
+        )
+        return snapshot_name, source
+    if student_id:
+        return student_id, 'student_id'
+    return 'Unknown', 'unknown'
+
+
+def _student_display_name(student):
+    """Resolve student display name, roster name, then public student ID."""
+    return _student_display_identity(student)[0]
+
+
+def _enrich_live_challenge_identities(slug, course_id, challenges):
+    """Overlay current names in responses without rewriting event snapshots."""
+    student_db_ids = set()
+    for challenge in challenges:
+        if not isinstance(challenge, dict):
+            continue
+        try:
+            student_db_id = int(challenge.get('challenger_id'))
+        except (TypeError, ValueError):
+            continue
+        if student_db_id > 0:
+            student_db_ids.add(student_db_id)
+    if not student_db_ids:
+        return challenges
+
+    student_db_ids = sorted(student_db_ids)
+    placeholders = ','.join('?' * len(student_db_ids))
+    identities = query_db(
+        slug,
+        f'''SELECT id, student_id, name AS roster_name, display_name
+            FROM students
+            WHERE course_id = ? AND id IN ({placeholders})''',
+        [course_id, *student_db_ids],
+    )
+    identities_by_id = {
+        str(identity['id']): identity for identity in identities
+    }
+
+    enriched = []
+    for challenge in challenges:
+        if not isinstance(challenge, dict):
+            enriched.append(challenge)
+            continue
+        identity = identities_by_id.get(str(challenge.get('challenger_id')))
+        if identity is None:
+            enriched.append(challenge)
+            continue
+        current = dict(challenge)
+        challenger_name, identity_source = _student_display_identity(identity)
+        current['challenger_name'] = challenger_name
+        current['challenger_student_id'] = identity['student_id']
+        current['identity_source'] = identity_source
+        enriched.append(current)
+    return enriched
+
+
 @app.template_filter('display_name')
 def display_name_filter(student):
-    """Format student display as 'Name (id)' or just 'id' if no name."""
-    if hasattr(student, 'keys'):
-        # sqlite3.Row
-        keys = student.keys()
-        name = student['name'] if 'name' in keys else None
-        sid = student['student_id'] if 'student_id' in keys else None
-    elif isinstance(student, dict):
-        name = student.get('name')
-        sid = student.get('student_id')
-    else:
-        name = getattr(student, 'name', None)
-        sid = getattr(student, 'student_id', None)
-    if name and sid and name != sid:
-        return f"{name} ({sid})"
-    return sid or name or 'Unknown'
+    """Return the single student-facing display name."""
+    return _student_display_name(student)
+
+
+@app.template_filter('instructor_display_name')
+def instructor_display_name_filter(student):
+    """Return display_name plus ID for instructor-facing identity labels."""
+    display_name, identity_source = _student_display_identity(student)
+    student_id = _normalized_identity_text(
+        _student_identity_value(student, 'student_id')
+    )
+    if student_id and identity_source != 'student_id':
+        return f"{display_name} ({student_id})"
+    return student_id or display_name
 
 
 def _auth_failure():
@@ -1326,6 +1433,11 @@ def _authenticated_student(slug):
             )):
         session.clear()
         return None
+    display_name = _student_display_name(student)
+    if session.get('display_name') != display_name:
+        session['display_name'] = display_name
+    if session.get('name') != display_name:
+        session['name'] = display_name
     return student
 
 
@@ -1450,7 +1562,8 @@ def _login_client_retry_after_locked(
 
 def _authenticate_with_throttle(
         slug, course_id, login_type, principal, client_hash,
-        lookup_sql, lookup_params, touch_student=False):
+        lookup_sql, lookup_params, touch_student=False,
+        student_display_name=None, clear_student_display_name=False):
     """Serialize throttle check, credential lookup, and counter update."""
     db = get_db(slug)
     db.execute('BEGIN IMMEDIATE')
@@ -1483,6 +1596,21 @@ def _authenticate_with_throttle(
                        WHERE id = ?''',
                     [identity['id']],
                 )
+                current_display_name = _normalized_identity_text(
+                    identity.get('display_name')
+                ) or None
+                desired_display_name = current_display_name
+                if clear_student_display_name:
+                    desired_display_name = None
+                elif student_display_name is not None:
+                    desired_display_name = student_display_name
+                if desired_display_name != current_display_name:
+                    db.execute(
+                        'UPDATE students SET display_name = ? WHERE id = ?',
+                        [desired_display_name, identity['id']],
+                    )
+                    _bump_roster_version(slug, course_id, db=db)
+                    identity['display_name'] = desired_display_name
         else:
             _record_login_failure_locked(
                 db, course_id, login_type, principal, client_hash, now
@@ -1884,8 +2012,22 @@ def login(slug):
             return 'Forbidden', 403
         student_id = request.form.get('student_id', '').strip()
         pin = request.form.get('pin', '').strip()
+        raw_display_name = request.form.get('display_name')
+        if raw_display_name is None:
+            raw_display_name = request.form.get('name', '')
+        display_name = raw_display_name.strip()
+        clear_display_name = (
+            request.form.get('clear_display_name', '').casefold()
+            in ('1', 'true', 'on', 'yes')
+        )
         if not student_id or not pin:
             flash('Please enter both ID and PIN.', 'error')
+            return redirect(url_for('login', slug=slug))
+        if display_name and clear_display_name:
+            flash('Enter a display name or clear it, not both.', 'error')
+            return redirect(url_for('login', slug=slug))
+        if len(display_name) > 200:
+            flash('Display name must be 200 characters or fewer.', 'error')
             return redirect(url_for('login', slug=slug))
         principal = student_id.casefold()[:200]
         client_hash = _login_client_hash()
@@ -1900,6 +2042,8 @@ def login(slug):
                  AND s.pin = ? AND c.slug = ? AND s.is_active = 1''',
             [student_id, pin, slug],
             touch_student=True,
+            student_display_name=display_name or None,
+            clear_student_display_name=clear_display_name,
         )
         if retry_after:
             return _rate_limited_login_response(
@@ -1909,7 +2053,9 @@ def login(slug):
             session.clear()
             session['role'] = 'student'
             session['student_id'] = student['student_id']
-            session['name'] = student['name'] or student['student_id']
+            display_name = _student_display_name(student)
+            session['display_name'] = display_name
+            session['name'] = display_name
             session['slug'] = slug
             session['student_auth_token'] = _student_session_token(
                 slug, student['id'], student['student_id'], student['pin']
@@ -2104,7 +2250,9 @@ def _start_demo_session(instance_slug, role, principal):
         return redirect(url_for('instructor_course', slug=instance_slug))
 
     session['student_id'] = principal['student_id']
-    session['name'] = principal['name'] or principal['student_id']
+    display_name = _student_display_name(principal)
+    session['display_name'] = display_name
+    session['name'] = display_name
     session['student_auth_token'] = _student_session_token(
         instance_slug, principal['id'], principal['student_id'], principal['pin']
     )
@@ -2246,8 +2394,11 @@ def dashboard():
     teammates = []
     if team:
         teammates = query_db(slug,
-            '''SELECT student_id, name FROM students
-               WHERE team_id = ? AND id != ? AND is_active = 1 ORDER BY name''',
+            '''SELECT student_id, name, display_name FROM students
+               WHERE team_id = ? AND id != ? AND is_active = 1
+               ORDER BY COALESCE(NULLIF(TRIM(display_name), ''),
+                                 NULLIF(TRIM(name), ''), student_id),
+                        student_id''',
             [team['id'], student['id']]
         )
     return render_template(
@@ -2328,7 +2479,9 @@ def instructor_course(slug):
     students = query_db(slug,
         '''SELECT s.*, t.name as team_name, t.color as team_color
            FROM students s LEFT JOIN teams t ON s.team_id = t.id
-           WHERE s.course_id = ? AND s.is_active = 1 ORDER BY s.name''',
+           WHERE s.course_id = ? AND s.is_active = 1
+           ORDER BY COALESCE(NULLIF(TRIM(s.display_name), ''),
+                             NULLIF(TRIM(s.name), ''), s.student_id)''',
         [course['id']]
     )
     questions = query_db(slug,
@@ -2354,6 +2507,7 @@ def instructor_course(slug):
     students_enhanced = []
     for s in students:
         d = dict(s)
+        d['roster_name'] = s['name']
         d['is_online'] = s['last_active_at'] and s['last_active_at'] > cutoff
         counts = participation_counts.get(s['id'], {})
         d['presentation_count'] = counts.get('presentation_count', 0)
@@ -2744,8 +2898,10 @@ def _compute_top_challengers(slug, course_id, session_key):
     """
     all_ratings = query_db(slug,
         '''SELECT cr.challenger_id,
-                  COALESCE(NULLIF(TRIM(cr.challenger_name), ''),
-                           student.student_id) AS challenger_name,
+                  student.student_id AS student_id,
+                  student.display_name AS display_name,
+                  student.name AS roster_name,
+                  cr.challenger_name AS snapshot_name,
                   cr.score
            FROM challenge_ratings cr
            LEFT JOIN students student ON student.id = cr.challenger_id
@@ -2755,15 +2911,22 @@ def _compute_top_challengers(slug, course_id, session_key):
 
     challenger_scores = {}
     for r in all_ratings:
-        name = r['challenger_name']
+        if r['student_id']:
+            name, identity_source = _student_display_identity(r)
+        else:
+            name = _normalized_identity_text(r['snapshot_name'])
+            identity_source = 'snapshot_name'
         if not name or r['score'] is None:
             continue
         identity = ('id', r['challenger_id']) if r['challenger_id'] is not None else (
             'name', name.casefold()
         )
         score = challenger_scores.setdefault(identity, {
-            'id': r['challenger_id'], 'name': name,
-            'score_sum': 0, 'rating_count': 0,
+            'id': r['challenger_id'], 'student_id': r['student_id'],
+            'display_name': r['display_name'],
+            'roster_name': r['roster_name'],
+            'identity_source': identity_source,
+            'name': name, 'score_sum': 0, 'rating_count': 0,
         })
         score['score_sum'] += r['score']
         score['rating_count'] += 1
@@ -2880,6 +3043,10 @@ def _compute_state(slug, include_poll_count=True, known_question_id=None,
         json.loads(state['active_challenges_json'] or '[]')
         if state else []
     )
+    if state and active_challenges:
+        active_challenges = _enrich_live_challenge_identities(
+            slug, state['course_id'], active_challenges
+        )
     result = {
         'phase': state['phase'] if state else 'setup',
         'active_team': dict(active_team) if active_team else None,
@@ -2922,6 +3089,7 @@ def _compute_state(slug, include_poll_count=True, known_question_id=None,
         '_course_id': state['course_id'] if state else None,
     }
     if me:
+        result['current_student_display_name'] = _student_display_name(me)
         my_student_id = str(me['id'])
         result['is_active_challenger'] = any(
             isinstance(challenge, dict) and
@@ -3041,8 +3209,14 @@ def _compute_state(slug, include_poll_count=True, known_question_id=None,
                 hands = query_db(
                     slug,
                     '''SELECT hand.student_id,
-                              COALESCE(NULLIF(TRIM(hand.student_name), ''),
-                                       student.student_id) AS student_name,
+                              student.student_id AS student_identifier,
+                              student.display_name AS display_name,
+                              student.name AS roster_name,
+                              COALESCE(NULLIF(TRIM(student.display_name), ''),
+                                       NULLIF(TRIM(student.name), ''),
+                                       student.student_id,
+                                       NULLIF(TRIM(hand.student_name), ''))
+                                  AS student_name,
                               hand.student_team_id, hand.student_team_name
                        FROM challenge_hands hand
                        LEFT JOIN students student ON student.id = hand.student_id
@@ -3061,6 +3235,9 @@ def _compute_state(slug, include_poll_count=True, known_question_id=None,
                 )
                 result['challenge_hands'] = [
                     {'student_id': h['student_id'],
+                     'student_identifier': h['student_identifier'],
+                     'display_name': h['display_name'],
+                     'roster_name': h['roster_name'],
                      'student_name': h['student_name'],
                      'student_team_id': h['student_team_id'],
                      'student_team_name': h['student_team_name'],
@@ -3201,8 +3378,11 @@ def _compute_teams(slug, course_id, max_teams=None, member_team_id=None,
     if visible_member_team_ids:
         placeholders = ','.join('?' * len(visible_member_team_ids))
         all_members = query_db(slug,
-            f'''SELECT id, student_id, name, team_id FROM students
-                WHERE team_id IN ({placeholders}) AND is_active = 1''',
+            f'''SELECT id, student_id, name, display_name, team_id
+                FROM students
+                WHERE team_id IN ({placeholders}) AND is_active = 1
+                ORDER BY team_id, COALESCE(NULLIF(TRIM(display_name), ''),
+                                           NULLIF(TRIM(name), ''), student_id)''',
             visible_member_team_ids)
     participation_counts = {}
     if include_participation_counts:
@@ -3211,7 +3391,14 @@ def _compute_teams(slug, course_id, max_teams=None, member_team_id=None,
         )
     members_by_team = {}
     for m in all_members:
-        member = {'student_id': m['student_id'], 'name': m['name']}
+        resolved_name = _student_display_name(m)
+        member = {
+            'student_id': m['student_id'],
+            'display_name': m['display_name'],
+            'name': resolved_name,
+        }
+        if include_participation_counts:
+            member['roster_name'] = m['name']
         if include_participation_counts:
             member['id'] = m['id']
             member.update(participation_counts.get(m['id'], {
@@ -3496,7 +3683,10 @@ def api_poll():
             slug, course_id, state_data.get('session_key', 0)
         )
         top_challengers = [
-            {'name': c['name'], 'rank': c['rank']}
+            {
+                'name': c['name'], 'student_id': c.get('student_id'),
+                'rank': c['rank'],
+            }
             for c in all_challengers if c['rank'] == 1
         ]
 
@@ -3801,7 +3991,8 @@ def _finalize_active_presentation(slug, course_id, db=None):
                     team_id, team_name, data_version)
                    SELECT student.course_id, ?, ?, ?, student.id,
                           student.student_id,
-                          COALESCE(NULLIF(TRIM(student.name), ''),
+                          COALESCE(NULLIF(TRIM(student.display_name), ''),
+                                   NULLIF(TRIM(student.name), ''),
                                    student.student_id),
                           ?, ?, ?
                    FROM students student
@@ -6491,9 +6682,7 @@ def raise_hand():
         team = db.execute(
             'SELECT name FROM teams WHERE id = ?', [student['team_id']]
         ).fetchone()
-        student_name = (
-            (student['name'] or '').strip() or student['student_id']
-        )
+        student_name = _student_display_name(student)
         db.execute(
             '''INSERT INTO challenge_hands
                (course_id, session_key, presentation_key, student_id,
@@ -6587,7 +6776,9 @@ def select_challenger():
         pres_key = active_presentation_key(state)
         # Verify the student has raised their hand.
         hand = db.execute(
-            '''SELECT hand.*, student.student_id AS roster_student_id
+            '''SELECT hand.*, student.student_id AS roster_student_id,
+                      student.name AS current_roster_name,
+                      student.display_name AS current_display_name
                FROM challenge_hands hand
                LEFT JOIN students student ON student.id = hand.student_id
                WHERE hand.course_id = ? AND hand.presentation_key = ?
@@ -6611,9 +6802,16 @@ def select_challenger():
                 'error': 'This student is already the active challenger',
                 'already_selected': True,
             }), 409
-        challenger_name = (
-            (hand['student_name'] or '').strip() or hand['roster_student_id']
-        )
+        challenger_name = _student_display_name({
+            'display_name': hand['current_display_name'],
+            'roster_name': hand['current_roster_name'],
+            'student_id': hand['roster_student_id'],
+        })
+        if challenger_name == 'Unknown':
+            challenger_name = (
+                _normalized_identity_text(hand['student_name'])
+                or 'Unknown'
+            )
         # Compute next challenge number.
         max_num_row = db.execute(
             '''SELECT MAX(challenge_num) AS m FROM challenge_rounds
@@ -6662,6 +6860,7 @@ def select_challenger():
             'challenge_num': challenge_num,
             'challenger_id': hand['student_id'],
             'challenger_name': challenger_name,
+            'challenger_student_id': hand['roster_student_id'],
             'challenger_team_id': hand['student_team_id'],
             'challenger_team_name': hand['student_team_name'],
         })
@@ -6886,7 +7085,7 @@ def submit_challenge_rating():
              challenge['challenger_name'],
              challenge['challenger_team_id'],
              challenge['challenger_team_name'],
-             student['id'], student['name'],
+             student['id'], _student_display_name(student),
              student['team_id'],
              rater_team['name'] if rater_team else 'Unknown',
              score, APP_VERSION]
@@ -7025,7 +7224,9 @@ def api_students():
 
     allowed_sorts = {
         'student_id': 's.student_id',
-        'name': 's.name',
+        'name': "COALESCE(NULLIF(TRIM(s.display_name), ''), "
+                "NULLIF(TRIM(s.name), ''), s.student_id) "
+                "COLLATE NOCASE",
         'last_active_at': 's.last_active_at',
         'presentation_count': 'presentation_count',
         'challenger_count': 'challenger_count',
@@ -7040,8 +7241,13 @@ def api_students():
     where_clause = ''
     params = [course['id']]
     if search:
-        where_clause += " AND s.student_id LIKE ? ESCAPE '\\'"
-        params.append(f'%{_escape_like(search)}%')
+        escaped_search = f'%{_escape_like(search)}%'
+        where_clause += (
+            " AND (s.student_id LIKE ? ESCAPE '\\' "
+            "OR COALESCE(s.display_name, '') LIKE ? ESCAPE '\\' "
+            "OR COALESCE(s.name, '') LIKE ? ESCAPE '\\')"
+        )
+        params.extend((escaped_search, escaped_search, escaped_search))
     if team_filter == 'none':
         where_clause += ' AND s.team_id IS NULL'
     elif team_filter and team_filter != 'none':
@@ -7087,7 +7293,7 @@ def api_students():
                   AND popping_version_compatible(data_version, ?) = 1
                 GROUP BY challenger_id
             )
-            SELECT s.id, s.student_id, s.name, s.team_id,
+            SELECT s.id, s.student_id, s.name, s.display_name, s.team_id,
                    t.name as team_name, t.color as team_color,
                    s.last_login_at, s.last_active_at, s.last_team_joined_at,
                    COALESCE(presentation.presentation_count, 0)
@@ -7112,6 +7318,7 @@ def api_students():
     for r in rows:
         d = dict(r)
         d['is_online'] = r['last_active_at'] and r['last_active_at'] > cutoff
+        d['roster_name'] = r['name']
         students.append(d)
 
     max_teams = get_max_teams(slug, course['id'])
@@ -7570,8 +7777,18 @@ def export_legacy_feedback(slug):
             snapshot_open = False
             return 'The legacy export exceeds the safety limit.', 413
         thumb_rows = db.execute(
-            f'''SELECT g.student_id AS grader_id, g.name AS grader_name,
-                       r.student_id AS recipient_id, r.name AS recipient_name,
+            f'''SELECT g.student_id AS grader_id,
+                       CASE
+                         WHEN NULLIF(TRIM(g.display_name), '') IS NOT NULL
+                           THEN g.display_name
+                         WHEN NULLIF(TRIM(g.name), '') IS NOT NULL THEN g.name
+                         ELSE g.student_id END AS grader_name,
+                       r.student_id AS recipient_id,
+                       CASE
+                         WHEN NULLIF(TRIM(r.display_name), '') IS NOT NULL
+                           THEN r.display_name
+                         WHEN NULLIF(TRIM(r.name), '') IS NOT NULL THEN r.name
+                         ELSE r.student_id END AS recipient_name,
                        p.grader_team_id, p.grader_team_name,
                        p.recipient_team_id, p.recipient_team_name,
                        p.session_key, p.week_num, p.question_key,
@@ -7585,7 +7802,12 @@ def export_legacy_feedback(slug):
             [course['id'], SCHEMA_VERSION],
         ).fetchall()
         rating_rows = db.execute(
-            f'''SELECT s.student_id AS grader_id, s.name AS grader_name,
+            f'''SELECT s.student_id AS grader_id,
+                       CASE
+                         WHEN NULLIF(TRIM(s.display_name), '') IS NOT NULL
+                           THEN s.display_name
+                         WHEN NULLIF(TRIM(s.name), '') IS NOT NULL THEN s.name
+                         ELSE s.student_id END AS grader_name,
                        p.rater_team_id AS grader_team_id,
                        p.rater_team_name AS grader_team_name,
                        p.presenting_team_id, p.presenting_team_name,
@@ -7600,7 +7822,10 @@ def export_legacy_feedback(slug):
         ).fetchall()
         participant_rows = db.execute(
             f'''SELECT p.session_key, p.week_num, p.presentation_key,
-                       p.student_identifier, p.student_name,
+                       p.student_identifier,
+                       CASE WHEN NULLIF(TRIM(p.student_name), '') IS NOT NULL
+                              THEN p.student_name
+                            ELSE p.student_identifier END AS student_name,
                        p.team_id, p.team_name, p.created_at, p.data_version
                 FROM presentation_participants p
                 WHERE {legacy_where}
@@ -7611,8 +7836,9 @@ def export_legacy_feedback(slug):
             f'''SELECT p.session_key, p.week_num, p.challenge_key,
                        p.presentation_key, p.challenge_num,
                        challenger.student_id AS challenger_id,
-                       COALESCE(NULLIF(TRIM(p.challenger_name), ''),
-                                challenger.student_id) AS challenger_name,
+                       CASE WHEN NULLIF(TRIM(p.challenger_name), '') IS NOT NULL
+                              THEN p.challenger_name
+                            ELSE challenger.student_id END AS challenger_name,
                        p.challenger_team_id, p.challenger_team_name,
                        p.presenting_team_id, p.presenting_team_name,
                        p.question_title, p.created_at, p.data_version
@@ -7626,9 +7852,12 @@ def export_legacy_feedback(slug):
             f'''SELECT p.session_key, p.week_num, p.challenge_key,
                        p.presentation_key, round.challenge_num,
                        challenger.student_id AS challenger_id,
-                       COALESCE(NULLIF(TRIM(round.challenger_name), ''),
-                                NULLIF(TRIM(p.challenger_name), ''),
-                                challenger.student_id) AS challenger_name,
+                       CASE
+                         WHEN NULLIF(TRIM(round.challenger_name), '') IS NOT NULL
+                           THEN round.challenger_name
+                         WHEN NULLIF(TRIM(p.challenger_name), '') IS NOT NULL
+                           THEN p.challenger_name
+                         ELSE challenger.student_id END AS challenger_name,
                        COALESCE(round.challenger_team_id,
                                 p.challenger_team_id) AS challenger_team_id,
                        COALESCE(round.challenger_team_name,
@@ -7636,8 +7865,14 @@ def export_legacy_feedback(slug):
                        round.presenting_team_id, round.presenting_team_name,
                        round.question_title,
                        rater.student_id AS rater_id,
-                       COALESCE(NULLIF(TRIM(rater.name), ''),
-                                rater.student_id) AS rater_name,
+                       CASE
+                         WHEN NULLIF(TRIM(p.rater_name), '') IS NOT NULL
+                           THEN p.rater_name
+                         WHEN NULLIF(TRIM(rater.display_name), '') IS NOT NULL
+                           THEN rater.display_name
+                         WHEN NULLIF(TRIM(rater.name), '') IS NOT NULL
+                           THEN rater.name
+                         ELSE rater.student_id END AS rater_name,
                        p.rater_team_id, p.rater_team_name, p.score,
                        p.created_at, p.data_version
                 FROM challenge_ratings p
@@ -8094,7 +8329,9 @@ def export_data(slug):
                FROM students s LEFT JOIN teams t ON t.id = CASE
                    WHEN s.is_active = 1 THEN s.team_id
                    ELSE COALESCE(s.team_id, s.last_team_id) END
-               WHERE s.course_id = ? ORDER BY s.name''',
+               WHERE s.course_id = ?
+               ORDER BY COALESCE(NULLIF(TRIM(s.display_name), ''),
+                                 NULLIF(TRIM(s.name), ''), s.student_id)''',
             [cid],
         )
         participation_counts = _participation_counts_by_student(
@@ -8111,8 +8348,18 @@ def export_data(slug):
         peer_reviews = query_db(
             slug,
             f'''SELECT p.grader_id, p.recipient_id,
-                      g.student_id as grader_sid, g.name as grader_name,
-                      r.student_id as recipient_sid, r.name as recipient_name,
+                       g.student_id as grader_sid,
+                       CASE
+                         WHEN NULLIF(TRIM(g.display_name), '') IS NOT NULL
+                           THEN g.display_name
+                         WHEN NULLIF(TRIM(g.name), '') IS NOT NULL THEN g.name
+                         ELSE g.student_id END AS grader_name,
+                       r.student_id as recipient_sid,
+                       CASE
+                         WHEN NULLIF(TRIM(r.display_name), '') IS NOT NULL
+                           THEN r.display_name
+                         WHEN NULLIF(TRIM(r.name), '') IS NOT NULL THEN r.name
+                         ELSE r.student_id END AS recipient_name,
                       p.grader_team_id, p.grader_team_name,
                       p.recipient_team_id, p.recipient_team_name,
                       p.session_key, p.week_num, p.question_key,
@@ -8134,7 +8381,12 @@ def export_data(slug):
                       pr.question_id, pr.question_title,
                       pr.rater_team_id, pr.rater_team_name,
                       pr.student_id as rater_db_id,
-                      s.student_id as rater_sid, s.name as rater_name,
+                       s.student_id as rater_sid,
+                       CASE
+                         WHEN NULLIF(TRIM(s.display_name), '') IS NOT NULL
+                           THEN s.display_name
+                         WHEN NULLIF(TRIM(s.name), '') IS NOT NULL THEN s.name
+                         ELSE s.student_id END AS rater_name,
                       pr.q1_developed, pr.q2_easy, pr.created_at,
                       pr.data_version
                FROM presentation_ratings pr
@@ -8148,7 +8400,10 @@ def export_data(slug):
             slug,
             f'''SELECT participant.session_key, participant.week_num,
                       participant.presentation_key,
-                      participant.student_identifier, participant.student_name,
+                      participant.student_identifier,
+                      CASE WHEN NULLIF(TRIM(participant.student_name), '') IS NOT NULL
+                             THEN participant.student_name
+                           ELSE participant.student_identifier END AS student_name,
                       participant.team_id, participant.team_name,
                       participant.created_at, participant.data_version
                FROM presentation_participants participant
@@ -8167,8 +8422,9 @@ def export_data(slug):
             f'''SELECT ch.session_key, ch.week_num, ch.challenge_key,
                       ch.presentation_key, ch.challenge_num,
                       challenger.student_id AS challenger_sid,
-                      COALESCE(NULLIF(TRIM(ch.challenger_name), ''),
-                               challenger.student_id) AS challenger_name,
+                      CASE WHEN NULLIF(TRIM(ch.challenger_name), '') IS NOT NULL
+                             THEN ch.challenger_name
+                           ELSE challenger.student_id END AS challenger_name,
                       ch.challenger_team_id, ch.challenger_team_name,
                       ch.presenting_team_id, ch.presenting_team_name,
                       ch.question_id, ch.question_title,
@@ -8202,9 +8458,12 @@ def export_data(slug):
             f'''SELECT cr.challenge_key, cr.presentation_key, cr.session_key,
                       cr.week_num, ch.challenge_num,
                       challenger.student_id AS challenger_sid,
-                      COALESCE(NULLIF(TRIM(ch.challenger_name), ''),
-                               NULLIF(TRIM(cr.challenger_name), ''),
-                               challenger.student_id) AS challenger_name,
+                      CASE
+                        WHEN NULLIF(TRIM(ch.challenger_name), '') IS NOT NULL
+                          THEN ch.challenger_name
+                        WHEN NULLIF(TRIM(cr.challenger_name), '') IS NOT NULL
+                          THEN cr.challenger_name
+                        ELSE challenger.student_id END AS challenger_name,
                       COALESCE(ch.challenger_team_id, cr.challenger_team_id)
                           AS challenger_team_id,
                       COALESCE(ch.challenger_team_name,
@@ -8213,8 +8472,13 @@ def export_data(slug):
                       ch.presenting_team_id, ch.presenting_team_name,
                       ch.question_id, ch.question_title,
                       cr.rater_id, s.student_id AS rater_sid,
-                      COALESCE(NULLIF(TRIM(s.name), ''), s.student_id)
-                          AS rater_name,
+                      CASE
+                        WHEN NULLIF(TRIM(cr.rater_name), '') IS NOT NULL
+                          THEN cr.rater_name
+                        WHEN NULLIF(TRIM(s.display_name), '') IS NOT NULL
+                          THEN s.display_name
+                        WHEN NULLIF(TRIM(s.name), '') IS NOT NULL THEN s.name
+                        ELSE s.student_id END AS rater_name,
                       cr.rater_team_id, cr.rater_team_name,
                       cr.score, cr.created_at, cr.data_version
                FROM challenge_ratings cr
@@ -8453,7 +8717,7 @@ def export_data(slug):
         # ════════════════════════════════════════════════════════════════════
         ws2 = wb.create_sheet('Students')
         s_headers = [
-            'student_id', 'name', 'team', 'status',
+            'student_id', 'roster_name', 'display_name', 'team', 'status',
             'course_presentation_team_turns', 'course_challenger_turns',
             'thumbs_given', 'thumbs_received',
             'presentation_ratings_given',
@@ -8473,6 +8737,7 @@ def export_data(slug):
             row = [
                 stu['student_id'],
                 stu['name'] or '',
+                stu['display_name'] or '',
                 stu['team_name'] or '',
                 'active' if stu['is_active'] else 'archived',
                 participation_counts.get(stu['id'], {}).get(
@@ -8498,7 +8763,7 @@ def export_data(slug):
         # ════════════════════════════════════════════════════════════════════
         ws_participation_roster = wb.create_sheet('Participation Roster')
         participation_roster_headers = [
-            'student_id', 'name', 'team', 'status',
+            'student_id', 'roster_name', 'display_name', 'team', 'status',
             'course_presentation_team_turns', 'course_challenger_turns',
         ]
         style_header(
@@ -8510,6 +8775,7 @@ def export_data(slug):
             participation_roster_rows.append([
                 student['student_id'],
                 student['name'] or '',
+                student['display_name'] or '',
                 student['team_name'] or '',
                 'active' if student['is_active'] else 'archived',
                 counts.get('presentation_count', 0),

@@ -3,7 +3,17 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>{% block title %}Popping{% endblock %}</title>
+    <title>{% block title %}Popping - An Interactive Course Platform{% endblock %}</title>
+    <meta name="description" content="Discuss, Present and Challenge - An Interactive Course Platform">
+    <meta property="og:type" content="website">
+    <meta property="og:site_name" content="Popping">
+    <meta property="og:title" content="Popping - An Interactive Course Platform">
+    <meta property="og:description" content="Discuss, Present and Challenge - An Interactive Course Platform">
+    <meta name="twitter:card" content="summary">
+    <meta name="twitter:title" content="Popping - An Interactive Course Platform">
+    <meta name="twitter:description" content="Discuss, Present and Challenge - An Interactive Course Platform">
+    <link rel="icon" href="{{ url_for('static', filename='images/favicon.ico', v=app_version, rev='rounded') }}" sizes="any">
+    <link rel="icon" type="image/png" sizes="32x32" href="{{ url_for('static', filename='images/favicon-32x32.png', v=app_version, rev='rounded') }}">
     <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
     <link rel="stylesheet" href="{{ url_for('static', filename='vendor/atom-one-dark.min.css') }}">
     <script defer src="{{ url_for('static', filename='vendor/marked.min.js') }}"></script>
@@ -56,9 +66,10 @@
     <nav class="navbar">
         <div class="nav-brand">
             <a href="{{ url_for('index') }}" class="nav-home" aria-label="Popping home">
-                <span class="logo">🍿</span>
-                <span class="brand-text">Popping</span>
-                <span class="brand-tagline">for interactive team-based classroom activities</span>
+                <img class="brand-logo brand-logo-nav"
+                     src="{{ url_for('static', filename='images/popping-brand.webp') }}"
+                     width="640" height="536" alt="" decoding="async">
+                <span class="brand-tagline">Discuss, Present and Challenge - An Interactive Course Platform</span>
             </a>
         </div>
         <div class="nav-links">
@@ -73,7 +84,7 @@
             {% if session.student_id %}
                 <a href="{{ url_for('dashboard') }}" class="nav-link">Dashboard</a>
                 <form method="post" action="{{ url_for('logout') }}" class="nav-logout-form">
-                    <button type="submit" class="nav-link nav-link-btn logout">Logout <span class="nav-user-name">({{ session.name }})</span></button>
+                    <button type="submit" class="nav-link nav-link-btn logout">Logout · <span class="nav-user-name" data-current-student-display title="{{ session | display_name }}">{{ session | display_name }}</span></button>
                 </form>
             {% elif session.instructor_id and session.slug %}
                 <div class="nav-dropdown" id="tools-dropdown">

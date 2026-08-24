@@ -27,6 +27,14 @@ async function main() {
     const appliedRecords = [];
     const incrementedTeams = [];
     const toastMessages = [];
+    const participationName = { textContent: 'Old Identity' };
+    const participationRow = {
+        dataset: { studentId: 's2' },
+        querySelector(selector) {
+            return selector === '.team-participation-member-name'
+                ? participationName : null;
+        },
+    };
     let fetchHandler;
     let confirmResult = true;
     let confirmMessage = '';
@@ -54,6 +62,13 @@ async function main() {
             getElementById(id) {
                 return id === 'team-participation-preview' ? {} : null;
             },
+            querySelectorAll(selector) {
+                assert.strictEqual(
+                    selector,
+                    '.team-participation-member[data-student-id]'
+                );
+                return [participationRow];
+            },
         },
         appliedRecords,
         incrementedTeams,
@@ -76,6 +91,14 @@ async function main() {
         source.slice(0, source.indexOf('function escapeHtmlValue')),
         sandbox,
         { filename: 'app-request-helpers.js' }
+    );
+    vm.runInContext(
+        source.slice(
+            source.indexOf('function normalizedIdentityText(value) {'),
+            source.indexOf('function initDisplayNameControls() {')
+        ),
+        sandbox,
+        { filename: 'app-identity-helpers.js' }
     );
     vm.runInContext(
         'let _instructorActionInFlight = false;' +
@@ -117,6 +140,22 @@ async function main() {
         source.indexOf('function syncCompetitionPresentationHistory', refreshStart)
     ), sandbox);
 
+    sandbox.identityTeams = [{
+        members: [{
+            id: 's2',
+            student_id: 's2-public',
+            display_name: 'Sam',
+            roster_name: 'Roster Sam',
+            presentation_count: 2,
+            challenger_count: 3,
+        }],
+    }];
+    vm.runInContext(
+        'applyCompetitionParticipationRoster(identityTeams)', sandbox
+    );
+    assert.strictEqual(participationName.textContent, 'Sam (s2-public)');
+    assert.strictEqual(appliedRecords[0].presentation_count, 2);
+    appliedRecords.length = 0;
     const syncStart = source.indexOf(
         'function syncCompetitionPresentationHistory'
     );

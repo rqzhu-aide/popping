@@ -8,7 +8,9 @@
 <div class="login-container">
     <div class="login-card">
         <div class="login-header">
-            <span class="logo-large">🍿</span>
+            <img class="brand-logo brand-logo-login"
+                 src="{{ url_for('static', filename='images/popping-brand.webp') }}"
+                 width="640" height="536" alt="Popping" decoding="async">
             <h1>{{ course.name }}</h1>
             <p class="subtitle">
                 {% if course.code %}{{ course.code }}{% endif %}

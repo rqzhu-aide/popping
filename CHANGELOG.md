@@ -3,6 +3,26 @@
 All notable changes to Popping are recorded here. Releases use semantic
 versions as defined in `VERSIONING.md`.
 
+## [v1.2.0] - 2026-08-24
+
+### Added
+
+- Added a nullable `students.display_name` field so a student can choose how
+  classmates address them without changing the instructor-uploaded roster name.
+- Added an explicit login control for clearing a saved display name.
+
+### Changed
+
+- Student views now show one name, resolved from display name, roster name, then
+  student ID. Instructor views show the same resolved name with the student ID.
+- Student Management searches both name fields and the student ID, while roster
+  edits and CSV replacement preserve student-provided display names.
+- Replaced the popcorn emoji with the supplied Popping brand artwork, added a
+  rounded favicon, and set consistent platform titles for shared links.
+- Advanced the website, database schema, and export format to `v1.2.0`.
+  Activity recorded by an older compatibility line remains available through
+  the legacy download.
+
 ## [v1.1.8] - 2026-08-23
 
 ### Changed

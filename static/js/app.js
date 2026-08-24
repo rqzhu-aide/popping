@@ -246,12 +246,96 @@ function discussionQuestionHeaderHtml(
     </div>`;
 }
 
-/** Format a student as 'Name (id)' or just 'id' if no name / name equals id. */
-function formatStudentDisplay(name, studentId) {
-    return (name && name !== studentId)
-        ? `${name} (${studentId})`
-        : studentId;
+function normalizedIdentityText(value) {
+    return value == null ? '' : String(value).trim();
 }
+
+function identityStudentId(studentOrName, fallbackId = '') {
+    if (studentOrName && typeof studentOrName === 'object') {
+        return normalizedIdentityText(
+            studentOrName.student_identifier ||
+            studentOrName.challenger_student_id ||
+            studentOrName.student_id ||
+            fallbackId
+        );
+    }
+    return normalizedIdentityText(fallbackId);
+}
+
+function studentDisplayIdentity(studentOrName, fallbackId = '') {
+    const studentId = identityStudentId(studentOrName, fallbackId);
+    if (studentOrName && typeof studentOrName === 'object') {
+        const sourceHint = normalizedIdentityText(
+            studentOrName.identity_source
+        );
+        if (sourceHint === 'student_id' && studentId) {
+            return { label: studentId, source: 'student_id', studentId };
+        }
+        const profileCandidates = [
+            [studentOrName.display_name, 'display_name'],
+            [studentOrName.roster_name, 'roster_name'],
+            [studentOrName.name, 'roster_name']
+        ];
+        for (const [value, source] of profileCandidates) {
+            const label = normalizedIdentityText(value);
+            if (label) return { label, source, studentId };
+        }
+        const snapshotName = normalizedIdentityText(
+            studentOrName.student_name
+        ) || normalizedIdentityText(studentOrName.challenger_name);
+        if (snapshotName) {
+            const source = sourceHint ||
+                (snapshotName === studentId ? 'student_id' : 'snapshot_name');
+            return { label: snapshotName, source, studentId };
+        }
+        if (studentId) {
+            return { label: studentId, source: 'student_id', studentId };
+        }
+        return { label: '', source: 'unknown', studentId: '' };
+    }
+    const label = normalizedIdentityText(studentOrName) || studentId;
+    return {
+        label,
+        source: label && label !== studentId ? 'snapshot_name' : 'student_id',
+        studentId
+    };
+}
+
+/** Student-facing identity: display name, roster name, then ID as fallback. */
+function studentDisplayName(studentOrName, fallbackId = '') {
+    return studentDisplayIdentity(studentOrName, fallbackId).label;
+}
+
+/** Instructor-facing identity: resolved profile name plus ID, or ID alone. */
+function instructorDisplayName(studentOrName, fallbackId = '') {
+    const identity = studentDisplayIdentity(studentOrName, fallbackId);
+    if (identity.label && identity.studentId &&
+            identity.source !== 'student_id') {
+        return `${identity.label} (${identity.studentId})`;
+    }
+    return identity.studentId || identity.label;
+}
+
+function initDisplayNameControls() {
+    const displayName = document.getElementById('display_name');
+    const clearDisplayName = document.getElementById('clear_display_name');
+    if (!displayName || !clearDisplayName) return;
+
+    const sync = () => {
+        const clearing = clearDisplayName.checked;
+        displayName.disabled = clearing;
+        displayName.setAttribute('aria-disabled', clearing ? 'true' : 'false');
+        if (clearing) displayName.value = '';
+    };
+    clearDisplayName.addEventListener('change', sync);
+    displayName.addEventListener('input', () => {
+        if (!normalizedIdentityText(displayName.value)) return;
+        clearDisplayName.checked = false;
+        sync();
+    });
+    sync();
+}
+initDisplayNameControls();
 
 function normalizedParticipationCount(value) {
     const parsed = Number(value);
@@ -277,20 +361,15 @@ function participationBadgesHtml(record, showChallengeTurns = true) {
 
 function instructorSetupRosterMemberHtml(member, teamColor) {
     const presentationCount = normalizedParticipationCount(member.presentation_count);
-    const studentId = String(member.student_id || '');
-    const name = String(member.name || '').trim();
-    const nameHtml = name && name !== studentId
-        ? `<div class="setup-roster-member-name">${escapeHtmlValue(member.name)}</div>`
-        : '';
+    const displayName = instructorDisplayName(member);
     return `<div class="roster-member setup-roster-member">
         <span class="team-dot" style="background:${escapeAttrValue(teamColor)}"></span>
         <div class="setup-roster-member-body">
             <div class="setup-roster-member-topline">
-                <span class="setup-roster-member-id">${escapeHtmlValue(member.student_id)}</span>
+                <span class="setup-roster-member-identity">${escapeHtmlValue(displayName)}</span>
                 <span class="participation-badge setup-roster-team-turns${presentationCount === 0 ? ' is-zero' : ''}"
                       title="Completed presentation-team turns">Team turns: <strong>${presentationCount}</strong></span>
             </div>
-            ${nameHtml}
         </div>
     </div>`;
 }
@@ -315,12 +394,13 @@ function renderRosterGrid(container, teams, myId, options = {}) {
             if (instructorSetup) {
                 return instructorSetupRosterMemberHtml(m, team.color);
             }
-            const display = formatStudentDisplay(m.name, m.student_id);
+            const display = studentDisplayName(m);
             const isYou = myId && m.student_id === myId;
             const badgesHtml = participationBadgesHtml(m);
             return `<div class="roster-member">
                 <span class="team-dot" style="background:${escapeAttrValue(team.color)}"></span>
-                <span class="roster-member-name ${isYou ? 'you' : ''}">${escapeHtmlValue(display)}${isYou ? ' (You)' : ''}</span>
+                <span class="roster-member-name ${isYou ? 'you' : ''}">${escapeHtmlValue(display)}</span>
+                ${isYou ? '<span class="roster-you-marker">You</span>' : ''}
                 ${badgesHtml}
             </div>`;
         }).join('');
@@ -331,6 +411,47 @@ function renderRosterGrid(container, teams, myId, options = {}) {
         div.innerHTML = `<h3><span class="team-dot" style="background:${escapeAttrValue(team.color)}"></span>${escapeHtmlValue(team.name)}</h3>${memberSummary}`;
         container.appendChild(div);
     });
+}
+
+function updateCurrentStudentDisplay(studentOrName) {
+    const currentDisplayName = studentDisplayName(studentOrName);
+    if (!currentDisplayName) return;
+    document.querySelectorAll('[data-current-student-display]').forEach(element => {
+        element.textContent = currentDisplayName;
+        element.title = currentDisplayName;
+    });
+}
+
+function updateDiscussionCardIdentities(teams) {
+    const membersById = new Map();
+    (teams || []).forEach(team => {
+        (team.members || []).forEach(member => {
+            membersById.set(String(member.student_id || ''), member);
+        });
+    });
+    document.querySelectorAll('.teammate-card[data-student-id]').forEach(card => {
+        const studentId = String(
+            card.dataset.rosterStudentId || card.dataset.studentId || '');
+        const member = membersById.get(studentId);
+        if (!studentId || !member) return;
+        const displayName = studentDisplayName(member);
+        const nameElement = card.querySelector('.card-name');
+        if (!nameElement) return;
+        nameElement.textContent = displayName;
+        nameElement.title = displayName;
+        card.querySelector('.card-id')?.remove();
+        if (card.id === 'card-you') card.title = `${displayName}, you`;
+        const thumb = card.querySelector('.thumb-btn');
+        if (thumb) {
+            thumb.setAttribute('aria-label', `Thumbs up to ${displayName}`);
+        }
+    });
+
+    const dashboardElement = document.querySelector?.('.dashboard[data-you]');
+    const currentStudent = dashboardElement
+        ? membersById.get(String(dashboardElement.dataset.you || ''))
+        : null;
+    if (currentStudent) updateCurrentStudentDisplay(currentStudent);
 }
 
 /** Keep display-math blocks intact before normal Markdown block parsing. */
@@ -1718,6 +1839,7 @@ if (dashboard) {
 
     async function loadRoster(teams) {
         renderRosterGrid(document.getElementById('roster-table'), teams, dashboard.dataset.you);
+        updateDiscussionCardIdentities(teams);
         updateTeamCapacityCards(teams);
     }
 
@@ -1950,6 +2072,7 @@ if (dashboard) {
         // from cheap changed:false poll cycles.
         _lastState = state;
         lastReceivedState = state;
+        updateCurrentStudentDisplay(state.current_student_display_name);
         discardOldSessionThumbUncertainty(state);
 
         // The dashboard's activity controls are rendered server-side for the
@@ -3060,6 +3183,7 @@ function renderChallengeUI(state) {
     for (const ch of challenges) {
         const isMyTeam = MY_TEAM_ID === ch.challenger_team_id;
         const isPresentingTeam = amPresenting;
+        const challengerDisplay = studentDisplayName(ch);
         const canRate = !noTeam && !isMyTeam && !isPresentingTeam;
 
         const card = document.createElement('div');
@@ -3069,7 +3193,7 @@ function renderChallengeUI(state) {
         const header = document.createElement('div');
         header.className = 'challenge-card-header';
         header.innerHTML = `<span class="challenge-badge">Challenger ${ch.challenge_num}</span>
-            <strong>${escapeHtml(ch.challenger_name || '')}</strong>
+            <strong>${escapeHtml(challengerDisplay)}</strong>
             <span class="hint">from ${escapeHtml(ch.challenger_team_name || '')}</span>`;
         card.appendChild(header);
 
@@ -3081,7 +3205,7 @@ function renderChallengeUI(state) {
             starRow.className = 'star-row challenge-stars';
             starRow.dataset.challengeKey = ch.challenge_key;
             starRow.setAttribute('role', 'group');
-            starRow.setAttribute('aria-label', `Rate challenger ${ch.challenger_name || ''}: 1 to 5 stars`);
+            starRow.setAttribute('aria-label', `Rate challenger ${challengerDisplay}: 1 to 5 stars`);
             const currentVal = challengeRatings[ch.challenge_key] || 0;
             for (let i = 1; i <= 5; i++) {
                 const star = document.createElement('button');
@@ -3300,7 +3424,8 @@ function renderTopChallengers(topChallengers) {
                 const item = document.createElement('div');
                 item.className = 'top-team-item';
                 const medal = ch.rank === 1 ? '🥇' : ch.rank === 2 ? '🥈' : '🥉';
-                item.innerHTML = `<span class="medal">${medal}</span> ${escapeHtml(ch.name)}`;
+                const challengerDisplay = studentDisplayName(ch);
+                item.innerHTML = `<span class="medal">${medal}</span> ${escapeHtml(challengerDisplay)}`;
                 list.appendChild(item);
             }
             chDiv.appendChild(list);
@@ -3431,6 +3556,32 @@ function markCompetitionParticipationCountsDirty() {
     _competitionParticipationNextRetryAt = 0;
 }
 
+function applyCompetitionParticipationRoster(teams) {
+    const membersById = new Map();
+    (teams || []).forEach(team => {
+        const members = Array.isArray(team.members) ? team.members : [];
+        members.forEach(member => {
+            const studentId = String(member.id ?? '');
+            if (studentId) membersById.set(studentId, member);
+            applyStudentParticipationCounts({
+                student_id: member.id,
+                presentation_count: member.presentation_count,
+                challenger_count: member.challenger_count,
+            });
+        });
+    });
+    const rows = document.querySelectorAll?.(
+        '.team-participation-member[data-student-id]'
+    ) || [];
+    rows.forEach(row => {
+        const member = membersById.get(String(row.dataset.studentId || ''));
+        const name = row.querySelector(
+            '.team-participation-member-name'
+        );
+        if (member && name) name.textContent = instructorDisplayName(member);
+    });
+}
+
 async function refreshCompetitionParticipationCounts() {
     const requestSerial = ++_competitionParticipationReadbackSerial;
     try {
@@ -3442,14 +3593,7 @@ async function refreshCompetitionParticipationCounts() {
         if (requestSerial !== _competitionParticipationReadbackSerial) {
             return _competitionParticipationReadbackAppliedSerial > requestSerial;
         }
-        data.forEach(team => {
-            const members = Array.isArray(team.members) ? team.members : [];
-            members.forEach(member => applyStudentParticipationCounts({
-                student_id: member.id,
-                presentation_count: member.presentation_count,
-                challenger_count: member.challenger_count,
-            }));
-        });
+        applyCompetitionParticipationRoster(data);
         _competitionParticipationReadbackAppliedSerial = requestSerial;
         _competitionParticipationReadbackDirty = false;
         _competitionParticipationNextRetryAt = 0;
@@ -3569,16 +3713,18 @@ function renderInstructorChallenge(state) {
             for (const h of hands) {
 
                 const challengeTurns = normalizedParticipationCount(h.challenger_count);
+                const studentDisplay = instructorDisplayName(h);
                 const row = document.createElement('div');
                 row.className = 'challenge-hand-row';
                 row.innerHTML = `<span class="challenge-hand-details">
-                    <span>${escapeHtml(h.student_name)} (${escapeHtml(h.student_team_name || '')})</span>
+                    <span>${escapeHtml(studentDisplay)} (${escapeHtml(h.student_team_name || '')})</span>
                     <span class="participation-badge${challengeTurns === 0 ? ' is-zero' : ''}">Challenge turns: <strong>${challengeTurns}</strong></span>
                 </span>`;
                 const btn = document.createElement('button');
                 btn.className =
                     'btn btn-sm btn-primary challenge-mutating-btn';
                 btn.textContent = 'Select as Challenger';
+                btn.setAttribute('aria-label', `Select ${studentDisplay} as challenger`);
                 btn.disabled = ratingsSettling;
                 btn.addEventListener('click', () => selectChallenger(h.student_id));
                 row.appendChild(btn);
@@ -3599,6 +3745,7 @@ function renderInstructorChallenge(state) {
 
                 const challengeTurns = normalizedParticipationCount(ch.challenger_count);
                 const submitted = Number(summary?.submitted_count) || 0;
+                const challengerDisplay = instructorDisplayName(ch);
                 const eligible = Number(summary?.eligible_count) || 0;
                 const ratingText =
                     `${submitted} out of ${eligible} students voted`;
@@ -3607,7 +3754,7 @@ function renderInstructorChallenge(state) {
                 row.dataset.challengeKey = String(ch.challenge_key);
                 row.innerHTML = `<span class="challenge-active-details">
                     <strong>Challenger ${ch.challenge_num}:</strong>
-                    ${escapeHtml(ch.challenger_name)} (${escapeHtml(ch.challenger_team_name || '')})
+                    ${escapeHtml(challengerDisplay)} (${escapeHtml(ch.challenger_team_name || '')})
                     <span class="participation-badge${challengeTurns === 0 ? ' is-zero' : ''}">Challenge turns: <strong>${challengeTurns}</strong></span>
                     <span class="hint">${ratingText}</span>
                 </span>`;
@@ -3615,6 +3762,7 @@ function renderInstructorChallenge(state) {
                 btn.className =
                     'btn btn-sm btn-danger challenge-mutating-btn';
                 btn.textContent = 'Clear';
+                btn.setAttribute('aria-label', `Clear challenger ${challengerDisplay}`);
                 btn.disabled = ratingsSettling;
                 if (state.poll_active) {
                     btn.title = 'Stop Poll before clearing this challenger';
@@ -4024,22 +4172,44 @@ if (instructor) {
                 state.session_elapsed
             );
 
-            // --- Roster refresh (setup phase) ---
+            // Refresh every instructor identity surface when the roster changes.
             const rosterGrid = document.querySelector('.roster-grid');
-            if (rosterGrid && _instrRosterVersion !== state.roster_version) {
-                const card = rosterGrid.closest('.card');
-                if (card && card.querySelector('h2')?.textContent?.includes('Team and Members')) {
+            const rosterCard = rosterGrid?.closest('.card');
+            const setupRosterGrid = rosterCard?.querySelector('h2')
+                ?.textContent?.includes('Team and Members') ? rosterGrid : null;
+            const participationPreview = document.getElementById(
+                'team-participation-preview'
+            );
+            if (_instrRosterVersion !== state.roster_version) {
+                if (!setupRosterGrid && !participationPreview) {
+                    _instrRosterVersion = state.roster_version;
+                    instructor.dataset.rosterVersion = String(
+                        state.roster_version || 0
+                    );
+                } else {
                     try {
                         const { res: rosterResponse, data: rosterData } =
                             await fetchJSONWithTimeout(
                                 `/api/teams?version=${encodeURIComponent(state.roster_version)}`
                             );
-                        if (!rosterResponse.ok) throw new Error('roster refresh failed');
-                        renderRosterGrid(rosterGrid, rosterData, null, { instructorSetup: true });
+                        if (!rosterResponse.ok || !Array.isArray(rosterData)) {
+                            throw new Error('roster refresh failed');
+                        }
+                        if (setupRosterGrid) {
+                            renderRosterGrid(
+                                setupRosterGrid, rosterData, null,
+                                { instructorSetup: true }
+                            );
+                        }
+                        if (participationPreview) {
+                            applyCompetitionParticipationRoster(rosterData);
+                        }
                         _instrRosterVersion = state.roster_version;
-                        instructor.dataset.rosterVersion = String(state.roster_version || 0);
+                        instructor.dataset.rosterVersion = String(
+                            state.roster_version || 0
+                        );
                     } catch (e) {
-                        // Retry on the next poll without blocking timer/rating updates.
+                        // Retry on the next poll without blocking live controls.
                     }
                 }
             }
@@ -4671,9 +4841,11 @@ window.loadStudentTable = async function() {
     tbody.innerHTML = '';
 
     students.forEach(s => {
-        const name = s.name || s.student_id;
-        const pickerLabel =
-            `Change team assignment for ${escapeAttrValue(name)}`;
+        const studentId = normalizedIdentityText(s.student_id);
+        const instructorName = instructorDisplayName(s);
+        const nameCellHtml = escapeHtmlValue(instructorName);
+        const pickerLabel = escapeAttrValue(
+            `Change team assignment for ${instructorName}`);
         const teamHtml = s.team_name
             ? `<button type="button" class="team-tag clickable" style="--team-color:${escapeAttrValue(s.team_color || '#94a3b8')}" onclick="toggleTeamPicker(event, ${s.id})" data-student="${s.id}" data-student-focus="team-${s.id}" aria-label="${pickerLabel}" aria-haspopup="menu" aria-expanded="false">${escapeHtmlValue(s.team_name)}</button>`
             : `<button type="button" class="team-tag unassigned-tag clickable" onclick="toggleTeamPicker(event, ${s.id})" data-student="${s.id}" data-student-focus="team-${s.id}" aria-label="${pickerLabel}" aria-haspopup="menu" aria-expanded="false">Unassigned</button>`;
@@ -4683,15 +4855,16 @@ window.loadStudentTable = async function() {
         const loginTime = s.last_login_at ? s.last_login_at.substring(0, 19) : 'Not yet';
         const presentationCount = normalizedParticipationCount(s.presentation_count);
         const challengerCount = normalizedParticipationCount(s.challenger_count);
+        const removeLabel = escapeAttrValue(`Remove ${instructorName}`);
         const actionCell = isDemoInstructor
             ? ''
-            : `<td><button class="btn btn-sm btn-danger" data-student-focus="remove-${s.id}" onclick="removeStudent(${s.id}, this)">Remove</button></td>`;
+            : `<td><button class="btn btn-sm btn-danger" data-student-focus="remove-${s.id}" aria-label="${removeLabel}" onclick="removeStudent(${s.id}, this)">Remove</button></td>`;
 
         const tr = document.createElement('tr');
         tr.setAttribute('data-id', s.id);
         tr.innerHTML = `
-            <td>${escapeHtmlValue(s.student_id)}</td>
-            <td>${escapeHtmlValue(name)}</td>
+            <td>${escapeHtmlValue(studentId)}</td>
+            <td>${nameCellHtml}</td>
             <td>${teamHtml}</td>
             <td class="participation-table-count">${presentationCount}</td>
             <td class="participation-table-count">${challengerCount}</td>

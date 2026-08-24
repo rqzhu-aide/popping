@@ -87,14 +87,14 @@ def test_instructor_vote_progress_uses_compact_counts():
     assert "flex: 0 0 auto;" in css
 
 
-def test_instructor_roster_keeps_id_and_team_turns_above_name():
+def test_instructor_roster_keeps_identity_and_team_turns_readable():
     css = (PROJECT_ROOT / "static" / "css" / "style.css").read_text(
         encoding="utf-8"
     )
 
     assert ".instructor .setup-roster-member {" in css
     assert ".setup-roster-member-topline {" in css
-    assert ".setup-roster-member-name {" in css
+    assert ".setup-roster-member-identity {" in css
     roster_rules = css[
         css.index(".instructor .setup-roster-member {"):
         css.index(".participation-badge {", css.index(
@@ -126,7 +126,9 @@ def test_instructor_setup_and_presentation_controls_are_contextual_and_compact()
     assert "Team turns:" in setup_roster
     assert "Challenge turns:" not in setup_roster
     assert "Challenge turns" in template
-    assert "renderRosterGrid(rosterGrid, rosterData, null, { instructorSetup: true })" in source
+    assert "setupRosterGrid, rosterData, null," in source
+    assert "{ instructorSetup: true }" in source
+    assert "applyCompetitionParticipationRoster(rosterData)" in source
 
     assert 'id="reset-course-data-menu-item"' in base
     assert "state.phase in ['setup', 'ended']" in base
@@ -335,7 +337,7 @@ def test_discussion_accordion_is_keyboard_accessible():
         encoding="utf-8"
     )
     header_start = source.index("function discussionQuestionHeaderHtml(")
-    header_end = source.index("/** Format a student", header_start)
+    header_end = source.index("function normalizedIdentityText(", header_start)
     header = source[header_start:header_end]
 
     assert '<button type="button" class="disc-question-toggle"' in header

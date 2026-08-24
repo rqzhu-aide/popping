@@ -12,7 +12,7 @@
      data-max-members="{{ max_members if max_members is defined else '' }}">
     <header class="dash-header">
         <div>
-            <h1>Hello, {{ student | display_name }}</h1>
+            <h1>Hello, <span data-current-student-display>{{ student | display_name }}</span></h1>
             <p class="course-name-sm">{{ course.name }}</p>
         </div>
         <div class="dashboard-state">
@@ -175,22 +175,20 @@
                          data-student-id="{{ m.student_id }}"
                          id="card-{{ m.student_id }}">
                         <div class="card-circle" style="border-color:{{ team.color }}">
-                            <span class="card-name" title="{{ m.name or m.student_id }}">{{ m.name or m.student_id }}</span>
-                            {% if m.name and m.name != m.student_id %}
-                            <span class="card-id" title="{{ m.student_id }}">{{ m.student_id }}</span>
-                            {% endif %}
+                            <span class="card-name" title="{{ m | display_name }}">{{ m | display_name }}</span>
                             <button class="thumb-btn thumb-up"
-                                    aria-label="Thumbs up to {{ m.name or m.student_id }}"
+                                    aria-label="Thumbs up to {{ m | display_name }}"
                                     aria-pressed="false"
                                     onclick="gradeTeammate(this, this.closest('.teammate-card').dataset.studentId)">👍</button>
                         </div>
                     </div>
                     {% endfor %}
-                    <div class="teammate-card" draggable="true" data-student-id="you" id="card-you">
+                    <div class="teammate-card" draggable="true" data-student-id="you"
+                         data-roster-student-id="{{ student.student_id }}" id="card-you">
                         <div class="card-circle" style="border-color:{{ team.color }}; background:{{ team.color }}15;">
-                            <span class="card-name">You</span>
-                            <span class="card-id" title="{{ student.student_id }}">{{ student.student_id }}</span>
+                            <span class="card-name" title="{{ student | display_name }}">{{ student | display_name }}</span>
                         </div>
+                        <span class="card-you-marker" aria-label="This is you">You</span>
                     </div>
                 </div>
             </div>

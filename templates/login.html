@@ -8,7 +8,9 @@
 <div class="login-container">
     <div class="login-card">
         <div class="login-header">
-            <span class="logo-large">🍿</span>
+            <img class="brand-logo brand-logo-login"
+                 src="{{ url_for('static', filename='images/popping-brand.webp') }}"
+                 width="640" height="536" alt="Popping" decoding="async">
             <h1>{{ course.name }}</h1>
             <p class="subtitle">
                 {% if course.code %}{{ course.code }}{% endif %}
@@ -21,6 +23,19 @@
                 <label for="student_id">Student ID</label>
                 <input type="text" id="student_id" name="student_id" required
                        placeholder="Enter your student ID" autocomplete="off">
+            </div>
+            <div class="form-group">
+                <label for="display_name">Display Name <span class="hint-inline">(optional)</span></label>
+                <input type="text" id="display_name" name="display_name" maxlength="200"
+                       placeholder="What should classmates call you?" autocomplete="nickname"
+                       aria-describedby="display-name-hint">
+                <p class="login-field-hint" id="display-name-hint">Classmates see your display name first, then your roster name, then your ID. Leave this blank to keep your saved display name.</p>
+                <label class="display-name-clear" for="clear_display_name">
+                    <input type="checkbox" id="clear_display_name"
+                           name="clear_display_name" value="1"
+                           aria-describedby="display-name-hint">
+                    <span>Clear my saved display name</span>
+                </label>
             </div>
             <div class="form-group">
                 <label for="pin">PIN</label>
