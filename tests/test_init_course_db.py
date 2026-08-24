@@ -80,6 +80,55 @@ def assert_valid_course_db(path, slug="safe101"):
         db.close()
 
 
+@pytest.mark.parametrize(
+    "invalid_pin",
+    ("123", "1" * 33, "12a4", " 1234", "1234 ", "١٢٣٤"),
+)
+def test_candidate_builder_rejects_invalid_instructor_pin_before_writing(
+        init_course_db_module, tmp_path, invalid_pin):
+    candidate = tmp_path / "candidate.db"
+    course = {
+        "slug": "safe101",
+        "name": "Safe Course",
+        "code": "SAFE 101",
+        "semester": "Test",
+    }
+
+    with pytest.raises(ValueError, match="only 4 to 32 digits"):
+        init_course_db_module.build_candidate_database(
+            str(candidate), str(tmp_path), course, [], 1, 4,
+            "teacher", "Test Teacher", invalid_pin,
+        )
+
+    assert not candidate.exists()
+
+
+def test_initializer_retries_unicode_and_whitespace_instructor_pins(
+        init_course_db_module, course_config, tmp_path, monkeypatch):
+    data_dir = tmp_path / "data"
+    monkeypatch.setenv("DATA_DIR", str(data_dir))
+    input_answers = iter(("teacher", "Test Teacher"))
+    pin_answers = iter((
+        "١٢٣٤",
+        "１２３４",
+        " 1234",
+        "1234 ",
+        "2468",
+    ))
+    monkeypatch.setattr(
+        builtins, "input", lambda _prompt: next(input_answers)
+    )
+    monkeypatch.setattr(
+        init_course_db_module.getpass,
+        "getpass",
+        lambda _prompt: next(pin_answers),
+    )
+
+    assert init_course_db_module.main([str(course_config)]) == 0
+    with sqlite3.connect(data_dir / "safe101" / "popping.db") as db:
+        assert db.execute("SELECT pin FROM instructors").fetchone()[0] == "2468"
+
+
 def test_initializer_honors_data_dir_and_validates_new_database(
     init_course_db_module, course_config, tmp_path, monkeypatch
 ):
@@ -364,6 +413,69 @@ def test_initializer_validates_only_material_that_exists(
 
     assert result == 0
     assert_valid_course_db(data_dir / "safe101" / "popping.db")
+
+
+def test_initializer_rejects_noncanonical_leading_zero_week_filename(
+    init_course_db_module, course_config
+):
+    canonical = course_config / "week-1-questions.md"
+    noncanonical = course_config / "week-01-questions.md"
+    noncanonical.write_bytes(canonical.read_bytes())
+    canonical.unlink()
+
+    with pytest.raises(ValueError, match="week 1 is not ready"):
+        init_course_db_module.validate_initial_question_catalog(
+            str(course_config)
+        )
+
+
+def test_initializer_rejects_malformed_later_bundled_week(
+    init_course_db_module, course_config
+):
+    (course_config / "week-2-questions.md").write_text(
+        """---
+id: missing-title
+---
+
+This block has no title.
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="week 2 is not ready"):
+        init_course_db_module.validate_initial_question_catalog(
+            str(course_config)
+        )
+
+
+def test_initializer_validates_every_bundled_week_but_seeds_only_week_one(
+    init_course_db_module, course_config, tmp_path, monkeypatch
+):
+    (course_config / "week-2-questions.md").write_text(
+        """---
+id: later-week
+title: Later week
+---
+
+Discuss the later week.
+""",
+        encoding="utf-8",
+    )
+    data_dir = tmp_path / "data"
+    monkeypatch.setenv("DATA_DIR", str(data_dir))
+
+    result = run_initializer(
+        init_course_db_module,
+        monkeypatch,
+        course_config,
+        ["teacher", "Test Teacher"],
+    )
+
+    assert result == 0
+    with sqlite3.connect(data_dir / "safe101" / "popping.db") as db:
+        assert db.execute(
+            "SELECT DISTINCT week_num FROM questions"
+        ).fetchall() == [(1,)]
 
 
 def test_initializer_ignores_legacy_presentation_material_without_canonical_file(

@@ -168,6 +168,8 @@ class TestPrivateDemoEntry:
             assert session_data['role'] == 'instructor'
             assert session_data['is_demo'] is True
             assert 'student_id' not in session_data
+            assert len(session_data['instructor_auth_token']) == 64
+            assert 'pin' not in session_data
         with student_one.session_transaction() as session_data:
             assert session_data['slug'] == slug
             assert session_data['role'] == 'student'
@@ -263,7 +265,8 @@ class TestPrivateDemoEntry:
             assert session_data.get('is_demo') is True
         assert client.post('/demo/exit').status_code == 302
         with client.session_transaction() as session_data:
-            assert not session_data
+            assert set(session_data) == {"demo_instance_slug"}
+            assert session_data["demo_instance_slug"] == slug
 
     def test_demo_courses_are_hidden_from_normal_landing(self, demo_env):
         client = app_module.app.test_client()
@@ -561,3 +564,18 @@ class TestTwoStudentWorkflow:
         assert _database_value(
             db_path, 'SELECT COUNT(*) FROM presentation_ratings'
         ) == 1
+
+
+def test_repeated_demo_start_from_same_browser_reuses_live_instance(demo_env):
+    client = app_module.app.test_client()
+
+    first_slug, first_path = _start_demo(client, demo_env)
+    second_slug, second_path = _start_demo(client, demo_env)
+
+    assert second_slug == first_slug
+    assert second_path == first_path
+    live_instances = [
+        path.name for path in demo_env["data_dir"].iterdir()
+        if path.is_dir() and is_demo_instance_slug(path.name)
+    ]
+    assert live_instances == [first_slug]

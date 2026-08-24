@@ -195,6 +195,24 @@ def touch_demo_instance(data_dir, slug, now=None):
     os.utime(marker, (timestamp, timestamp))
 
 
+def reusable_demo_instance(data_dir, slug, now=None):
+    """Return whether a browser's remembered private demo is still live."""
+    if not is_demo_instance_slug(slug):
+        return False
+    instance_dir = demo_instance_dir(data_dir, slug)
+    database_path = os.path.join(instance_dir, 'popping.db')
+    marker_path = os.path.join(instance_dir, '.last-used')
+    if (not os.path.isfile(database_path)
+            or not os.path.isfile(marker_path)):
+        return False
+    try:
+        last_used = os.path.getmtime(marker_path)
+    except OSError:
+        return False
+    checked_at = time.time() if now is None else float(now)
+    return checked_at - last_used < DEMO_INSTANCE_TTL_SECONDS
+
+
 def create_demo_instance(data_dir, classes_dir, schema_path, slug=None):
     slug = slug or f'demo_{uuid.uuid4().hex}'
     instance_dir = demo_instance_dir(data_dir, slug)
@@ -248,10 +266,17 @@ def _cleanup_incomplete_demo_instances(data_dir):
 
 
 def create_bounded_demo_instance(
-        data_dir, classes_dir, schema_path, lock_timeout=0.0):
-    """Create one demo while atomically enforcing the shared instance cap."""
+        data_dir, classes_dir, schema_path, lock_timeout=0.0,
+        reuse_slug=None):
+    """Create or reuse one demo while atomically enforcing the shared cap."""
     with _demo_lifecycle_lock(data_dir, timeout=lock_timeout):
         removed = _cleanup_incomplete_demo_instances(data_dir)
+        if reusable_demo_instance(data_dir, reuse_slug):
+            removed.extend(cleanup_expired_demo_instances(
+                data_dir, exclude=(reuse_slug,)
+            ))
+            touch_demo_instance(data_dir, reuse_slug)
+            return reuse_slug, removed
         removed.extend(cleanup_expired_demo_instances(data_dir))
         if count_demo_instances(data_dir) >= MAX_DEMO_INSTANCES:
             return None, removed

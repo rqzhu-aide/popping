@@ -79,10 +79,6 @@ def upload_env(tmp_path, monkeypatch):
     )
 
     database._schema_checked.discard(slug)
-    question_cache = getattr(app_module, "_question_html_cache", None)
-    if isinstance(question_cache, dict):
-        question_cache.clear()
-
     db = sqlite3.connect(db_path)
     db.row_factory = sqlite3.Row
     db.execute("PRAGMA foreign_keys=ON")
@@ -151,16 +147,28 @@ def _instructor_client(env):
         session["instructor_id"] = env["instructor_id"]
         session["instructor_name"] = "Question Instructor"
         session["slug"] = env["slug"]
+        session["instructor_auth_token"] = (
+            app_module._instructor_session_token(
+                env["slug"], env["instructor_id"], "9999"
+            )
+        )
     return client
 
 
 def _student_client(env):
+    with _connect(env) as db:
+        student = db.execute(
+            "SELECT id, student_id, pin FROM students WHERE student_id = 's1'"
+        ).fetchone()
     client = app_module.app.test_client()
     with client.session_transaction() as session:
         session["role"] = "student"
         session["student_id"] = "s1"
         session["name"] = "Student One"
         session["slug"] = env["slug"]
+        session["student_auth_token"] = app_module._student_session_token(
+            env["slug"], student["id"], student["student_id"], student["pin"]
+        )
     return client
 
 
@@ -342,7 +350,7 @@ def test_reorder_and_edit_preserve_identity_visibility_and_saved_rating(
     catalog = client.get("/api/discussion_questions").get_json()["questions"]
     beta = next(item for item in catalog if item["title"] == "Beta revised")
     assert beta["key"] == beta_key
-    assert beta["hidden"] is True
+    assert beta["hidden"] is False
 
 
 def test_appendix_items_are_the_same_in_discussion_and_presentation_rows(
@@ -559,3 +567,23 @@ def test_uploaded_question_starts_and_polls_with_exact_markdown(upload_env):
     assert active["content"] == body
     assert active["source_key"] == "week-1-q-uploaded-live"
     assert "html_content" not in active
+
+
+def test_later_id_first_block_without_title_is_rejected_before_persistence(
+        upload_env):
+    malformed = (
+        b"---\nid: valid\ntitle: Valid question\n---\n\nValid body.\n\n"
+        b"---\nid: missing-title\n---\n\nMalformed later body.\n"
+    )
+    client = _instructor_client(upload_env)
+    persistent_path = (
+        upload_env["data_dir"] / upload_env["slug"] / "questions"
+        / "week-1-questions.md"
+    )
+
+    response = _upload(client, malformed)
+
+    assert response.status_code == 422
+    assert "frontmatter" in response.get_json()["error"]
+    assert not persistent_path.exists()
+    assert _question_rows(upload_env) == []

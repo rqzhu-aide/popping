@@ -16,6 +16,7 @@ import json
 import math
 import os
 import random
+import re
 import secrets
 import shutil
 import socket
@@ -252,6 +253,9 @@ class ClassroomSimulator:
         )
         self.action_counts: Counter[str] = Counter()
         self.error_counts: Counter[str] = Counter()
+        self.rejection_counts: Counter[
+            tuple[str, str, int, str]
+        ] = Counter()
         self.total_requests = 0
 
     def seed(self) -> None:
@@ -548,9 +552,123 @@ class ClassroomSimulator:
             self.error_counts[type(exc).__name__] += 1
             return None
 
+    @staticmethod
+    def _rejection_reason(response: httpx.Response) -> str:
+        try:
+            payload = response.json()
+        except (json.JSONDecodeError, ValueError):
+            payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+        parts = [
+            str(payload.get(key) or '').strip()
+            for key in ('error', 'outcome')
+            if payload.get(key)
+        ]
+        reason = re.sub(r'\s+', ' ', ' | '.join(parts)).strip()
+        return reason[:160] or f'HTTP {response.status_code}'
+
+    @staticmethod
+    def _action_expected_eligible(
+        student: StudentBot, operation: str, body: dict[str, Any]
+    ) -> bool:
+        """Re-evaluate an action against the bot's last server state."""
+        state = student.last_state
+        phase = state.get('phase')
+        my_team = state.get('my_team') or {}
+        my_team_id = my_team.get('id')
+        active_team = state.get('active_team') or {}
+        presenting_team = active_team.get('id')
+        presentation_key = str(state.get('poll_question_key') or '')
+
+        if operation == 'student.join_team':
+            return bool(
+                phase == 'setup'
+                and not state.get('teams_locked')
+                and not my_team_id
+                and body.get('team_id')
+            )
+        if operation == 'student.thumb':
+            return bool(phase == 'discussion' and my_team_id)
+        if operation == 'student.raise_hand':
+            return bool(
+                phase == 'competition'
+                and presentation_key
+                and str(body.get('presentation_key') or '')
+                    == presentation_key
+                and my_team_id
+                and presenting_team
+                and my_team_id != presenting_team
+                and not state.get('is_active_challenger')
+            )
+        if operation == 'student.presentation_rating':
+            return bool(
+                phase == 'competition'
+                and state.get('poll_active')
+                and str(body.get('presentation_key') or '')
+                    == presentation_key
+                and presentation_eligible(
+                    int(my_team_id) if my_team_id else 0,
+                    int(presenting_team) if presenting_team else None,
+                )
+            )
+        if operation == 'student.challenge_rating':
+            challenge_key = str(body.get('challenge_key') or '')
+            challenge = next(
+                (
+                    item for item in state.get('active_challenges') or []
+                    if str(item.get('challenge_key') or '') == challenge_key
+                ),
+                None,
+            )
+            challenger_team = (
+                challenge.get('challenger_team_id') if challenge else None
+            )
+            return bool(
+                phase == 'competition'
+                and state.get('challenge_ratings_open')
+                and challenge
+                and challenge_eligible(
+                    int(my_team_id) if my_team_id else 0,
+                    int(presenting_team) if presenting_team else None,
+                    int(challenger_team) if challenger_team else None,
+                )
+            )
+        return False
+
+    def _record_rejection(
+        self,
+        operation: str,
+        response: httpx.Response,
+        expected_eligible: bool,
+    ) -> tuple[str, str]:
+        classification = (
+            'unexpected_while_eligible'
+            if expected_eligible else 'expected_closed'
+        )
+        reason = self._rejection_reason(response)
+        self.rejection_counts[
+            (operation, classification, response.status_code, reason)
+        ] += 1
+        return classification, reason
+
+    def rejection_summary(self) -> dict[str, dict[str, dict[str, int]]]:
+        summary: dict[str, dict[str, dict[str, int]]] = {}
+        for (
+            operation, classification, status_code, reason
+        ), count in sorted(self.rejection_counts.items()):
+            label = f'{status_code}: {reason}'
+            summary.setdefault(operation, {}).setdefault(
+                classification, {}
+            )[label] = count
+        return summary
+
     async def safe_post(
         self, student: StudentBot, operation: str, path: str, body: dict[str, Any]
     ) -> str:
+        expected_eligible = self._action_expected_eligible(
+            student, operation, body
+        )
         for attempt in range(2):
             response = await self.request(
                 student, operation, "POST", path, json=body
@@ -561,13 +679,27 @@ class ClassroomSimulator:
             if response is not None and response.status_code == 401:
                 self.error_counts[f"{operation}_session_lost"] += 1
                 raise RuntimeError(f"{operation} lost the student session")
-            if response is not None and response.status_code in (403, 409):
-                return "closed"
             if (
                 response is not None
-                and response.status_code == 404
-                and operation == "student.challenge_rating"
+                and (
+                    response.status_code in (403, 409)
+                    or (
+                        response.status_code == 404
+                        and operation == "student.challenge_rating"
+                    )
+                )
             ):
+                classification, reason = self._record_rejection(
+                    operation, response, expected_eligible
+                )
+                if classification == 'unexpected_while_eligible':
+                    self.error_counts[
+                        f'{operation}_unexpected_rejection'
+                    ] += 1
+                    raise RuntimeError(
+                        f'{operation} was eligible in the last state but '
+                        f'returned HTTP {response.status_code}: {reason}'
+                    )
                 return "closed"
             if (
                 response is not None
@@ -837,9 +969,21 @@ class ClassroomSimulator:
             return
 
         hand_key = f"hand:{presentation_key}"
+        selected_key = f"selected-challenger:{presentation_key}"
+        selected_as_challenger = bool(state.get("is_active_challenger"))
+        if selected_as_challenger:
+            student.done.add(selected_key)
+        elif selected_key in student.done:
+            # A successful Clear returns this student to the normal state.
+            # Re-arm the simulated hand so the instructor can observe that the
+            # same student is eligible to volunteer again.
+            student.done.discard(selected_key)
+            student.done.discard(hand_key)
+            student.due.pop(hand_key, None)
         team_candidate = student.team_members[0] if student.team_members else None
         if (
             my_team_id != presenting_team
+            and not selected_as_challenger
             and student.student_id == team_candidate
             and hand_key not in student.done
         ):
@@ -1109,6 +1253,7 @@ class ClassroomSimulator:
                     not task.done() for task in self.student_tasks
                 ),
                 "actions_acknowledged": dict(self.action_counts),
+                "rejections": self.rejection_summary(),
                 "errors": dict(self.error_counts),
             },
             "failure": self.failed_reason,
@@ -1449,9 +1594,16 @@ def print_status(current: dict[str, Any]) -> None:
         )
     traffic = current.get("traffic") or {}
     if traffic:
+        rejection_total = sum(
+            count
+            for operation in (traffic.get('rejections') or {}).values()
+            for classification in operation.values()
+            for count in classification.values()
+        )
         print(
             f"Traffic: {traffic.get('requests_last_5s', 0)} requests/5s, "
             f"p95 {traffic.get('p95_ms_last_5s', 0)}ms, "
+            f"rejections {rejection_total}, "
             f"errors {sum((traffic.get('errors') or {}).values())}"
         )
     if current.get("failure"):

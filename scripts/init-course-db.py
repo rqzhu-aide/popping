@@ -19,7 +19,6 @@ COLORS = [
 SLUG_RE = re.compile(r'^[A-Za-z0-9_-]+$')
 MAX_TEAM_POOL_SIZE = 100
 BACKUP_RETENTION = 3
-OFFLINE_CONFIRMATION = 'SERVICE STOPPED'
 DATABASE_SIDECARS = ('-wal', '-shm', '-journal')
 REQUIRED_SCHEMA = {
     'instructors': {'id', 'username', 'name', 'pin'},
@@ -56,7 +55,13 @@ from database import (
     validate_legacy_adoption_candidate,
     validate_schema_compatibility,
 )
-from question_catalog import read_week_questions, validate_question_catalog
+from pin_policy import is_valid_instructor_pin
+from question_catalog import (
+    discover_catalog_weeks,
+    read_week_questions,
+    validate_question_catalog,
+)
+from scripts.maintenance_safety import confirmation_prompt, validate_confirmation
 from versioning import SCHEMA_VERSION
 
 
@@ -156,24 +161,41 @@ def course_defaults(config, team_rows):
     return max_teams, max_members
 
 
-def validate_initial_question_catalog(config_dir, week_num=1):
-    """Validate any initial-week material while allowing a blank new course."""
-    question_path = os.path.join(
-        config_dir, f'week-{week_num}-questions.md'
-    )
-    if not os.path.exists(question_path):
-        return None
+def _bundled_question_weeks(config_dir):
+    """Use the runtime's exact filename discovery and week normalization."""
+    return list(discover_catalog_weeks(config_dir))
 
-    week = validate_question_catalog(
-        config_dir, weeks=[week_num]
-    ).get_week(week_num)
-    if week and week.ready:
-        return week
-    issues = [] if not week else [
-        issue.message for issue in week.discussion.issues
-    ]
-    detail = f": {issues[0]}" if issues else ''
-    raise ValueError(f"Question catalog week {week_num} is not ready{detail}")
+
+def validate_initial_question_catalog(config_dir, week_num=None):
+    """Validate all bundled weekly material while allowing a blank course.
+
+    ``week_num`` remains available for focused callers, while initialization
+    deliberately validates every checked-in weekly file before touching the
+    live database.
+    """
+    weeks = [week_num] if week_num is not None else _bundled_question_weeks(
+        config_dir
+    )
+    if not weeks:
+        return None if week_num is not None else []
+
+    catalog = validate_question_catalog(config_dir, weeks=weeks)
+    validated = []
+    for current_week in weeks:
+        week = catalog.get_week(current_week)
+        if week and week.ready:
+            validated.append(week)
+            continue
+        issues = [] if not week else [
+            issue.message for issue in week.discussion.issues
+        ]
+        detail = f": {issues[0]}" if issues else ''
+        raise ValueError(
+            f"Question catalog week {current_week} is not ready{detail}"
+        )
+    if week_num is not None:
+        return validated[0]
+    return validated
 
 
 def build_candidate_database(
@@ -187,6 +209,10 @@ def build_candidate_database(
     display_name,
     pin,
 ):
+    if not is_valid_instructor_pin(pin):
+        raise ValueError(
+            "Instructor PIN must contain only 4 to 32 digits (0-9)"
+        )
     conn = sqlite3.connect(path)
     try:
         conn.execute('PRAGMA foreign_keys=ON')
@@ -451,13 +477,13 @@ def main(argv=None):
         username = input("Instructor username: ").strip()
         display_name = input("Instructor name: ").strip()
         # Must stay consistent with the instructor login form, which
-        # accepts numeric PINs of 4-32 digits; a PIN outside that range
-        # would be impossible to log in with.
+        # accepts only ASCII digits in a 4-32 character range; a PIN outside
+        # that policy would be impossible to log in with.
         while True:
-            pin = getpass.getpass("Instructor PIN (4-32 digits): ").strip()
-            if re.fullmatch(r"\d{4,32}", pin):
+            pin = getpass.getpass("Instructor PIN (4-32 digits): ")
+            if is_valid_instructor_pin(pin):
                 break
-            print("PIN must be 4 to 32 digits. Try again.")
+            print("PIN must contain only 4 to 32 digits (0-9). Try again.")
         if not username or not display_name:
             raise ValueError("All instructor fields are required")
 
@@ -491,11 +517,14 @@ def main(argv=None):
             if confirmation != config['slug']:
                 print("Cancelled: course slug did not match.")
                 return 1
-            offline_confirmation = input(
-                f"Type {OFFLINE_CONFIRMATION} to confirm all web workers are stopped: "
-            ).strip()
-            if offline_confirmation != OFFLINE_CONFIRMATION:
-                print("Cancelled: web service stop was not confirmed.")
+            offline_confirmation = input(confirmation_prompt()).strip()
+            try:
+                validate_confirmation(
+                    offline_confirmation,
+                    os.path.join(config_dir, 'course.yaml'),
+                )
+            except ValueError as exc:
+                print(f"Cancelled: {exc}.")
                 return 1
             backup_path = create_sqlite_backup(db_path, config['slug'])
             prepare_database_for_replacement(db_path)

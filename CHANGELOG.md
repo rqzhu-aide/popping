@@ -3,6 +3,108 @@
 All notable changes to Popping are recorded here. Releases use semantic
 versions as defined in `VERSIONING.md`.
 
+## [v1.1.7] - 2026-08-23
+
+### Changed
+
+- Kept unchanged student polling compact throughout active rating windows while
+  preserving local countdowns, instructor vote totals, and authoritative close
+  signals.
+
+## [v1.1.6] - 2026-08-23
+
+### Changed
+
+- Improved instructor layout hierarchy, responsive overflow, form labels,
+  keyboard focus, and question accordion accessibility.
+
+### Fixed
+
+- Kept instructor and student questions pinned to the exact requested or saved
+  week and exposed clear readiness details when its canonical file is missing.
+- Hardened credential-bound presence, response security headers, rating input
+  validation, legacy appendix migration, and simulator rejection detection.
+- Stabilized live Student Management refreshes, clamped filtered pagination,
+  and retried instructor actions safely after rating settlement.
+
+## [v1.1.5] - 2026-08-23
+
+### Changed
+
+- Made Clear All Teams atomically lock student team joining while it empties
+  every current assignment, so cleared teams stay empty until the instructor
+  unlocks them.
+- Reorganized Setup roster cards with student ID and team turns on the first
+  row and the student name on the second row.
+
+### Fixed
+
+- Restored team filtering in Student Management for every team name.
+- Added a separator above Reset Course Data in Tools and styled the available
+  reset action in red.
+
+
+## [v1.1.4] - 2026-08-23
+
+### Changed
+
+- Removed individual challenger-turn counts from the instructor Setup roster
+  while retaining them in Student Management and presentation controls.
+- Moved the course reset control into Tools and kept it available only during
+  Setup or after End Session.
+- Made presentation selectors show the share of team members with prior turns,
+  use compact completed labels, and give team and question choices more space.
+
+### Fixed
+
+- Kept live Setup roster refreshes consistent with the initial roster display.
+
+## [v1.1.3] - 2026-08-23
+
+### Fixed
+
+- Restored readable instructor Setup rosters by placing participation badges
+  below each student name instead of compressing names inside four-column team
+  cards.
+- Enforced one active challenge per student and exposed a clear selected status
+  on the student page. Clearing now removes the targeted round, its ratings,
+  and any stale hand together, then allows that student to raise again.
+- Made the Clear control explain that an active poll must be stopped and its
+  final ratings saved before destructive challenge removal.
+
+## [v1.1.2] - 2026-08-23
+
+### Fixed
+
+- Kept Discussion and Presentation on the exact same ordered canonical weekly
+  question set, rejected malformed whole-file updates, and refreshed bundled
+  GitHub questions safely after deployment.
+- Hardened student credential changes, login request checks and throttling,
+  legacy-export limits, historical-week exports, and private demo reuse.
+- Made instructor and student polling recover cleanly, preserved failed
+  appendix submissions without duplicates, and reduced redundant participation
+  requests while keeping compact vote totals.
+- Improved multiline display-math rendering, narrow-screen Markdown and menus,
+  keyboard team assignment, modal focus handling, and blocked-storage fallback.
+- Made `/healthz` verify every active course using the same database identity and
+  schema requirements as login.
+- Required exact single-course backup identity, validated every bundled question
+  week during initialization, hardened course scaffolding, and documented a
+  Render-safe inactive-course maintenance workflow.
+
+## [v1.1.1] - 2026-08-23
+
+### Fixed
+
+- Instructor PIN changes now invalidate existing instructor sessions on their
+  next authenticated request.
+- Enforced one instructor PIN policy across login, course initialization, and
+  command-line PIN recovery: 4-32 ASCII digits (`0-9`) with no whitespace or
+  Unicode-digit variants.
+- Removed the remaining runtime compatibility reader for obsolete pre-rendered
+  question HTML. Canonical `week-N-questions.md` files are now the sole source
+  for weekly question content.
+
 ## [v1.1.0] - 2026-08-21
 
 ### Added
@@ -50,8 +152,8 @@ versions as defined in `VERSIONING.md`.
 
 - Deleted the obsolete pre-rendered question assets (`classes/*/weekN/`
   folders, `question-guide/examples/`, and the legacy authoring guide). The
-  application never read them; the canonical `week-N-questions.md` workflow is
-  now the only documented path.
+  canonical `week-N-questions.md` workflow replaced these assets; v1.1.1
+  removes the remaining runtime compatibility reader.
 
 ## [v1.0.0] - 2026-08-15
 

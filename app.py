@@ -16,6 +16,7 @@ from datetime import datetime, timedelta, timezone
 from functools import wraps
 from fractions import Fraction
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from flask import (
     Flask, render_template, request, redirect,
@@ -42,6 +43,7 @@ from database import (
     query_db,
     SQLITE_BUSY_RETRY_AFTER_SECONDS,
 )
+from pin_policy import is_valid_instructor_pin
 from demo_instance import (
     DemoLifecycleBusy,
     DemoResetCooldown,
@@ -200,6 +202,7 @@ def get_poll_duration(slug):
 # substantially without adding a third-party dependency.
 JSON_COMPRESSION_MIN_BYTES = 500
 LOGIN_FAILURE_LIMIT = 3
+LOGIN_CLIENT_FAILURE_LIMIT = 300
 LOGIN_WINDOW_SECONDS = 60
 MAX_ROSTER_BYTES = 1024 * 1024
 MAX_ROSTER_ROWS = 500
@@ -241,6 +244,8 @@ _demo_instance_touch_lock = threading.Lock()
 _demo_instance_touch_last = {}
 _demo_instance_touch_failed = {}
 _demo_instance_touch_inflight = set()
+_instructor_catalog_sync_lock = threading.Lock()
+_instructor_catalog_sync_attempted = set()
 
 
 def _spreadsheet_safe_value(value):
@@ -346,6 +351,15 @@ def _history_item_is_compatible(item):
 def _positive_lecture_week(value):
     """Return a lecture week only for an exact positive integer value."""
     return value if type(value) is int and value > 0 else None
+
+
+def _rating_integer(value):
+    """Parse one rating without truncating floats or accepting booleans."""
+    if type(value) is int:
+        return value
+    if isinstance(value, str) and re.fullmatch(r'[0-9]+', value.strip()):
+        return int(value.strip())
+    raise ValueError('Rating must be an integer')
 
 
 def _resolve_history_week(item, question_weeks=None, rating_weeks=None):
@@ -888,7 +902,8 @@ def read_presentation_question_index(slug, week_num):
 
 
 def sync_presentation_questions(
-        slug, course_id, week_num, db=None, commit=True):
+        slug, course_id, week_num, db=None, commit=True,
+        bump_discussion_version=False):
     """Sync the canonical weekly file into current presentation rows."""
     owns_transaction = db is None
     if owns_transaction:
@@ -916,6 +931,7 @@ def sync_presentation_questions(
         ]
 
         retained_ids = set()
+        changed = False
         for question in questions:
             source_key = question['source_key']
             row = by_source.get(source_key)
@@ -952,6 +968,7 @@ def sync_presentation_questions(
                     ]
                 )
                 retained_ids.add(cursor.lastrowid)
+                changed = True
             else:
                 retained_ids.add(row['id'])
                 if (row['question_num'] != question['num'] or
@@ -970,12 +987,22 @@ def sync_presentation_questions(
                             question['content'], week_num, source_key, row['id'],
                         ]
                     )
+                    changed = True
 
         for row in existing:
             if (row['id'] not in retained_ids and row['source_key'] and
                     str(row['source_key']).startswith(canonical_prefix)):
                 db.execute('DELETE FROM questions WHERE id = ?', [row['id']])
+                changed = True
 
+        if changed and bump_discussion_version:
+            db.execute(
+                '''UPDATE course_state
+                   SET discussion_questions_version =
+                       COALESCE(discussion_questions_version, 0) + 1
+                   WHERE course_id = ?''',
+                [course_id],
+            )
         if commit:
             db.commit()
         return len(questions)
@@ -1031,7 +1058,9 @@ def _read_appendix_question_rows(slug, week_num):
     return rows
 
 
-def sync_appendix_questions(slug, course_id, week_num, db=None, commit=True):
+def sync_appendix_questions(
+        slug, course_id, week_num, db=None, commit=True,
+        bump_discussion_version=False):
     """Make a week's appendix questions selectable during presentations."""
     owns_transaction = db is None
     if owns_transaction:
@@ -1096,6 +1125,14 @@ def sync_appendix_questions(slug, course_id, week_num, db=None, commit=True):
                 db.execute('DELETE FROM questions WHERE id = ?', [row['id']])
                 changed = True
 
+        if changed and bump_discussion_version:
+            db.execute(
+                '''UPDATE course_state
+                   SET discussion_questions_version =
+                       COALESCE(discussion_questions_version, 0) + 1
+                   WHERE course_id = ?''',
+                [course_id],
+            )
         if commit:
             db.commit()
         return len(desired)
@@ -1105,40 +1142,53 @@ def sync_appendix_questions(slug, course_id, week_num, db=None, commit=True):
         raise
 
 
-# In-memory cache for pre-rendered question HTML files.
-# Without this, /api/state reads the same .html file from disk ~100 times/sec
-# (once per student per poll).  Key: (slug, week_num, question_num).
-_question_html_cache = {}
-
-
-def load_question_html(slug, week_num, question_num):
-    """Read pre-rendered HTML for a question from the week folder.
-
-    Path: classes/<slug>/week<N>/q<NN>.html  (zero-padded, e.g. q01.html)
-    Returns HTML string or None if file not found.
-    Cached results are invalidated when the file changes.
-    """
-    class_slug = canonical_class_slug(slug)
-    cache_key = (class_slug, week_num, question_num)
-    filepath = os.path.join(
-        _course_class_dir(slug), f'week{week_num}', f'q{question_num:02d}.html'
+def _sync_instructor_catalog_once(slug):
+    '''Sync bundled questions once per worker without touching a live turn.'''
+    course = query_db(slug, 'SELECT id FROM courses LIMIT 1', one=True)
+    if not course:
+        return
+    state = query_db(
+        slug,
+        '''SELECT discussion_week, active_question_id FROM course_state
+           WHERE course_id = ?''',
+        [course['id']], one=True,
     )
+    if not state or state['active_question_id']:
+        return
+    week = state['discussion_week'] or 1
+    key = (
+        os.path.abspath(config.CLASSES_DIR), os.path.abspath(config.DATA_DIR),
+        slug, course['id'], week,
+    )
+    with _instructor_catalog_sync_lock:
+        if key in _instructor_catalog_sync_attempted:
+            return
+        if len(_instructor_catalog_sync_attempted) >= COURSE_AVAILABILITY_CACHE_LIMIT:
+            _instructor_catalog_sync_attempted.clear()
+        _instructor_catalog_sync_attempted.add(key)
+
     try:
-        stat = os.stat(filepath)
-        signature = (stat.st_mtime_ns, stat.st_size)
-        cached = _question_html_cache.get(cache_key)
-        if cached and cached['signature'] == signature:
-            return cached['html']
-        with open(filepath, 'r', encoding='utf-8-sig') as f:
-            html = f.read()
-        _question_html_cache[cache_key] = {
-            'signature': signature,
-            'html': html,
-        }
-        return html
-    except (FileNotFoundError, IOError):
-        _question_html_cache.pop(cache_key, None)
-        return None
+        catalog_week = _validate_course_question_catalog(
+            slug, weeks=[week]
+        ).get_week(week)
+        if not catalog_week or not catalog_week.presentation.ready:
+            return
+        sync_presentation_questions(
+            slug, course['id'], week,
+            bump_discussion_version=True,
+        )
+    except (OSError, ValueError, QuestionParseError) as exc:
+        app.logger.warning(
+            'Skipped one-time question sync for %s week %s: %s',
+            slug, week, exc,
+        )
+    except sqlite3.Error:
+        with _instructor_catalog_sync_lock:
+            _instructor_catalog_sync_attempted.discard(key)
+        app.logger.warning(
+            'Deferred one-time question sync for %s week %s',
+            slug, week, exc_info=True,
+        )
 
 
 @app.before_request
@@ -1146,18 +1196,22 @@ def mark_request_arrival():
     g.request_arrived_at = _utcnow()
 
 
-@app.before_request
-def track_student_activity():
-    if _exclusive_session_role() == 'student':
-        _sync_student_activity(session.get('slug'))
-
-
 @app.after_request
 def compress_json_response(response):
     """Gzip sizeable JSON responses when the client advertises support."""
+    response.headers.setdefault('X-Content-Type-Options', 'nosniff')
+    response.headers.setdefault('Referrer-Policy', 'same-origin')
+    response.headers.setdefault('X-Frame-Options', 'DENY')
     response.headers.setdefault(
         'X-Popping-Version', public_version(APP_VERSION)
     )
+    authenticated = (
+        getattr(g, 'authenticated_role', None) is not None
+        or _exclusive_session_role() is not None
+    )
+    if (authenticated and request.endpoint != 'static'
+            and request.path != '/healthz'):
+        response.headers['Cache-Control'] = 'no-store, private'
     if response.direct_passthrough or response.status_code < 200 or response.status_code >= 300:
         return response
     if response.mimetype != 'application/json' or response.headers.get('Content-Encoding'):
@@ -1207,6 +1261,91 @@ def _auth_failure():
     if request.path.startswith('/api/'):
         return jsonify({'error': 'Not logged in'}), 401
     return redirect(url_for('index'))
+
+
+def _instructor_session_token(slug, instructor_id, pin):
+    """Return a credential-bound marker for one instructor session."""
+    secret = app.config['SECRET_KEY']
+    if isinstance(secret, str):
+        secret = secret.encode('utf-8')
+    message = (
+        f'instructor-session\0{slug}\0{instructor_id}\0{pin}'
+    ).encode('utf-8')
+    return hmac.new(secret, message, hashlib.sha256).hexdigest()
+
+
+def _authenticated_instructor(slug):
+    """Return the active instructor only if its login credential is current."""
+    instructor = query_db(
+        slug,
+        '''SELECT i.id, i.pin FROM instructors i
+           JOIN courses c ON c.instructor_id = i.id
+           WHERE i.id = ? AND c.slug = ? AND c.is_active = 1''',
+        [session.get('instructor_id'), slug], one=True
+    )
+    supplied_token = session.get('instructor_auth_token')
+    if (not instructor or not isinstance(supplied_token, str) or
+            not hmac.compare_digest(
+                supplied_token,
+                _instructor_session_token(
+                    slug, instructor['id'], instructor['pin']
+                ),
+            )):
+        session.clear()
+        return None
+    return instructor
+
+
+def _student_session_token(slug, row_id, student_id, pin):
+    '''Return a credential-bound marker for one student session.'''
+    secret = app.config['SECRET_KEY']
+    if isinstance(secret, str):
+        secret = secret.encode('utf-8')
+    message = (
+        f'student-session\0{slug}\0{row_id}\0{student_id}\0{pin}'
+    ).encode('utf-8')
+    return hmac.new(secret, message, hashlib.sha256).hexdigest()
+
+
+def _authenticated_student(slug):
+    '''Return the active student only if its login credential is current.'''
+    student = query_db(
+        slug,
+        '''SELECT s.* FROM students s JOIN courses c ON s.course_id = c.id
+           WHERE s.student_id = ? AND c.slug = ? AND s.is_active = 1
+             AND c.is_active = 1''',
+        [session.get('student_id'), slug], one=True
+    )
+    supplied_token = session.get('student_auth_token')
+    if (not student or not isinstance(supplied_token, str) or
+            not hmac.compare_digest(
+                supplied_token,
+                _student_session_token(
+                    slug, student['id'], student['student_id'], student['pin']
+                ),
+            )):
+        session.clear()
+        return None
+    return student
+
+
+def _login_origin_is_allowed():
+    """Reject login posts with an explicit cross-origin browser source."""
+    source = request.headers.get('Origin') or request.headers.get('Referer')
+    if not source:
+        # Preserve non-browser clients. SameSite=Lax remains the baseline when
+        # a user agent omits both source headers.
+        return True
+    try:
+        supplied = urlsplit(source)
+    except ValueError:
+        return False
+    return (
+        supplied.scheme.casefold() == request.scheme.casefold()
+        and supplied.netloc.casefold() == request.host.casefold()
+        and not supplied.username
+        and not supplied.password
+    )
 
 
 def _login_client_hash():
@@ -1286,6 +1425,29 @@ def _record_login_failure_locked(
     )
 
 
+def _login_client_retry_after_locked(
+        db, course_id, login_type, client_hash, now):
+    '''Bound rapid principal rotation from one client without new schema.'''
+    window_start = now - timedelta(seconds=LOGIN_WINDOW_SECONDS)
+    rows = db.execute(
+        '''SELECT failed_count, window_started_at FROM login_attempts
+           WHERE course_id = ? AND login_type = ? AND client_hash = ?''',
+        [course_id, login_type, client_hash],
+    ).fetchall()
+    active = []
+    for row in rows:
+        started_at = _parse_db_datetime(row['window_started_at'])
+        if started_at and started_at > window_start:
+            active.append((row['failed_count'], started_at))
+    if sum(count for count, _started_at in active) < LOGIN_CLIENT_FAILURE_LIMIT:
+        return 0
+    earliest_expiry = min(
+        started_at + timedelta(seconds=LOGIN_WINDOW_SECONDS)
+        for _count, started_at in active
+    )
+    return max(1, int((earliest_expiry - now).total_seconds()) + 1)
+
+
 def _authenticate_with_throttle(
         slug, course_id, login_type, principal, client_hash,
         lookup_sql, lookup_params, touch_student=False):
@@ -1294,8 +1456,13 @@ def _authenticate_with_throttle(
     db.execute('BEGIN IMMEDIATE')
     try:
         now = _utcnow()
-        retry_after = _login_retry_after_locked(
-            db, course_id, login_type, principal, client_hash, now
+        retry_after = max(
+            _login_retry_after_locked(
+                db, course_id, login_type, principal, client_hash, now
+            ),
+            _login_client_retry_after_locked(
+                db, course_id, login_type, client_hash, now
+            ),
         )
         if retry_after:
             db.commit()
@@ -1382,17 +1549,12 @@ def student_login_required(f):
         if not _session_course_is_ready(slug):
             return _auth_failure()
         ensure_schema(slug)
-        student = query_db(
-            slug,
-            '''SELECT s.* FROM students s JOIN courses c ON s.course_id = c.id
-               WHERE s.student_id = ? AND c.slug = ? AND s.is_active = 1
-                 AND c.is_active = 1''',
-            [session['student_id'], slug], one=True
-        )
+        student = _authenticated_student(slug)
         if not student:
-            session.clear()
             return _auth_failure()
         g.current_student = student
+        g.authenticated_role = 'student'
+        _sync_student_activity(slug)
         return f(*args, **kwargs)
     return decorated
 
@@ -1407,18 +1569,26 @@ def instructor_login_required(f):
             return _auth_failure()
         if not _session_course_is_ready(slug):
             return _auth_failure()
-        instructor = query_db(
-            slug,
-            '''SELECT i.id FROM instructors i JOIN courses c ON c.instructor_id = i.id
-               WHERE i.id = ? AND c.slug = ? AND c.is_active = 1''',
-            [session['instructor_id'], slug], one=True
-        )
+        instructor = _authenticated_instructor(slug)
         if not instructor:
-            session.clear()
             return _auth_failure()
         ensure_schema(slug)
+        g.authenticated_role = 'instructor'
         return f(*args, **kwargs)
     return decorated
+
+
+def _course_with_config_metadata(course, course_config):
+    """Overlay current display metadata without rewriting durable DB history."""
+    if not course:
+        return course
+    effective = dict(course)
+    if isinstance(course_config, dict):
+        for field in ('name', 'code', 'semester'):
+            value = course_config.get(field)
+            if isinstance(value, str) and value.strip():
+                effective[field] = value.strip()
+    return effective
 
 
 def _inspect_course_availability(slug):
@@ -1431,6 +1601,7 @@ def _inspect_course_availability(slug):
         'config': None,
         'course': None,
         'has_db': False,
+        'actual_schema_version': None,
     }
     if not is_valid_slug(slug):
         return result
@@ -1505,15 +1676,7 @@ def _inspect_course_availability(slug):
         if recorded_version is None:
             validate_legacy_adoption_candidate(connection)
         actual_schema_version = recorded_version or BASELINE_SCHEMA_VERSION
-        if actual_schema_version != SCHEMA_VERSION:
-            result.update({
-                'status': 'migration_required',
-                'message': (
-                    'Course database maintenance is required before login.'
-                ),
-            })
-            return result
-        validate_current_schema(connection)
+        result['actual_schema_version'] = actual_schema_version
         rows = connection.execute(
             '''SELECT c.*, i.name AS instructor_name
                FROM courses c
@@ -1529,10 +1692,19 @@ def _inspect_course_availability(slug):
         if (len(state_rows) != 1 or
                 state_rows[0]['course_id'] != rows[0]['id']):
             return result
+        if actual_schema_version != SCHEMA_VERSION:
+            result.update({
+                'status': 'migration_required',
+                'message': (
+                    'Course database maintenance is required before login.'
+                ),
+            })
+            return result
+        validate_current_schema(connection)
         result.update({
             'status': 'ready',
             'message': '',
-            'course': dict(rows[0]),
+            'course': _course_with_config_metadata(rows[0], course_config),
         })
     except (OSError, sqlite3.OperationalError):
         result.update({
@@ -1619,7 +1791,7 @@ def _scan_courses():
 
 @app.route('/healthz')
 def healthz():
-    """Lightweight readiness check for configured persistent course databases."""
+    """Readiness check using the same identity invariants as course login."""
     if (not os.path.isdir(config.CLASSES_DIR)
             or not os.path.isdir(config.DATA_DIR)):
         return jsonify({'status': 'unavailable'}), 503
@@ -1630,48 +1802,21 @@ def healthz():
         for slug in sorted(os.listdir(config.CLASSES_DIR)):
             if slug == 'demo' or not is_valid_slug(slug):
                 continue
-            yaml_path = os.path.join(
-                _course_class_dir(slug), 'course.yaml'
-            )
+            yaml_path = os.path.join(_course_class_dir(slug), 'course.yaml')
             if not os.path.isfile(yaml_path):
                 continue
-            with open(yaml_path, encoding='utf-8') as config_file:
-                course_config = yaml.safe_load(config_file)
-            if (not isinstance(course_config, dict)
-                    or course_config.get('active') is not True):
-                continue
-            if course_config.get('slug') != slug:
-                return jsonify({'status': 'unavailable'}), 503
 
-            db_path = course_db_path(slug)
-            if not db_path or not os.path.isfile(db_path):
+            availability = _inspect_course_availability(slug)
+            course_config = availability.get('config')
+            if (isinstance(course_config, dict)
+                    and course_config.get('active') is not True):
+                continue
+            if availability['status'] not in ('ready', 'migration_required'):
                 return jsonify({'status': 'unavailable'}), 503
-            connection = None
-            try:
-                db_uri = f'{Path(db_path).resolve().as_uri()}?mode=ro'
-                connection = sqlite3.connect(db_uri, uri=True, timeout=1)
-                connection.row_factory = sqlite3.Row
-                connection.execute('PRAGMA query_only = ON')
-                recorded_version = inspect_schema_version(
-                    connection, allow_unversioned=True
-                )
-                if recorded_version is None:
-                    validate_legacy_adoption_candidate(connection)
-                actual_schema_version = recorded_version or BASELINE_SCHEMA_VERSION
-                if actual_schema_version == SCHEMA_VERSION:
-                    validate_current_schema(connection)
-                course_schema_versions[slug] = actual_schema_version
-                has_course = connection.execute(
-                    'SELECT 1 FROM courses LIMIT 1'
-                ).fetchone()
-                has_state = connection.execute(
-                    'SELECT 1 FROM course_state LIMIT 1'
-                ).fetchone()
-                if not has_course or not has_state:
-                    return jsonify({'status': 'unavailable'}), 503
-            finally:
-                if connection is not None:
-                    connection.close()
+            actual_schema_version = availability.get('actual_schema_version')
+            if not actual_schema_version:
+                return jsonify({'status': 'unavailable'}), 503
+            course_schema_versions[slug] = actual_schema_version
             checked += 1
     except (OSError, UnicodeError, yaml.YAMLError, sqlite3.Error, RuntimeError):
         return jsonify({'status': 'unavailable'}), 503
@@ -1729,9 +1874,14 @@ def login(slug):
         flash(availability['message'], 'error')
         return redirect(url_for('index'))
     ensure_schema(slug)
-    course = query_db(slug, 'SELECT * FROM courses WHERE slug = ?', [slug], one=True)
+    course = _course_with_config_metadata(
+        query_db(slug, 'SELECT * FROM courses WHERE slug = ?', [slug], one=True),
+        availability.get('config'),
+    )
 
     if request.method == 'POST':
+        if not _login_origin_is_allowed():
+            return 'Forbidden', 403
         student_id = request.form.get('student_id', '').strip()
         pin = request.form.get('pin', '').strip()
         if not student_id or not pin:
@@ -1761,6 +1911,9 @@ def login(slug):
             session['student_id'] = student['student_id']
             session['name'] = student['name'] or student['student_id']
             session['slug'] = slug
+            session['student_auth_token'] = _student_session_token(
+                slug, student['id'], student['student_id'], student['pin']
+            )
             return redirect(url_for('dashboard'))
         flash('Invalid login for this course.', 'error')
         return redirect(url_for('login', slug=slug))
@@ -1775,14 +1928,20 @@ def instructor_login(slug):
         flash(availability['message'], 'error')
         return redirect(url_for('index'))
     ensure_schema(slug)
-    course = query_db(slug, 'SELECT * FROM courses WHERE slug = ?', [slug], one=True)
+    course = _course_with_config_metadata(
+        query_db(slug, 'SELECT * FROM courses WHERE slug = ?', [slug], one=True),
+        availability.get('config'),
+    )
 
     if request.method == 'POST':
+        if not _login_origin_is_allowed():
+            return 'Forbidden', 403
         username = request.form.get('username', '').strip()
-        pin = request.form.get('pin', '').strip()
+        pin = request.form.get('pin', '')
         if not username or not pin:
             flash('Please enter both username and PIN.', 'error')
             return redirect(url_for('instructor_login', slug=slug))
+        lookup_pin = pin if is_valid_instructor_pin(pin) else None
         principal = username.casefold()[:200]
         client_hash = _login_client_hash()
         instructor, retry_after = _authenticate_with_throttle(
@@ -1794,7 +1953,7 @@ def instructor_login(slug):
             '''SELECT i.* FROM instructors i
                JOIN courses c ON c.instructor_id = i.id
                WHERE i.username = ? AND i.pin = ? AND c.slug = ?''',
-            [username, pin, slug],
+            [username, lookup_pin, slug],
         )
         if retry_after:
             return _rate_limited_login_response(
@@ -1806,6 +1965,9 @@ def instructor_login(slug):
             session['instructor_id'] = instructor['id']
             session['instructor_name'] = instructor['name']
             session['slug'] = slug
+            session['instructor_auth_token'] = _instructor_session_token(
+                slug, instructor['id'], instructor['pin']
+            )
             return redirect(url_for('instructor_course', slug=slug))
         flash('Invalid login for this course.', 'error')
         return redirect(url_for('instructor_login', slug=slug))
@@ -1818,14 +1980,30 @@ def demo():
     return render_template('demo.html', instance_slug=None)
 
 
+def _remembered_demo_instance():
+    for candidate in (
+            session.get('demo_instance_slug'), session.get('slug')):
+        if is_demo_instance_slug(candidate):
+            return candidate
+    return None
+
+
+def _clear_session_preserving_demo_instance(instance_slug=None):
+    remembered = instance_slug or _remembered_demo_instance()
+    session.clear()
+    if is_demo_instance_slug(remembered):
+        session['demo_instance_slug'] = remembered
+
+
 @app.route('/demo/start', methods=['POST'])
 def demo_start():
-    """Create one bounded, private demo database without spawning a process."""
+    """Create or reuse one bounded private demo without spawning a process."""
     try:
         instance_slug, removed = create_bounded_demo_instance(
             config.DATA_DIR,
             config.CLASSES_DIR,
             config.DATABASE_SCHEMA,
+            reuse_slug=_remembered_demo_instance(),
         )
     except DemoLifecycleBusy:
         flash('A demo is being prepared. Please try again in a moment.', 'error')
@@ -1843,7 +2021,7 @@ def demo_start():
         return redirect(url_for('demo'))
     _clear_course_availability_cache(instance_slug)
 
-    session.clear()
+    _clear_session_preserving_demo_instance(instance_slug)
     return redirect(url_for(
         'demo_instance_home', instance_slug=instance_slug
     ))
@@ -1900,6 +2078,7 @@ def demo_instance_home(instance_slug):
     except OSError:
         flash('This private demo is no longer available.', 'error')
         return redirect(url_for('demo'))
+    session['demo_instance_slug'] = instance_slug
     return render_template('demo.html', instance_slug=instance_slug)
 
 
@@ -1913,15 +2092,22 @@ def _start_demo_session(instance_slug, role, principal):
 
     session.clear()
     session['slug'] = instance_slug
+    session['demo_instance_slug'] = instance_slug
     session['role'] = role
     session['is_demo'] = True
     if role == 'instructor':
         session['instructor_id'] = principal['id']
         session['instructor_name'] = principal['name']
+        session['instructor_auth_token'] = _instructor_session_token(
+            instance_slug, principal['id'], principal['pin']
+        )
         return redirect(url_for('instructor_course', slug=instance_slug))
 
     session['student_id'] = principal['student_id']
     session['name'] = principal['name'] or principal['student_id']
+    session['student_auth_token'] = _student_session_token(
+        instance_slug, principal['id'], principal['student_id'], principal['pin']
+    )
     execute_db(
         instance_slug,
         'UPDATE students SET last_login_at = CURRENT_TIMESTAMP WHERE id = ?',
@@ -1971,8 +2157,8 @@ def legacy_demo_role():
 
 @app.route('/demo/exit', methods=['POST'])
 def demo_exit():
-    """Exit demo mode, leaving the private instance for its short TTL."""
-    session.clear()
+    """Exit demo mode while retaining this browser's private demo slot."""
+    _clear_session_preserving_demo_instance()
     return redirect(url_for('demo'))
 
 
@@ -2002,7 +2188,7 @@ def demo_reset(instance_slug):
             'demo_instance_home', instance_slug=instance_slug
         ))
 
-    session.clear()
+    _clear_session_preserving_demo_instance(instance_slug)
     return redirect(url_for(
         'demo_instance_home', instance_slug=instance_slug
     ))
@@ -2016,7 +2202,10 @@ def legacy_demo_reset():
 
 @app.route('/logout', methods=['POST'])
 def logout():
-    session.clear()
+    if session.get('is_demo') or _remembered_demo_instance():
+        _clear_session_preserving_demo_instance()
+    else:
+        session.clear()
     return redirect(url_for('index'))
 
 
@@ -2035,7 +2224,10 @@ def dashboard():
         team = query_db(slug,
             'SELECT * FROM teams WHERE id = ?', [student['team_id']], one=True
         )
-    course = query_db(slug, 'SELECT * FROM courses WHERE slug = ?', [slug], one=True)
+    course = _course_with_config_metadata(
+        query_db(slug, 'SELECT * FROM courses WHERE slug = ?', [slug], one=True),
+        _course_availability(slug).get('config'),
+    )
     state = query_db(slug,
         'SELECT * FROM course_state WHERE course_id = ?', [course['id']], one=True
     )
@@ -2075,7 +2267,10 @@ def instructor_course(slug):
         flash('Unauthorized.', 'error')
         return redirect(url_for('index'))
 
-    course = query_db(slug, 'SELECT * FROM courses WHERE slug = ?', [slug], one=True)
+    course = _course_with_config_metadata(
+        query_db(slug, 'SELECT * FROM courses WHERE slug = ?', [slug], one=True),
+        _course_availability(slug).get('config'),
+    )
     ensure_schema(slug)
     teams = query_db(slug,
         'SELECT * FROM teams WHERE course_id = ? ORDER BY id', [course['id']]
@@ -2117,9 +2312,15 @@ def instructor_course(slug):
     if (not state or state['phase'] != 'competition' or
             not state['active_question_id']):
         if presentation_catalog_ready:
-            sync_presentation_questions(slug, course['id'], selected_week)
+            sync_presentation_questions(
+                slug, course['id'], selected_week,
+                bump_discussion_version=True,
+            )
         try:
-            sync_appendix_questions(slug, course['id'], selected_week)
+            sync_appendix_questions(
+                slug, course['id'], selected_week,
+                bump_discussion_version=True,
+            )
         except QuestionParseError as exc:
             flash(f'Appendix question file needs attention: {exc}', 'error')
     max_teams = get_max_teams(slug, course['id'])
@@ -2139,6 +2340,13 @@ def instructor_course(slug):
         [course['id'], selected_week, f'week-{selected_week}-q-%',
          state['active_question_id'] if state else None]
     )
+    if not presentation_catalog_ready:
+        active_question_id = state['active_question_id'] if state else None
+        questions = [
+            question for question in questions
+            if str(question['source_key'] or '').startswith('appendix:')
+            or question['id'] == active_question_id
+        ]
     cutoff = (_utcnow() - timedelta(minutes=3)).strftime('%Y-%m-%d %H:%M:%S')
     participation_counts = _participation_counts_by_student(
         get_db(slug), course['id'], [student['id'] for student in students]
@@ -2234,28 +2442,17 @@ def _authenticated_role(slug):
     if role:
         ensure_schema(slug)
     if role == 'student' and session.get('student_id'):
-        row = query_db(
-            slug,
-            '''SELECT s.* FROM students s JOIN courses c ON c.id = s.course_id
-               WHERE s.student_id = ? AND c.slug = ? AND s.is_active = 1
-                 AND c.is_active = 1''',
-            [session['student_id'], slug], one=True
-        )
+        row = _authenticated_student(slug)
         if row:
             g.current_student = row
+            g.authenticated_role = 'student'
+            _sync_student_activity(slug)
             return 'student'
-        session.clear()
         return None
     if role == 'instructor' and session.get('instructor_id'):
-        row = query_db(
-            slug,
-            '''SELECT id FROM courses
-               WHERE slug = ? AND instructor_id = ? AND is_active = 1''',
-            [slug, session['instructor_id']], one=True
-        )
-        if row:
+        if _authenticated_instructor(slug):
+            g.authenticated_role = 'instructor'
             return 'instructor'
-        session.clear()
         return None
     return None
 
@@ -2606,6 +2803,7 @@ def _compute_state(slug, include_poll_count=True, known_question_id=None,
             'SELECT * FROM teams WHERE id = ?', [state['active_team_id']], one=True)
 
     my_team = None
+    me = None
     if session.get('role') == 'student' and 'student_id' in session:
         me = getattr(g, 'current_student', None)
         if me is None:
@@ -2622,19 +2820,9 @@ def _compute_state(slug, include_poll_count=True, known_question_id=None,
             'SELECT * FROM questions WHERE id = ?', [state['active_question_id']], one=True)
         if aq:
             full_question = dict(aq)
-            week = full_question.get(
-                'week_num',
-                state['discussion_week'] if state and state['discussion_week'] else 1
-            )
-            source_key = full_question.get('source_key') or ''
-            html = None
-            if source_key.startswith('presentation:'):
-                html = load_question_html(slug, week, full_question['question_num'])
-                if html:
-                    full_question['html_content'] = html
             revision_source = '\0'.join(str(value or '') for value in (
                 full_question.get('title'), full_question.get('question_text'),
-                full_question.get('content'), html,
+                full_question.get('content'),
             ))
             revision = hashlib.sha256(
                 revision_source.encode('utf-8')
@@ -2688,6 +2876,10 @@ def _compute_state(slug, include_poll_count=True, known_question_id=None,
             and item.get('session_key', 0) == current_session_key)
     ]
 
+    active_challenges = (
+        json.loads(state['active_challenges_json'] or '[]')
+        if state else []
+    )
     result = {
         'phase': state['phase'] if state else 'setup',
         'active_team': dict(active_team) if active_team else None,
@@ -2719,10 +2911,7 @@ def _compute_state(slug, include_poll_count=True, known_question_id=None,
         'session_elapsed': timing['session_elapsed'],
         'presentation_history': history,
         # Challenge feature: active challengers for this presentation.
-        'active_challenges': (
-            json.loads(state['active_challenges_json'] or '[]')
-            if state else []
-        ),
+        'active_challenges': active_challenges,
         'challenge_ratings_open': bool(
             state and _has_active_challenges(state)
             and _challenge_ratings_are_open(
@@ -2732,6 +2921,13 @@ def _compute_state(slug, include_poll_count=True, known_question_id=None,
         # Internal metadata used by api_poll for ended-phase ranking.
         '_course_id': state['course_id'] if state else None,
     }
+    if me:
+        my_student_id = str(me['id'])
+        result['is_active_challenger'] = any(
+            isinstance(challenge, dict) and
+            str(challenge.get('challenger_id')) == my_student_id
+            for challenge in active_challenges
+        )
     if include_poll_count:
         result['poll_count'] = poll_count or 0
         cid = state['course_id'] if state else None
@@ -3203,6 +3399,8 @@ def api_poll():
     ensure_schema(slug)
 
     is_instructor = role == 'instructor'
+    if is_instructor:
+        _sync_instructor_catalog_once(slug)
 
     # --- Cheap "nothing changed" path (students only) ---
     # A student that already has a full snapshot may send ``since=<version>``.
@@ -3230,8 +3428,10 @@ def api_poll():
             version_row['phase'] or 'setup'
         ) if version_row else 'setup'
         # An open rating window's expiry is *derived* from time, so it can flip
-        # without a course_state write. Stay on the full path while it could
-        # matter so students see the window close promptly.
+        # without a course_state write. Students already run the countdown
+        # locally, so an unchanged version can still use the compact path. The
+        # poll_closed flag below supplies the authoritative close signal when
+        # the server-side cutoff is reached.
         poll_window_persisted = bool(
             version_row
             and version_row['poll_active']
@@ -3243,8 +3443,7 @@ def api_poll():
             poll_duration=get_poll_duration(slug),
         )
         if (version_row is not None
-                and current_version == known_version
-                and not poll_window_live):
+                and current_version == known_version):
             # Keep presence fresh. This is throttled to ~30s and only touches
             # the students table (no course_state write), so the state-version
             # short-circuit above stays valid.
@@ -4616,6 +4815,13 @@ def discussion_questions():
     saved_week = state['discussion_week'] if state and state['discussion_week'] else 1
     version = (state['discussion_questions_version'] or 0) if state else 0
 
+    selected_week = saved_week
+    if role == 'instructor' and week_param is not None:
+        normalized_week = week_param.strip()
+        if not re.fullmatch(r'[1-9]\d*', normalized_week):
+            return jsonify({'error': 'Week must be a positive integer'}), 400
+        selected_week = int(normalized_week)
+
     catalog_weeks = None if role == 'instructor' else [saved_week]
     try:
         catalog = _validate_course_question_catalog(
@@ -4623,6 +4829,23 @@ def discussion_questions():
         )
     except (OSError, ValueError) as exc:
         return jsonify({'error': f'Could not validate question catalog: {exc}'}), 422
+
+    target = catalog.get_week(selected_week)
+    if target is None:
+        try:
+            target = _validate_course_question_catalog(
+                slug, weeks=[selected_week]
+            ).get_week(selected_week)
+        except (OSError, ValueError) as exc:
+            return jsonify({
+                'error': f'Could not validate question catalog: {exc}'
+            }), 422
+
+    catalog_statuses = list(catalog.weeks)
+    if (target is not None
+            and all(week.week != target.week for week in catalog_statuses)):
+        catalog_statuses.append(target)
+        catalog_statuses.sort(key=lambda week: week.week)
 
     questions_list = []
     weeks = [
@@ -4634,15 +4857,8 @@ def discussion_questions():
             'presentation_ready': week.presentation.ready,
             'issues': [issue.message for issue in week.discussion.issues],
         }
-        for week in catalog.weeks
+        for week in catalog_statuses
     ]
-
-    if role == 'instructor' and week_param and weeks:
-        target = next((w for w in weeks if str(w['num']) == str(week_param)), weeks[0])
-    elif weeks:
-        target = next((w for w in weeks if w['num'] == saved_week), weeks[0])
-    else:
-        target = None
 
     def _load_md(filepath, week, is_appendix=False):
         """Load questions with stable keys plus current legacy aliases."""
@@ -4719,12 +4935,12 @@ def discussion_questions():
         return out
 
     try:
-        if target and target['discussion_ready']:
-            q_path = _resolve_week_question_path(slug, target['num'])
-            questions_list = _load_md(q_path, target['num'])
+        if target and target.discussion.ready:
+            q_path = _resolve_week_question_path(slug, target.week)
+            questions_list = _load_md(q_path, target.week)
 
         # Load appendix from the persistent data disk (survives deploys)
-        appendix_week = target['num'] if target else saved_week
+        appendix_week = selected_week
         appendix_path = _appendix_path(slug, appendix_week)
         appendix = _load_md(
             appendix_path, appendix_week, is_appendix=True
@@ -4733,41 +4949,50 @@ def discussion_questions():
     except QuestionParseError as exc:
         return jsonify({'error': str(exc)}), 422
 
-    hidden_keys = {
-        row['question_key'] for row in query_db(
-            slug,
-            '''SELECT question_key FROM hidden_discussion_questions
-               WHERE course_id = ? AND week_num = ?''',
-            [course['id'], appendix_week])
-    }
-    stable_keys = {q['key'] for q in questions_list}
-    aliases_to_migrate = set()
-    for display_number, q in enumerate(questions_list, 1):
-        q['display_number'] = display_number
-        matching_aliases = {
-            key for key in hidden_keys
-            if key not in stable_keys and (
-                key in q['_legacy_keys'] or
-                _is_legacy_question_alias(key, q['_legacy_prefix'])
-            )
-        }
-        q['hidden'] = q['key'] in hidden_keys or bool(matching_aliases)
-        aliases_to_migrate.update(
-            (alias, q['key']) for alias in matching_aliases
+    for display_number, question in enumerate(questions_list, 1):
+        question['display_number'] = display_number
+        question['hidden'] = False
+        question['source'] = (
+            'appendix' if 'appendix_id' in question else 'bank'
         )
-        q['source'] = 'appendix' if 'appendix_id' in q else 'bank'
-        q.pop('_legacy_keys', None)
-        q.pop('_legacy_prefix', None)
-    _migrate_hidden_question_aliases(
-        slug, course['id'], appendix_week, aliases_to_migrate
-    )
+        question.pop('_legacy_keys', None)
+        question.pop('_legacy_prefix', None)
+
+    if role == 'instructor' and questions_list:
+        presentation_rows = query_db(
+            slug,
+            '''SELECT id, source_key FROM questions
+               WHERE course_id = ? AND COALESCE(week_num, 1) = ?
+                 AND (source_key LIKE ? OR source_key LIKE ?)''',
+            [
+                course['id'], selected_week,
+                f'week-{selected_week}-q-%',
+                f'appendix:{selected_week}:%',
+            ],
+        )
+        question_ids = {
+            row['source_key']: row['id'] for row in presentation_rows
+        }
+        for question in questions_list:
+            presentation_source_key = (
+                f"appendix:{selected_week}:{question['appendix_id']}"
+                if question.get('appendix_id') else question['key']
+            )
+            question['question_id'] = question_ids.get(
+                presentation_source_key
+            )
+
     if role == 'student':
-        questions_list = [q for q in questions_list if not q['hidden']]
         weeks = []
 
     return jsonify({
         'weeks': weeks,
         'current_week': appendix_week,
+        'ready': bool(target and target.discussion.ready),
+        'issues': (
+            [issue.message for issue in target.discussion.issues]
+            if target else [f'Week {selected_week} questions are not ready']
+        ),
         'version': version,
         'questions': questions_list,
     })
@@ -4776,11 +5001,10 @@ def discussion_questions():
 @app.route('/api/toggle_discussion_question', methods=['POST'])
 @instructor_login_required
 def toggle_discussion_question():
-    """Show or hide one discussion question for students."""
+    '''Keep the retired visibility endpoint harmless for older clients.'''
     slug = session['slug']
     data = request.get_json(silent=True) or {}
     question_key = str(data.get('question_key') or '').strip()
-    visible = bool(data.get('visible'))
     if not question_key:
         return jsonify({'error': 'question_key is required'}), 400
     ensure_schema(slug)
@@ -4797,47 +5021,56 @@ def toggle_discussion_question():
             db.rollback()
             return jsonify({'error': guard[0]}), guard[1]
         week = state['discussion_week'] if state and state['discussion_week'] else 1
-        if visible:
-            db.execute(
-                '''DELETE FROM hidden_discussion_questions
-                   WHERE course_id = ? AND week_num = ?
-                     AND (question_key = ? OR question_key GLOB ?)''',
-                [course['id'], week, question_key,
-                 _legacy_question_alias_glob(f'{question_key}-')])
-        else:
-            db.execute(
-                '''INSERT OR IGNORE INTO hidden_discussion_questions
-                   (course_id, week_num, question_key) VALUES (?, ?, ?)''',
-                [course['id'], week, question_key])
-            db.execute(
-                '''DELETE FROM hidden_discussion_questions
-                   WHERE course_id = ? AND week_num = ?
-                     AND question_key GLOB ?''',
-                [course['id'], week,
-                 _legacy_question_alias_glob(f'{question_key}-')])
-        _bump_discussion_questions_version(db, course['id'])
+        cursor = db.execute(
+            '''DELETE FROM hidden_discussion_questions
+               WHERE course_id = ? AND week_num = ?
+                 AND (question_key = ? OR question_key GLOB ?)''',
+            [course['id'], week, question_key,
+             _legacy_question_alias_glob(f'{question_key}-')],
+        )
+        if cursor.rowcount:
+            _bump_discussion_questions_version(db, course['id'])
         db.commit()
     except Exception:
         db.rollback()
         raise
-    return jsonify({'success': True})
+    return jsonify({
+        'success': True,
+        'visible': True,
+        'hide_supported': False,
+    })
 
 
 def _appendix_dir(slug):
     """Directory for appendix question files on the persistent data disk."""
     d = os.path.join(config.DATA_DIR, slug, 'appendix')
     os.makedirs(d, exist_ok=True)
-    # Copy legacy appendix seeds to the data disk without changing source files.
+    # Publish legacy appendix seeds atomically without changing source files.
+    # Linking a fully written temporary file creates the destination only if
+    # another worker has not already published it.
     for week in range(1, 20):
         old = os.path.join(_course_class_dir(slug), f'week-{week}-appendix.md')
         if os.path.exists(old):
             new = os.path.join(d, f'week-{week}-appendix.md')
             if not os.path.exists(new):
-                import shutil
-                if is_demo_instance_slug(slug):
-                    shutil.copyfile(old, new)
-                else:
-                    shutil.move(old, new)
+                temporary = os.path.join(
+                    d, f'.week-{week}-appendix.{uuid.uuid4().hex}.tmp'
+                )
+                try:
+                    with open(old, 'rb') as source, open(temporary, 'xb') as target:
+                        for chunk in iter(lambda: source.read(1024 * 1024), b''):
+                            target.write(chunk)
+                        target.flush()
+                        os.fsync(target.fileno())
+                    try:
+                        os.link(temporary, new)
+                    except FileExistsError:
+                        pass
+                finally:
+                    try:
+                        os.remove(temporary)
+                    except FileNotFoundError:
+                        pass
     return d
 
 
@@ -4854,6 +5087,15 @@ def add_question():
     data = request.get_json(silent=True) or {}
     title = str(data.get('title') or '').strip()
     content = str(data.get('content') or '').strip()
+    raw_client_request_id = data.get(
+        'client_request_id', data.get('request_key')
+    )
+    client_request_id = None
+    if raw_client_request_id is not None:
+        client_request_id = str(raw_client_request_id).strip()
+        if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._:-]{0,127}',
+                            client_request_id):
+            return jsonify({'error': 'Invalid client_request_id'}), 400
     try:
         requested_week = int(data.get('week'))
     except (TypeError, ValueError):
@@ -4892,7 +5134,9 @@ def add_question():
             if original_content.strip() else []
 
         highest_label = 0
-        for position, (frontmatter, _body) in enumerate(existing_entries, 1):
+        replayed_label = None
+        for position, (frontmatter, existing_body) in enumerate(
+                existing_entries, 1):
             metadata = yaml.safe_load(frontmatter) or {}
             match = re.match(
                 r'^A(\d+)\s*:', str(metadata.get('title') or ''), re.IGNORECASE
@@ -4901,10 +5145,60 @@ def add_question():
                 raise QuestionParseError(
                     f'Appendix question {position} must start with an A-number label'
                 )
-            highest_label = max(highest_label, int(match.group(1)))
+            label_number = int(match.group(1))
+            highest_label = max(highest_label, label_number)
+            stored_request_id = str(
+                metadata.get('client_request_id')
+                or metadata.get('request_key')
+                or ''
+            ).strip()
+            if client_request_id and stored_request_id == client_request_id:
+                if replayed_label is not None:
+                    raise QuestionParseError(
+                        'Duplicate appendix client_request_id in the file'
+                    )
+                replayed_label = f'A{label_number}'
+                expected_title = f'{replayed_label}: {title}'
+                if (str(metadata.get('title') or '').strip() != expected_title
+                        or existing_body.strip() != content):
+                    db.rollback()
+                    return jsonify({
+                        'error': (
+                            'client_request_id was already used for a '
+                            'different appendix question'
+                        )
+                    }), 409
+
+        if replayed_label is not None:
+            sync_appendix_questions(
+                slug, course['id'], week, db=db, commit=False,
+                bump_discussion_version=True,
+            )
+            question_row = db.execute(
+                '''SELECT id, title FROM questions
+                   WHERE course_id = ? AND source_key = ?''',
+                [course['id'], f'appendix:{week}:{replayed_label}']
+            ).fetchone()
+            db.commit()
+            return jsonify({
+                'success': True,
+                'replayed': True,
+                'label': replayed_label,
+                'appendix_id': replayed_label,
+                'question_id': question_row['id'] if question_row else None,
+                'title': (
+                    question_row['title'] if question_row
+                    else f'{replayed_label}: {title}'
+                ),
+            })
 
         label = f'A{highest_label + 1}'
-        frontmatter = f'title: {json.dumps(f"{label}: {title}")}'
+        metadata = {'title': f'{label}: {title}'}
+        if client_request_id:
+            metadata['client_request_id'] = client_request_id
+        frontmatter = yaml.safe_dump(
+            metadata, allow_unicode=True, sort_keys=False
+        ).strip()
         new_entries = existing_entries + [(frontmatter, content)]
         _write_text_atomic(
             appendix_path, _serialize_question_blocks(new_entries)
@@ -4924,6 +5218,7 @@ def add_question():
         db.commit()
         return jsonify({
             'success': True,
+            'replayed': False,
             'label': label,
             'appendix_id': label,
             'question_id': question_row['id'] if question_row else None,
@@ -5162,6 +5457,7 @@ def edit_appendix_question():
                 )
                 selected_index = index
                 selected_label = identity
+                selected_metadata = dict(metadata)
                 selected_key = f'week-{week}-a-{identity}'
                 selected_legacy_prefix = (
                     f'week-{week}-a-{legacy_identity}-'
@@ -5182,7 +5478,10 @@ def edit_appendix_question():
             selected_legacy_key,
             selected_legacy_prefix,
         )
-        frontmatter = f'title: {json.dumps(f"{selected_label}: {title}")}'
+        selected_metadata['title'] = f'{selected_label}: {title}'
+        frontmatter = yaml.safe_dump(
+            selected_metadata, allow_unicode=True, sort_keys=False
+        ).strip()
         entries[selected_index] = (frontmatter, content)
         _write_text_atomic(appendix_path, _serialize_question_blocks(entries))
         file_written = True
@@ -5227,7 +5526,7 @@ def edit_appendix_question():
 @app.route('/api/unassign_all', methods=['POST'])
 @instructor_login_required
 def unassign_all():
-    """Clear all team assignments."""
+    """Clear all active team assignments and lock student joining."""
     slug = session['slug']
     data = request.get_json(silent=True) or {}
     ensure_schema(slug)
@@ -5252,29 +5551,33 @@ def unassign_all():
                WHERE course_id = ? AND is_active = 1 AND team_id IS NOT NULL''',
             [course['id']],
         ).fetchone()['c']
-        if count == 0:
+        if count:
+            freeze_guard = _session_roster_mutation_guard(
+                db, course['id'], state
+            )
+            if freeze_guard:
+                db.rollback()
+                return jsonify({'error': freeze_guard[0]}), freeze_guard[1]
+            db.execute(
+                '''UPDATE students
+                   SET last_team_id = COALESCE(last_team_id, team_id),
+                       team_id = NULL
+                   WHERE course_id = ? AND is_active = 1''', [course['id']]
+            )
+            roster_version = _bump_roster_version(
+                slug, course['id'], db=db
+            )
+        else:
             roster_version = _current_roster_version(db, course['id'])
-            db.commit()
-            return jsonify({
-                'success': True,
-                'count': 0,
-                'roster_version': roster_version,
-            })
-        freeze_guard = _session_roster_mutation_guard(db, course['id'], state)
-        if freeze_guard:
-            db.rollback()
-            return jsonify({'error': freeze_guard[0]}), freeze_guard[1]
         db.execute(
-            '''UPDATE students
-               SET last_team_id = COALESCE(last_team_id, team_id),
-                   team_id = NULL
-               WHERE course_id = ? AND is_active = 1''', [course['id']]
+            'UPDATE course_state SET teams_locked = 1 WHERE course_id = ?',
+            [course['id']],
         )
-        roster_version = _bump_roster_version(slug, course['id'], db=db)
         db.commit()
         return jsonify({
             'success': True,
             'count': count,
+            'locked': True,
             'roster_version': roster_version,
         })
     except Exception:
@@ -5368,7 +5671,7 @@ def upload_roster():
             errors.append(f'Line {i}: duplicate student ID "{sid}"')
             continue
         seen_ids.add(sid_key)
-        if not re.match(r'^\d{4}$', pin):
+        if not re.fullmatch(r'[0-9]{4}', pin):
             errors.append(f'Line {i}: PIN must be exactly 4 digits for "{sid}"')
             continue
         parsed.append({'student_id': sid, 'name': name or None, 'pin': pin})
@@ -6131,6 +6434,18 @@ def cancel_presentation():
 # Challenge API — raise hand, select challenger, rate challenger
 # ---------------------------------------------------------------------------
 
+def _student_has_active_challenge(
+        db, course_id, presentation_key, student_id):
+    """Return whether this student is already selected in the presentation."""
+    return db.execute(
+        '''SELECT 1 FROM challenge_rounds
+           WHERE course_id = ? AND presentation_key = ?
+             AND challenger_id = ?
+           LIMIT 1''',
+        [course_id, presentation_key, student_id],
+    ).fetchone() is not None
+
+
 @app.route('/api/raise_hand', methods=['POST'])
 @student_login_required
 def raise_hand():
@@ -6165,6 +6480,13 @@ def raise_hand():
         if student['team_id'] == state['active_team_id']:
             db.rollback()
             return jsonify({'error': 'You cannot challenge your own team'}), 403
+        if _student_has_active_challenge(
+                db, student['course_id'], pres_key, student['id']):
+            db.rollback()
+            return jsonify({
+                'error': 'You are already the active challenger',
+                'already_selected': True,
+            }), 409
         # Insert (idempotent via UNIQUE constraint)
         team = db.execute(
             'SELECT name FROM teams WHERE id = ?', [student['team_id']]
@@ -6275,6 +6597,20 @@ def select_challenger():
         if not hand:
             db.rollback()
             return jsonify({'error': 'This student has not raised their hand'}), 409
+        if _student_has_active_challenge(
+                db, state['course_id'], pres_key, hand['student_id']):
+            # Normalize a stale hand left by an older client or data set.
+            db.execute(
+                '''DELETE FROM challenge_hands
+                   WHERE course_id = ? AND presentation_key = ?
+                     AND student_id = ?''',
+                [state['course_id'], pres_key, hand['student_id']],
+            )
+            db.commit()
+            return jsonify({
+                'error': 'This student is already the active challenger',
+                'already_selected': True,
+            }), 409
         challenger_name = (
             (hand['student_name'] or '').strip() or hand['roster_student_id']
         )
@@ -6375,7 +6711,7 @@ def clear_challenger():
             db.rollback()
             return jsonify({'error': guard[0]}), guard[1]
         challenge = db.execute(
-            '''SELECT presentation_key FROM challenge_rounds
+            '''SELECT presentation_key, challenger_id FROM challenge_rounds
                WHERE course_id = ? AND challenge_key = ?''',
             [state['course_id'], challenge_key]
         ).fetchone()
@@ -6423,6 +6759,13 @@ def clear_challenger():
                WHERE course_id = ? AND challenge_key = ?''',
             [state['course_id'], challenge_key]
         )
+        db.execute(
+            '''DELETE FROM challenge_hands
+               WHERE course_id = ? AND presentation_key = ?
+                 AND student_id = ?''',
+            [state['course_id'], challenge['presentation_key'],
+             challenge['challenger_id']],
+        )
         # Remove from active_challenges_json
         challenges = json.loads(state['active_challenges_json'] or '[]')
         challenges = [c for c in challenges if c.get('challenge_key') != challenge_key]
@@ -6462,7 +6805,7 @@ def submit_challenge_rating():
     if score is None:
         return jsonify({'error': 'Score is required'}), 400
     try:
-        score = int(score)
+        score = _rating_integer(score)
     except (ValueError, TypeError):
         return jsonify({'error': 'Score must be an integer'}), 400
     if not (1 <= score <= 5):
@@ -6568,8 +6911,8 @@ def submit_rating():
     if q1 is None or q2 is None:
         return jsonify({'error': 'Both ratings required'}), 400
     try:
-        q1 = int(q1)
-        q2 = int(q2)
+        q1 = _rating_integer(q1)
+        q2 = _rating_integer(q2)
     except (ValueError, TypeError):
         return jsonify({'error': 'Ratings must be integers'}), 400
     if not (1 <= q1 <= 5 and 1 <= q2 <= 5):
@@ -6721,6 +7064,7 @@ def api_students():
         [course['id']], one=True,
     )['c']
     total_pages = max(1, (total + per_page - 1) // per_page)
+    page = min(page, total_pages)
     offset = (page - 1) * per_page
 
     rows = query_db(slug,
@@ -6802,7 +7146,7 @@ def add_student():
         return jsonify({'error': 'Student ID and PIN are required'}), 400
     if len(student_id) > 100 or len(name) > 200:
         return jsonify({'error': 'Student ID or name is too long'}), 400
-    if not re.match(r'^\d{4}$', pin):
+    if not re.fullmatch(r'[0-9]{4}', pin):
         return jsonify({'error': 'PIN must be exactly 4 digits'}), 400
     ensure_schema(slug)
     db = get_db(slug)
@@ -7193,6 +7537,9 @@ def export_legacy_feedback(slug):
             db.rollback()
             snapshot_open = False
             return 'Course not found', 404
+        course = _course_with_config_metadata(
+            course, _course_availability(slug).get('config')
+        )
         if course['phase'] not in ('setup', 'ended'):
             db.rollback()
             snapshot_open = False
@@ -7205,6 +7552,23 @@ def export_legacy_feedback(slug):
             "typeof(p.week_num) != 'integer' OR p.week_num <= 0 OR "
             'popping_version_compatible(p.data_version, ?) = 0)'
         )
+        legacy_row_count = sum(
+            db.execute(
+                f'SELECT COUNT(*) FROM {table} p WHERE {legacy_where}',
+                [course['id'], SCHEMA_VERSION],
+            ).fetchone()[0]
+            for table in (
+                'teammate_thumbs', 'presentation_ratings',
+                'presentation_participants', 'challenge_rounds',
+                'challenge_ratings',
+            )
+        )
+        raw_history = course['presentation_history']
+        if (legacy_row_count > MAX_EXPORT_ROWS
+                or len(str(raw_history or '').encode('utf-8')) > MAX_EXPORT_BYTES):
+            db.rollback()
+            snapshot_open = False
+            return 'The legacy export exceeds the safety limit.', 413
         thumb_rows = db.execute(
             f'''SELECT g.student_id AS grader_id, g.name AS grader_name,
                        r.student_id AS recipient_id, r.name AS recipient_name,
@@ -7298,7 +7662,6 @@ def export_legacy_feedback(slug):
         rating_weeks = _compatible_rating_weeks(db, course['id'])
 
         history_rows = []
-        raw_history = course['presentation_history']
         if raw_history and str(raw_history).strip() not in ('', '[]'):
             malformed_container = False
             try:
@@ -7338,6 +7701,10 @@ def export_legacy_feedback(slug):
                         item, ensure_ascii=False, sort_keys=True
                     ),
                 })
+        if legacy_row_count + len(history_rows) > MAX_EXPORT_ROWS:
+            db.rollback()
+            snapshot_open = False
+            return 'The legacy export exceeds the safety limit.', 413
         db.commit()
         snapshot_open = False
     except Exception:
@@ -7487,7 +7854,10 @@ def export_legacy_feedback(slug):
             'history_json': history_row['history_json'],
         }
         write_row([values.get(header, '') for header in legacy_headers])
-    content = io.BytesIO(output.getvalue().encode('utf-8-sig'))
+    encoded_output = output.getvalue().encode('utf-8-sig')
+    if len(encoded_output) > MAX_EXPORT_BYTES:
+        return 'The legacy export exceeds the safety limit.', 413
+    content = io.BytesIO(encoded_output)
     filename = (
         f"popping_{course['code'] or slug}_legacy_unknown_week_feedback.csv"
     )
@@ -7497,6 +7867,49 @@ def export_legacy_feedback(slug):
         as_attachment=True,
         download_name=filename,
     )
+
+def _compatible_export_week_exists(db, course_id, week_num, state_row):
+    '''Return whether a later week has current-series durable results.'''
+    for table in (
+            'teammate_thumbs', 'presentation_ratings',
+            'presentation_participants', 'challenge_rounds',
+            'challenge_ratings'):
+        found = db.execute(
+            f'''SELECT 1 FROM {table}
+                WHERE course_id = ? AND week_num = ?
+                  AND popping_version_compatible(data_version, ?) = 1
+                LIMIT 1''',
+            [course_id, week_num, SCHEMA_VERSION],
+        ).fetchone()
+        if found:
+            return True
+
+    raw_history = state_row['presentation_history'] if state_row else None
+    if not raw_history:
+        return False
+    try:
+        history = json.loads(raw_history)
+    except (TypeError, ValueError):
+        return False
+    if not isinstance(history, list):
+        return False
+    question_weeks = {
+        row['id']: (1 if row['week_num'] is None else row['week_num'])
+        for row in db.execute(
+            'SELECT id, week_num FROM questions WHERE course_id = ?',
+            [course_id],
+        ).fetchall()
+    }
+    rating_weeks = _compatible_rating_weeks(db, course_id)
+    return any(
+        _history_item_is_compatible(item)
+        and _resolve_history_week(
+            item, question_weeks=question_weeks,
+            rating_weeks=rating_weeks,
+        ) == week_num
+        for item in history
+    )
+
 
 @app.route('/export/<slug>')
 @instructor_login_required
@@ -7531,6 +7944,9 @@ def export_data(slug):
             snapshot_open = False
             flash('Course not found.', 'error')
             return redirect(url_for('index'))
+        course = _course_with_config_metadata(
+            course, _course_availability(slug).get('config')
+        )
 
         cid = course['id']
         state_row = query_db(
@@ -7557,11 +7973,22 @@ def export_data(slug):
             try:
                 requested_week_num = int(requested_week)
             except ValueError:
+                db.rollback()
+                snapshot_open = False
                 return 'Invalid week parameter.', 400
-            if not 1 <= requested_week_num <= current_week:
+            if requested_week_num < 1:
+                db.rollback()
+                snapshot_open = False
+                return 'Week must be a positive integer.', 400
+            if (requested_week_num > current_week
+                    and not _compatible_export_week_exists(
+                        db, cid, requested_week_num, state_row
+                    )):
+                db.rollback()
+                snapshot_open = False
                 return (
-                    f'Week must be between 1 and the current week '
-                    f'({current_week}).'
+                    f'Week {requested_week_num} is later than the current week '
+                    f'and has no compatible saved results.'
                 ), 400
             current_week = requested_week_num
 

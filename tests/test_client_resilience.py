@@ -40,8 +40,8 @@ def test_rating_window_close_preserves_unsaved_draft_ui():
 
 
 def test_discussion_question_cards_use_stable_keys():
-    """Question cards track expansion/numbering by server question key so
-    re-renders don't collapse open cards or renumber on hide."""
+    """Question cards track expansion and numbering by server question key so
+    re-renders do not collapse open cards or change their order."""
     source = (PROJECT_ROOT / "static" / "js" / "app.js").read_text(
         encoding="utf-8"
     )
@@ -85,6 +85,87 @@ def test_instructor_vote_progress_uses_compact_counts():
     assert "min-width: 0;" in css
     assert ".challenge-active-row .challenge-mutating-btn {" in css
     assert "flex: 0 0 auto;" in css
+
+
+def test_instructor_roster_keeps_id_and_team_turns_above_name():
+    css = (PROJECT_ROOT / "static" / "css" / "style.css").read_text(
+        encoding="utf-8"
+    )
+
+    assert ".instructor .setup-roster-member {" in css
+    assert ".setup-roster-member-topline {" in css
+    assert ".setup-roster-member-name {" in css
+    roster_rules = css[
+        css.index(".instructor .setup-roster-member {"):
+        css.index(".participation-badge {", css.index(
+            ".instructor .setup-roster-member {"
+        ))
+    ]
+    assert "flex-wrap: nowrap;" in roster_rules
+    assert "overflow-wrap: anywhere;" in roster_rules
+
+
+def test_instructor_setup_and_presentation_controls_are_contextual_and_compact():
+    source = (PROJECT_ROOT / "static" / "js" / "app.js").read_text(
+        encoding="utf-8"
+    )
+    template = (
+        PROJECT_ROOT / "templates" / "instructor.html"
+    ).read_text(encoding="utf-8")
+    base = (PROJECT_ROOT / "templates" / "base.html").read_text(
+        encoding="utf-8"
+    )
+    css = (PROJECT_ROOT / "static" / "css" / "style.css").read_text(
+        encoding="utf-8"
+    )
+
+    setup_roster = template[
+        template.index("<h2>Team and Members</h2>"):
+        template.index("<h2>Student Management</h2>")
+    ]
+    assert "Team turns:" in setup_roster
+    assert "Challenge turns:" not in setup_roster
+    assert "Challenge turns" in template
+    assert "renderRosterGrid(rosterGrid, rosterData, null, { instructorSetup: true })" in source
+
+    assert 'id="reset-course-data-menu-item"' in base
+    assert "state.phase in ['setup', 'ended']" in base
+    assert "Reset Course Data" not in template
+    assert ".nav-dropdown-action {" in css
+
+    assert (
+        "{{ (presentation_members | length) - participation.never }}"
+        in template
+    )
+    assert "no prior turn" not in template
+    assert (
+        "`${teamName} · ${priorCount}/${memberCount}${completed}`"
+        in source
+    )
+    assert "previously presented" not in template
+    assert "previously presented" not in source
+    assert "' (completed)'" in source
+    assert "data-completed=" in template
+
+    assert 'class="form-group time-cap-group"' in template
+    assert ".form-row .time-cap-group {" in css
+
+    assert "flex: 0 0 140px;" in css
+    assert "min-width: 120px;" in css
+
+
+def test_selected_challenger_state_blocks_repeat_raise_and_clear_is_explicit():
+    source = (PROJECT_ROOT / "static" / "js" / "app.js").read_text(
+        encoding="utf-8"
+    )
+
+    assert "state.is_active_challenger === true" in source
+    assert "✓ Selected as Challenger" in source
+    assert "You have been selected as the challenger." in source
+    assert "lastReceivedState?.is_active_challenger === true" in source
+    assert "'|state=' + stateVersion" in source
+    assert "Stop Poll, wait for final ratings to save" in source
+    assert "Challenger cleared. The student may raise their hand again." in source
 
 
 def test_week_selector_offers_preview_before_commit():
@@ -140,8 +221,15 @@ def test_question_load_surfaces_server_error_message():
         encoding="utf-8"
     )
 
-    assert "loadError.serverMessage = (questionData && questionData.error) || null;" in source
-    assert "serverMessage || 'Could not load discussion questions. Please refresh.'" in source
+    assert "loadError.serverMessage =" in source
+    assert "(questionData && questionData.error) || null;" in source
+    assert (
+        "serverMessage ||\n"
+        "                        'Could not load discussion questions. "
+        "Retrying automatically.'"
+    ) in source
+    assert "scheduleQuestionLoadRetry();" in source
+    assert "let renderedDiscQuestionsVersion = null;" in source
 
 
 def test_student_table_page_size_and_picker_guard():
@@ -157,7 +245,11 @@ def test_student_table_page_size_and_picker_guard():
     assert "per_page: studentPerPage" in source
     assert "popping-student-per-page" in source
     assert "window.setStudentPerPage" in source
-    assert 'class="team-picker filter-picker"' in template
+    assert 'for="team-filter-select"' in template
+    assert 'id="team-filter-select"' in template
+    assert 'onchange="setTeamFilterFromSelect(this)"' in template
+    assert 'class="team-picker filter-picker"' not in template
+    assert "window.setTeamFilterFromSelect = function(select)" in source
     assert "!document.querySelector('.team-picker:not(.filter-picker)')" in source
     assert "!document.querySelector('.team-picker')" not in source
     assert "Date.now() - _lastStudentTableRefresh >= 5000" in source
@@ -233,19 +325,91 @@ def test_thumbs_follow_discussion_phase_not_question_presence():
 
 
 def test_discussion_accordion_is_keyboard_accessible():
-    """The disc-question-header expander exposes button semantics, keyboard
-    focus, aria-expanded state, and Enter/Space handling."""
+    """Discussion question expanders use native buttons with visible focus and
+    synchronized aria-expanded state."""
     source = (PROJECT_ROOT / "static" / "js" / "app.js").read_text(
         encoding="utf-8"
     )
     css = (PROJECT_ROOT / "static" / "css" / "style.css").read_text(
         encoding="utf-8"
     )
+    header_start = source.index("function discussionQuestionHeaderHtml(")
+    header_end = source.index("/** Format a student", header_start)
+    header = source[header_start:header_end]
 
-    assert "window.discQuestionHeaderKeydown" in source
-    assert 'role="button" tabindex="0" aria-expanded=' in source
-    assert "header.setAttribute(" in source
-    assert ".disc-question-header:focus-visible" in css
+    assert '<button type="button" class="disc-question-toggle"' in header
+    assert "aria-expanded=\"${expanded ? 'true' : 'false'}\"" in header
+    assert 'aria-controls="${escapeAttrValue(bodyId)}"' in header
+    assert "window.toggleDiscQuestionCard = function(toggle)" in source
+    assert "toggle.setAttribute(" in source
+    assert ".disc-question-toggle:focus-visible" in css
+
+
+def test_response_controls_reconcile_every_fifteen_seconds():
+    """Student response controls periodically reconcile with server truth."""
+    source = (PROJECT_ROOT / "static" / "js" / "app.js").read_text(
+        encoding="utf-8"
+    )
+
+    assert "const RESPONSE_RECONCILE_INTERVAL_MS = 15000;" in source
+    assert "Date.now() - _lastResponsesSyncAt >=" in source
+    assert "if (periodicDue) responseNeedsRefresh = true;" in source
+
+
+def test_hidden_tabs_back_off_student_and_instructor_polling():
+    """Both dashboards avoid rapid polling while their tab is hidden."""
+    source = (PROJECT_ROOT / "static" / "js" / "app.js").read_text(
+        encoding="utf-8"
+    )
+
+    assert "document.hidden ? Math.max(7500, interval) : interval" in source
+    assert "const minimum = document.hidden ? 7500 : 1000;" in source
+
+
+def test_question_readiness_is_rendered_from_the_server_contract():
+    """A missing weekly file remains visible to the instructor."""
+    source = (PROJECT_ROOT / "static" / "js" / "app.js").read_text(
+        encoding="utf-8"
+    )
+    start = source.index("function updateQuestionReadinessWarning(data)")
+    end = source.index("function competitionQuestionLabel", start)
+    readiness = source[start:end]
+
+    assert "const ready = data?.ready !== false;" in readiness
+    assert "weekly questions are not ready" in readiness
+    assert "data?.issues" in readiness
+    assert "updateQuestionReadinessWarning(data);" in source
+
+
+def test_competition_question_rebuild_never_infers_ids_by_position():
+    """Competition options use server IDs or stable keys, never list position."""
+    source = (PROJECT_ROOT / "static" / "js" / "app.js").read_text(
+        encoding="utf-8"
+    )
+    start = source.index("function rebuildCompetitionQuestionOptions(data)")
+    end = source.index("// Populate Setup controls", start)
+    rebuild = source[start:end]
+
+    assert "Number(question?.question_id)" in rebuild
+    assert "existingById.get" in rebuild
+    assert "existingByKey.get" in rebuild
+    assert "existing[position]" not in rebuild
+    assert "existing.length === questions.length" not in rebuild
+    assert "rebuildCompetitionQuestionOptions(data);" in source
+
+
+def test_instructor_mutation_error_keeps_extended_roster_details():
+    """Detailed roster errors extend, but never replace, another server error."""
+    source = (PROJECT_ROOT / "static" / "js" / "app.js").read_text(
+        encoding="utf-8"
+    )
+    start = source.index("function showInstructorMutationError(data, fallback)")
+    end = source.index("function applyRosterMutationVersion", start)
+    helper = source[start:end]
+
+    assert "fallbackMessage.startsWith(`${serverMessage}:`)" in helper
+    assert "? fallbackMessage" in helper
+    assert ": (serverMessage || fallbackMessage);" in helper
 
 
 def test_star_touch_targets_and_disabled_state():
@@ -403,3 +567,78 @@ def test_mathjax_cdn_failure_has_a_plain_text_fallback_notice():
     assert 'onerror="showMathJaxLoadWarning()"' in base
     assert "id = 'mathjax-load-warning'" in base
     assert "Questions and controls still work" in base
+
+def test_discussion_question_ui_cannot_diverge_from_presentation():
+    """The instructor cannot hide a question only from Discussion."""
+    source = (PROJECT_ROOT / "static" / "js" / "app.js").read_text(
+        encoding="utf-8"
+    )
+    template = (PROJECT_ROOT / "templates" / "instructor.html").read_text(
+        encoding="utf-8"
+    )
+    css = (PROJECT_ROOT / "static" / "css" / "style.css").read_text(
+        encoding="utf-8"
+    )
+
+    assert "toggleDiscussionQuestion" not in source
+    assert "/api/toggle_discussion_question" not in source
+    assert "hidden-question-badge" not in source
+    assert "hidden-question-badge" not in css
+    assert "disc-question-card.is-hidden" not in css
+    assert "same questions, in this order" in template
+
+
+def test_active_markdown_and_download_menu_fit_small_screens():
+    """Long question content and the nested download menu stay usable on mobile."""
+    css = (PROJECT_ROOT / "static" / "css" / "style.css").read_text(
+        encoding="utf-8"
+    )
+    base = (PROJECT_ROOT / "templates" / "base.html").read_text(
+        encoding="utf-8"
+    )
+
+    assert ".markdown-content pre {" in css
+    assert ".markdown-content table {" in css
+    assert ".markdown-content img {" in css
+    assert "overflow-x: auto;" in css
+    assert "@media (max-width: 640px)" in css
+    assert ".nav-submenu-menu {" in css
+    assert "position: static;" in css
+    assert 'id="tools-dropdown-trigger"' in base
+    assert 'id="download-results-trigger"' in base
+    assert 'aria-controls="download-results-menu"' in base
+
+
+def test_frontend_dialogs_restore_focus_and_close_with_escape():
+    """Both instructor dialogs expose modal semantics and keyboard recovery."""
+    source = (PROJECT_ROOT / "static" / "js" / "app.js").read_text(
+        encoding="utf-8"
+    )
+    base = (PROJECT_ROOT / "templates" / "base.html").read_text(
+        encoding="utf-8"
+    )
+
+    assert 'id="roster-preview-dialog" role="dialog" aria-modal="true"' in base
+    assert "function handleModalKeydown(" in source
+    assert "event.key === 'Escape'" in source
+    assert "rosterPreviewReturnFocus" in source
+    assert "weekPreviewReturnFocus" in source
+    assert "overlay.setAttribute('role', 'dialog')" in source
+    assert "overlay.setAttribute('aria-modal', 'true')" in source
+    assert "handleModalKeydown(event, overlay, closeWeekPreviewModal)" in source
+    assert "week, questions, returnFocus = document.activeElement" in source
+    assert "data.questions || [], previewButton" in source
+
+
+def test_appendix_add_uses_retry_safe_request_identity():
+    """The same unsaved add payload keeps one key across an uncertain retry."""
+    source = (PROJECT_ROOT / "static" / "js" / "app.js").read_text(
+        encoding="utf-8"
+    )
+
+    assert "function ensureAppendixCreateRequest(" in source
+    assert "client_request_id: createRequestId" in source
+    assert "clientRequestId:" in source
+    assert "clientRequestFingerprint:" in source
+    assert "appendixCreateRequestFingerprint !== fingerprint" in source
+    assert "resetAppendixCreateRequest();" in source

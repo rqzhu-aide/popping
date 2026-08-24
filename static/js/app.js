@@ -183,7 +183,7 @@ function escapeAttrValue(value) {
 
 // Discussion question cards keep expansion state by stable question key.
 // Display numbers come from the server so instructors and students share one
-// canonical sequence even when some questions are hidden.
+// canonical sequence in both classroom phases.
 const _discQuestionExpanded = new Set();
 
 function discussionQuestionKey(q) {
@@ -199,30 +199,52 @@ function discussionQuestionNumber(q, position) {
     return position + 1;
 }
 
-window.toggleDiscQuestionCard = function(header) {
-    const card = header.parentElement;
+window.toggleDiscQuestionCard = function(toggle) {
+    const card = toggle?.closest?.('.disc-question-card') ||
+        toggle?.parentElement;
+    if (!card) return;
     card.classList.toggle('expanded');
-    header.setAttribute(
+    const expanded = card.classList.contains('expanded');
+    toggle.setAttribute(
         'aria-expanded',
-        card.classList.contains('expanded') ? 'true' : 'false'
+        expanded ? 'true' : 'false'
     );
+    const bodyId = toggle.getAttribute?.('aria-controls');
+    const body = bodyId ? document.getElementById(bodyId) :
+        card.querySelector?.('.disc-question-body');
+    if (body) body.hidden = !expanded;
     const key = card.dataset.questionKey;
     if (!key) return;
-    if (card.classList.contains('expanded')) {
+    if (expanded) {
         _discQuestionExpanded.add(key);
     } else {
         _discQuestionExpanded.delete(key);
     }
 };
 
-// The accordion header is a div (it can contain real action buttons), so it
-// needs explicit keyboard support: Enter/Space toggles it like a click.
+// Compatibility support for an older cached page whose expander was a div.
+// Current markup uses a native button and therefore needs no key handler.
 window.discQuestionHeaderKeydown = function(event) {
     if (event.key !== 'Enter' && event.key !== ' ') return;
     if (event.target !== event.currentTarget) return;
     event.preventDefault();
     event.currentTarget.click();
 };
+
+function discussionQuestionHeaderHtml(
+        number, title, bodyId, expanded, actions = '') {
+    return `<div class="disc-question-header">
+        <button type="button" class="disc-question-toggle"
+                aria-expanded="${expanded ? 'true' : 'false'}"
+                aria-controls="${escapeAttrValue(bodyId)}"
+                onclick="toggleDiscQuestionCard(this)">
+            <span class="disc-question-num">#${number}</span>
+            <span class="disc-question-title">${escapeHtmlValue(title || 'Untitled')}</span>
+            <span class="disc-question-chevron" aria-hidden="true">▾</span>
+        </button>
+        ${actions}
+    </div>`;
+}
 
 /** Format a student as 'Name (id)' or just 'id' if no name / name equals id. */
 function formatStudentDisplay(name, studentId) {
@@ -236,18 +258,41 @@ function normalizedParticipationCount(value) {
     return Number.isFinite(parsed) ? Math.max(0, Math.trunc(parsed)) : 0;
 }
 
-function participationBadgesHtml(record) {
+function participationBadgesHtml(record, showChallengeTurns = true) {
     if (!record ||
             !Object.prototype.hasOwnProperty.call(record, 'presentation_count') ||
-            !Object.prototype.hasOwnProperty.call(record, 'challenger_count')) {
+            (showChallengeTurns &&
+             !Object.prototype.hasOwnProperty.call(record, 'challenger_count'))) {
         return '';
     }
     const presentationCount = normalizedParticipationCount(record.presentation_count);
-    const challengerCount = normalizedParticipationCount(record.challenger_count);
+    const challengerCount = showChallengeTurns
+        ? normalizedParticipationCount(record.challenger_count)
+        : 0;
     return `<span class="participation-badges" aria-label="Participation history">
         <span class="participation-badge${presentationCount === 0 ? ' is-zero' : ''}">Team turns: <strong>${presentationCount}</strong></span>
-        <span class="participation-badge${challengerCount === 0 ? ' is-zero' : ''}">Challenge turns: <strong>${challengerCount}</strong></span>
+        ${showChallengeTurns ? `<span class="participation-badge${challengerCount === 0 ? ' is-zero' : ''}">Challenge turns: <strong>${challengerCount}</strong></span>` : ''}
     </span>`;
+}
+
+function instructorSetupRosterMemberHtml(member, teamColor) {
+    const presentationCount = normalizedParticipationCount(member.presentation_count);
+    const studentId = String(member.student_id || '');
+    const name = String(member.name || '').trim();
+    const nameHtml = name && name !== studentId
+        ? `<div class="setup-roster-member-name">${escapeHtmlValue(member.name)}</div>`
+        : '';
+    return `<div class="roster-member setup-roster-member">
+        <span class="team-dot" style="background:${escapeAttrValue(teamColor)}"></span>
+        <div class="setup-roster-member-body">
+            <div class="setup-roster-member-topline">
+                <span class="setup-roster-member-id">${escapeHtmlValue(member.student_id)}</span>
+                <span class="participation-badge setup-roster-team-turns${presentationCount === 0 ? ' is-zero' : ''}"
+                      title="Completed presentation-team turns">Team turns: <strong>${presentationCount}</strong></span>
+            </div>
+            ${nameHtml}
+        </div>
+    </div>`;
 }
 
 /**
@@ -255,9 +300,10 @@ function participationBadgesHtml(record) {
  * changed (signature comparison).  Shared by student + instructor panels.
  * @param myId  student_id of current user (for 'You' highlight), or null
  */
-function renderRosterGrid(container, teams, myId) {
+function renderRosterGrid(container, teams, myId, options = {}) {
     if (!container) return;
-    const sig = JSON.stringify(teams);
+    const instructorSetup = options.instructorSetup === true;
+    const sig = JSON.stringify([instructorSetup, teams]);
     if (sig === container.dataset.lastRoster) return;
     container.dataset.lastRoster = sig;
     container.innerHTML = '';
@@ -266,6 +312,9 @@ function renderRosterGrid(container, teams, myId) {
         div.className = 'roster-team';
         const members = Array.isArray(team.members) ? team.members : [];
         const membersHtml = members.map(m => {
+            if (instructorSetup) {
+                return instructorSetupRosterMemberHtml(m, team.color);
+            }
             const display = formatStudentDisplay(m.name, m.student_id);
             const isYou = myId && m.student_id === myId;
             const badgesHtml = participationBadgesHtml(m);
@@ -284,25 +333,48 @@ function renderRosterGrid(container, teams, myId) {
     });
 }
 
+/** Keep display-math blocks intact before normal Markdown block parsing. */
+let _markdownParser = null;
+
+function markdownParser() {
+    if (_markdownParser) return _markdownParser;
+    if (!window.marked || typeof window.marked.Marked !== 'function') {
+        return window.marked || null;
+    }
+    _markdownParser = new window.marked.Marked({
+        extensions: [{
+            name: 'displayMath',
+            level: 'block',
+            tokenizer(src) {
+                const match = /^ {0,3}\$\$[ \t]*\r?\n([\s\S]*?)\r?\n {0,3}\$\$[ \t]*(?:\r?\n|$)/.exec(src);
+                if (!match) return undefined;
+                return {
+                    type: 'displayMath',
+                    raw: match[0],
+                    math: match[1]
+                };
+            },
+            renderer(token) {
+                return `<div class="math-display">$$\n${escapeHtmlValue(token.math)}\n$$</div>\n`;
+            }
+        }]
+    });
+    return _markdownParser;
+}
+
 /** Parse Markdown → sanitized HTML (XSS-safe via DOMPurify). */
 function renderMarkdown(md) {
-    if (!window.marked) {
+    const parser = markdownParser();
+    if (!parser || typeof parser.parse !== 'function') {
         const fallback = document.createElement('div');
         fallback.textContent = md || '';
         return fallback.innerHTML;
     }
-    const raw = marked.parse(md || '');
+    const raw = parser.parse(md || '');
     if (window.DOMPurify) return DOMPurify.sanitize(raw);
     // Fail-closed: escape HTML if DOMPurify failed to load (CDN issue)
     const div = document.createElement('div');
     div.textContent = raw;
-    return div.innerHTML;
-}
-
-function sanitizeHtml(html) {
-    if (window.DOMPurify) return DOMPurify.sanitize(html || '');
-    const div = document.createElement('div');
-    div.textContent = html || '';
     return div.innerHTML;
 }
 
@@ -348,33 +420,67 @@ function showToast(msg, type) {
 }
 
 /* ===== NAV DROPDOWN ===== */
+function setNavMenuOpen(menuId, triggerId, open) {
+    const menu = document.getElementById(menuId);
+    const trigger = document.getElementById(triggerId);
+    if (menu) menu.classList.toggle('open', Boolean(open));
+    if (trigger) trigger.setAttribute('aria-expanded', open ? 'true' : 'false');
+}
+
+function closeDownloadResultsMenu(restoreFocus = false) {
+    setNavMenuOpen('download-results-menu', 'download-results-trigger', false);
+    if (restoreFocus) document.getElementById('download-results-trigger')?.focus();
+}
+
+function closeToolsMenu(restoreFocus = false) {
+    closeDownloadResultsMenu(false);
+    setNavMenuOpen('tools-menu', 'tools-dropdown-trigger', false);
+    if (restoreFocus) document.getElementById('tools-dropdown-trigger')?.focus();
+}
+
 window.toggleToolsDropdown = function() {
     const menu = document.getElementById('tools-menu');
-    if (menu) menu.classList.toggle('open');
+    const willOpen = !menu?.classList.contains('open');
+    if (!willOpen) closeDownloadResultsMenu(false);
+    setNavMenuOpen('tools-menu', 'tools-dropdown-trigger', willOpen);
 };
 
-/* Touch/keyboard fallback for the Download Results flyout (hover opens it
-   on pointer devices via CSS). */
+/* Touch/keyboard fallback for the Download Results submenu. */
 window.toggleDownloadResults = function(e) {
     e.preventDefault();
     e.stopPropagation();
     const menu = document.getElementById('download-results-menu');
-    if (menu) menu.classList.toggle('open');
+    setNavMenuOpen(
+        'download-results-menu',
+        'download-results-trigger',
+        !menu?.classList.contains('open')
+    );
 };
 
 document.addEventListener('click', function(e) {
     const dropdown = document.getElementById('tools-dropdown');
-    if (dropdown && !dropdown.contains(e.target)) {
-        const menu = document.getElementById('tools-menu');
-        if (menu) menu.classList.remove('open');
+    if (dropdown && !dropdown.contains(e.target)) closeToolsMenu(false);
+});
+
+document.addEventListener('keydown', function(e) {
+    if (e.key !== 'Escape') return;
+    if (document.getElementById('download-results-menu')?.classList.contains('open')) {
+        e.preventDefault();
+        closeDownloadResultsMenu(true);
+    } else if (document.getElementById('tools-menu')?.classList.contains('open')) {
+        e.preventDefault();
+        closeToolsMenu(true);
     }
 });
 
+let rosterPreviewReturnFocus = null;
+
 window.uploadRoster = function(e) {
     e.preventDefault();
-    const menu = document.getElementById('tools-menu');
-    if (menu) menu.classList.remove('open');
-    document.getElementById('roster-file-input').click();
+    rosterPreviewReturnFocus =
+        document.getElementById('tools-dropdown-trigger') || e.currentTarget;
+    closeToolsMenu(false);
+    document.getElementById('roster-file-input')?.click();
 };
 
 let pendingRosterUpload = null;
@@ -387,25 +493,78 @@ function appendInstructorStateForm(formData) {
     formData.append('expected_roster_version', panel.dataset.rosterVersion || '0');
 }
 
-const flashMessage = sessionStorage.getItem('popping-flash-message');
+let flashMessage = null;
+try {
+    flashMessage = sessionStorage.getItem('popping-flash-message');
+    if (flashMessage) sessionStorage.removeItem('popping-flash-message');
+} catch (error) {
+    // Blocked storage must not prevent the classroom page from initializing.
+}
 if (flashMessage) {
-    sessionStorage.removeItem('popping-flash-message');
     window.setTimeout(() => showToast(flashMessage, 'success'), 0);
 }
 
 function rosterErrorMessage(data, fallback) {
-    const allDetails = Array.isArray(data?.details) ? data.details : [];
-    const details = allDetails.slice(0, 3);
-    if (allDetails.length > details.length) details.push(`and ${allDetails.length - details.length} more`);
-    return [data?.error || fallback, ...details].filter(Boolean).join(': ');
+    const allDetails = (Array.isArray(data?.details) ? data.details : [])
+        .map(detail => {
+            if (typeof detail === 'string') return detail.trim();
+            return String(detail?.message || detail?.error || '').trim();
+        })
+        .filter(Boolean);
+    const details = allDetails.slice(0, 4);
+    const reportedCount = Math.max(
+        allDetails.length,
+        Math.max(0, Number(data?.error_count) || 0)
+    );
+    const remaining = Math.max(0, reportedCount - details.length);
+    const summary = data?.error || fallback;
+    if (details.length === 0) return summary;
+    return `${summary}: ${details.join('; ')}` +
+        (remaining ? `; and ${remaining} more` : '');
 }
 
-function closeRosterPreview() {
+function modalFocusableElements(modal) {
+    if (!modal) return [];
+    return Array.from(modal.querySelectorAll(
+        'button:not([disabled]), a[href], input:not([disabled]), ' +
+        'select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+    )).filter(element => !element.hidden);
+}
+
+function handleModalKeydown(event, modal, closeModal) {
+    if (event.key === 'Escape') {
+        event.preventDefault();
+        closeModal();
+        return;
+    }
+    if (event.key !== 'Tab') return;
+    const focusable = modalFocusableElements(modal);
+    if (focusable.length === 0) {
+        event.preventDefault();
+        modal.focus();
+        return;
+    }
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+    }
+}
+
+function closeRosterPreview({ restoreFocus = true } = {}) {
     const dialog = document.getElementById('roster-preview-dialog');
     if (dialog) dialog.hidden = true;
+    document.body.classList.remove('modal-open');
     pendingRosterUpload = null;
     const input = document.getElementById('roster-file-input');
     if (input) input.value = '';
+    const focusTarget = rosterPreviewReturnFocus;
+    rosterPreviewReturnFocus = null;
+    if (restoreFocus && focusTarget?.isConnected) focusTarget.focus();
 }
 
 function showRosterPreview(file, data) {
@@ -413,6 +572,7 @@ function showRosterPreview(file, data) {
     const dialog = document.getElementById('roster-preview-dialog');
     const summary = document.getElementById('roster-preview-summary');
     if (!dialog || !summary) return;
+    if (!rosterPreviewReturnFocus) rosterPreviewReturnFocus = document.activeElement;
 
     summary.innerHTML = `
         <p><strong>${escapeHtmlValue(file.name)}</strong> contains ${Number(data.total) || 0} students.</p>
@@ -425,8 +585,14 @@ function showRosterPreview(file, data) {
         <p class="roster-replace-warning">This replaces the active roster. Archived students cannot log in, but their response history is retained and re-adding the same ID reactivates it.</p>
     `;
     dialog.hidden = false;
+    document.body.classList.add('modal-open');
     document.getElementById('btn-confirm-roster-upload')?.focus();
 }
+
+document.getElementById('roster-preview-dialog')?.addEventListener(
+    'keydown',
+    event => handleModalKeydown(event, event.currentTarget, closeRosterPreview)
+);
 
 window.handleRosterFile = async function(e) {
     const file = e.target.files[0];
@@ -493,7 +659,7 @@ window.confirmRosterUpload = async function() {
         }
         showToast(`Roster replaced: ${data.added} added, ${data.updated} updated, ${data.removed || 0} removed.`, 'success');
         confirmedSuccess = true;
-        closeRosterPreview();
+        closeRosterPreview({ restoreFocus: false });
         window.location.reload();
     } catch (error) {
         showToast('Network error while replacing the roster', 'error');
@@ -1006,6 +1172,8 @@ if (dashboard) {
     let _responsesRetryAt = 0;
     let _responsesRetryFailures = 0;
     let _responsesSyncInFlight = null;
+    let _lastResponsesSyncAt = 0;
+    const RESPONSE_RECONCILE_INTERVAL_MS = 15000;
 
     function initDashboard() {
         initStarRows();
@@ -1025,6 +1193,7 @@ if (dashboard) {
     }
 
     function showConnectionStatus(message, recovered = false) {
+        _connectionInterrupted = !recovered;
         const status = document.getElementById('connection-status');
         if (!status) return;
         if (_connectionStatusTimer) clearTimeout(_connectionStatusTimer);
@@ -1032,7 +1201,6 @@ if (dashboard) {
         status.textContent = message;
         status.classList.toggle('recovered', recovered);
         status.hidden = false;
-        _connectionInterrupted = !recovered;
         if (recovered) {
             _connectionStatusTimer = setTimeout(() => {
                 status.hidden = true;
@@ -1080,8 +1248,10 @@ if (dashboard) {
                 .map(challenge => String(challenge.challenge_key))
                 .sort()
                 .join(',');
+            const stateVersion = Number(state.state_version) || 0;
             return 'competition:' + state.poll_question_key +
-                '|challenges=' + challengeKeys;
+                '|challenges=' + challengeKeys +
+                '|state=' + stateVersion;
         }
         return null;
     }
@@ -1120,14 +1290,23 @@ if (dashboard) {
         _discQuestionsSyncPending = _studentDiscQuestionsVersion !== version;
     }
 
+    function invalidateStudentDiscussionQuestionsCache() {
+        if (!_lastState || _lastState.phase !== 'discussion') return;
+        _studentDiscQuestionsVersion = null;
+        _discQuestionsRetryFailures = 0;
+        _discQuestionsRetryAt = 0;
+        queueDiscussionQuestionsSync(_lastState);
+    }
+
     function queueResponsesSync(state) {
         discardOldSessionThumbUncertainty(state);
         const context = responseSyncContext(state);
         const contextChanged = context !== _responseContext;
         if (contextChanged) {
-        const primaryContextChanged = responsePrimaryContext(context) !==
-            responsePrimaryContext(_responseContext);
+            const primaryContextChanged = responsePrimaryContext(context) !==
+                responsePrimaryContext(_responseContext);
             _responseContext = context;
+            _lastResponsesSyncAt = 0;
             ++_responseRequestId;
             _responsesRetryFailures = 0;
             _responsesRetryAt = 0;
@@ -1137,6 +1316,7 @@ if (dashboard) {
         if (!context) {
             responseNeedsRefresh = false;
             _responsesRetryFailures = 0;
+            _lastResponsesSyncAt = 0;
         }
     }
 
@@ -1218,6 +1398,10 @@ if (dashboard) {
 
     function runResponsesSync() {
         discardStalePresentationUncertainty(_lastState);
+        const periodicDue = Boolean(_responseContext) && !document.hidden &&
+            Date.now() - _lastResponsesSyncAt >=
+                RESPONSE_RECONCILE_INTERVAL_MS;
+        if (periodicDue) responseNeedsRefresh = true;
         if (!responseNeedsRefresh || !_lastState ||
                 _studentVoteInFlight > 0 || Date.now() < _responsesRetryAt) {
             return Promise.resolve(false);
@@ -1232,6 +1416,7 @@ if (dashboard) {
                     state, requestedContext, requestId
                 );
                 if (applied && requestedContext === _responseContext) {
+                    _lastResponsesSyncAt = Date.now();
                     responseNeedsRefresh = _unconfirmedThumbVotes.size > 0 ||
                         _unconfirmedChallengeRatings.size > 0 ||
                         Boolean(unconfirmedPresentationRating) ||
@@ -1342,7 +1527,10 @@ if (dashboard) {
                 return;
             }
             if (!res.ok) throw new Error('poll failed');
-            if (_connectionInterrupted) showConnectionStatus('Live updates restored.', true);
+            if (_connectionInterrupted) {
+                invalidateStudentDiscussionQuestionsCache();
+                showConnectionStatus('Live updates restored.', true);
+            }
             _pollFailures = 0;
             // Remember the version we just saw so the next poll can take the
             // server's cheap "nothing changed" short-circuit.
@@ -1381,7 +1569,10 @@ if (dashboard) {
             if (!_pollStopped && !pageNavigationInProgress) {
                 const delay = _pollAgainImmediately
                     ? 0
-                    : jitteredDelay(interval, _pollFailures);
+                    : jitteredDelay(
+                        document.hidden ? Math.max(7500, interval) : interval,
+                        _pollFailures
+                    );
                 _pollAgainImmediately = false;
                 _pollTimer = setTimeout(pollOnce, delay);
             }
@@ -1393,7 +1584,13 @@ if (dashboard) {
     });
     window.addEventListener('online', requestImmediatePoll);
     document.addEventListener('visibilitychange', () => {
-        if (!document.hidden) requestImmediatePoll();
+        if (!document.hidden) {
+            invalidateStudentDiscussionQuestionsCache();
+            _lastResponsesSyncAt = 0;
+            _responsesRetryAt = 0;
+            responseNeedsRefresh = Boolean(_responseContext);
+            requestImmediatePoll();
+        }
     });
 
     let teamSelectionInProgress = false;
@@ -1432,10 +1629,15 @@ if (dashboard) {
         if (teamPickerLoading || teamSelectionInProgress) return;
         teamPickerLoading = true;
         const changeButton = document.getElementById('btn-change-team');
-        if (changeButton) changeButton.style.display = 'none';
         const panel = document.getElementById('team-picker-panel');
-        panel.style.display = 'block';
         const grid = document.getElementById('team-picker-grid');
+        if (!panel || !grid) {
+            teamPickerLoading = false;
+            return;
+        }
+        if (changeButton) changeButton.setAttribute('aria-expanded', 'true');
+        panel.hidden = false;
+        panel.style.display = 'block';
         grid.innerHTML = '<p class="loading">Loading teams...</p>';
         try {
             const { res, data: teams } = await fetchJSONWithTimeout('/api/teams');
@@ -1463,9 +1665,14 @@ if (dashboard) {
                 </button>
             `;
             }).join('');
+            grid.querySelector('button:not([disabled])')?.focus();
         } catch (error) {
+            panel.hidden = true;
             panel.style.display = 'none';
-            if (changeButton) changeButton.style.display = '';
+            if (changeButton) {
+                changeButton.setAttribute('aria-expanded', 'false');
+                changeButton.focus();
+            }
             showToast('Could not load teams. Please try again.', 'error');
         } finally {
             teamPickerLoading = false;
@@ -1473,8 +1680,14 @@ if (dashboard) {
     };
 
     window.hideTeamPicker = function() {
-        document.getElementById('btn-change-team').style.display = '';
-        document.getElementById('team-picker-panel').style.display = 'none';
+        const changeButton = document.getElementById('btn-change-team');
+        const panel = document.getElementById('team-picker-panel');
+        if (panel) {
+            panel.hidden = true;
+            panel.style.display = 'none';
+        }
+        changeButton?.setAttribute('aria-expanded', 'false');
+        changeButton?.focus();
     };
 
     function updateTeamCapacityCards(teams) {
@@ -1554,15 +1767,16 @@ if (dashboard) {
         }
         container.innerHTML = questions.map((q, i) => {
             const key = discussionQuestionKey(q);
-            const expanded = key && _discQuestionExpanded.has(key) ? ' expanded' : '';
+            const isExpanded = Boolean(key && _discQuestionExpanded.has(key));
+            const expanded = isExpanded ? ' expanded' : '';
+            const bodyId = `student-disc-question-body-${i}`;
             const keyAttr = key ? ` data-question-key="${escapeAttrValue(key)}"` : '';
             return `
         <div class="disc-question-card${expanded}"${keyAttr}>
-            <div class="disc-question-header" role="button" tabindex="0" aria-expanded="${expanded ? 'true' : 'false'}" onclick="toggleDiscQuestionCard(this)" onkeydown="discQuestionHeaderKeydown(event)">
-                <span class="disc-question-num">#${discussionQuestionNumber(q, i)}</span>
-                <span class="disc-question-title">${escapeHtmlValue(q.title || 'Untitled')}</span>
-            </div>
-            <div class="disc-question-body">
+            ${discussionQuestionHeaderHtml(
+                discussionQuestionNumber(q, i), q.title, bodyId, isExpanded
+            )}
+            <div class="disc-question-body" id="${bodyId}"${isExpanded ? '' : ' hidden'}>
                 <div class="markdown-content">${renderMarkdown(q.content || '')}</div>
             </div>
         </div>
@@ -1576,7 +1790,10 @@ if (dashboard) {
         if (state.phase !== 'discussion') return true;
         const version = Number(requestedVersion) || 0;
         if (_studentDiscQuestionsVersion === version) return true;
-        const { res, data } = await fetchJSONWithTimeout('/api/discussion_questions');
+        const { res, data } = await fetchJSONWithTimeout(
+            '/api/discussion_questions',
+            { cache: 'no-store' }
+        );
         if (res.status === 401) {
             _pollStopped = true;
             redirectToSessionEnded();
@@ -1887,11 +2104,7 @@ if (dashboard) {
                     qDisplay.style.display = 'block';
                     const qKey = `${state.active_question.id}:${state.active_question.revision || ''}`;
                     if (qKey !== lastRenderedQuestionKey) {
-                        if (state.active_question.html_content) {
-                            qText.innerHTML = sanitizeHtml(state.active_question.html_content);
-                        } else {
-                            qText.innerHTML = renderPresentationQuestion(state.active_question);
-                        }
+                        qText.innerHTML = renderPresentationQuestion(state.active_question);
                         safeTypeset(qText);
                         safeHighlight(qText);
                         lastRenderedQuestionKey = qKey;
@@ -2111,13 +2324,12 @@ if (dashboard) {
     window.toggleRoster = function() {
         const content = document.getElementById('roster-content');
         const btn = document.getElementById('btn-toggle-roster');
-        if (content.style.display === 'none') {
-            content.style.display = '';
-            btn.textContent = 'Hide';
-        } else {
-            content.style.display = 'none';
-            btn.textContent = 'Show';
-        }
+        if (!content || !btn) return;
+        const willShow = content.hidden || content.style.display === 'none';
+        content.hidden = !willShow;
+        content.style.display = willShow ? '' : 'none';
+        btn.textContent = willShow ? 'Hide' : 'Show';
+        btn.setAttribute('aria-expanded', willShow ? 'true' : 'false');
     };
 
     window.resetCardPositions = function() {
@@ -2394,6 +2606,43 @@ function ratingsSettlementBlocksAction() {
     return true;
 }
 
+const MAX_RATINGS_SETTLING_RETRIES = 2;
+
+async function postJSONAfterRatingsSettle(
+        url, payload, { maxRetries = MAX_RATINGS_SETTLING_RETRIES } = {}) {
+    let sawSettling = false;
+    let data = null;
+    for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
+        data = await postJSON(url, payload);
+        if (data?.success === true || data?.ratings_settling !== true) {
+            if (sawSettling) {
+                applyRatingsSettlingState({
+                    ratings_settling: false,
+                    ratings_settling_remaining: 0
+                });
+            }
+            return data;
+        }
+        sawSettling = true;
+        applyRatingsSettlingState(data);
+        if (attempt === 0) {
+            showToast(
+                'Saving final ratings. This action will continue automatically.',
+                'warning'
+            );
+        }
+        if (attempt >= maxRetries || pageNavigationInProgress) return data;
+        const seconds = Math.max(
+            1,
+            Math.ceil(Number(data.ratings_settling_remaining) || 0)
+        );
+        const delay = Math.min(6000, seconds * 1000 + 200);
+        await new Promise(resolve => window.setTimeout(resolve, delay));
+        if (pageNavigationInProgress) return data;
+    }
+    return data;
+}
+
 
 function instructorStatePayload(extra = {}) {
     if (!instructor) return extra;
@@ -2409,9 +2658,17 @@ function instructorStatePayload(extra = {}) {
 function showInstructorMutationError(data, fallback) {
     applyRatingsSettlingState(data);
     const settling = data?.ratings_settling === true;
+    const serverMessage = String(data?.error || '').trim();
+    const fallbackMessage = String(fallback || '').trim();
+    const fallbackExtendsServerMessage = Boolean(
+        serverMessage && fallbackMessage.startsWith(`${serverMessage}:`)
+    );
+    const message = fallbackExtendsServerMessage
+        ? fallbackMessage
+        : (serverMessage || fallbackMessage);
     showToast(
-        settling ? 'Saving final ratings. Please wait.' :
-            (data?.error || fallback), settling ? 'warning' : 'error');
+        settling ? 'Saving final ratings. Please wait.' : message,
+        settling ? 'warning' : 'error');
     if (data?._status === 409 &&
             /stale|changed|another page|reload|no active presentation/i.test(data.error || '')) {
         window.setTimeout(() => window.location.reload(), 500);
@@ -2747,25 +3004,42 @@ function renderChallengeUI(state) {
 
     const amPresenting = MY_TEAM_ID !== null && state.active_team.id === MY_TEAM_ID;
     const noTeam = MY_TEAM_ID === null;
+    const selectedAsChallenger = state.is_active_challenger === true;
+    if (selectedAsChallenger) {
+        challengeHandRaised = false;
+    }
     const raiseHandDiv = document.getElementById('challenge-raise-hand');
     if (raiseHandDiv) {
         raiseHandDiv.style.display = (amPresenting || noTeam) ? 'none' : 'block';
         const btn = document.getElementById('btn-raise-hand');
         const status = document.getElementById('raise-hand-status');
         if (btn) {
-            btn.textContent = challengeHandRaised ? '✋ Hand Raised (Cancel)' : '🙋 Raise Hand to Challenge';
-            btn.disabled = _challengeToggleInFlight;
+            if (selectedAsChallenger) {
+                btn.textContent = '✓ Selected as Challenger';
+            } else {
+                btn.textContent = challengeHandRaised
+                    ? '✋ Hand Raised (Cancel)' : '🙋 Raise Hand to Challenge';
+            }
+            btn.disabled = _challengeToggleInFlight || selectedAsChallenger;
             btn.setAttribute(
                 'aria-busy',
                 _challengeToggleInFlight ? 'true' : 'false'
             );
-            btn.className = challengeHandRaised ? 'btn btn-secondary' : 'btn btn-primary';
-            btn.setAttribute('aria-pressed', challengeHandRaised ? 'true' : 'false');
+            btn.className = (selectedAsChallenger || challengeHandRaised)
+                ? 'btn btn-secondary' : 'btn btn-primary';
+            btn.setAttribute(
+                'aria-pressed',
+                !selectedAsChallenger && challengeHandRaised ? 'true' : 'false'
+            );
         }
         if (status) {
-            status.textContent = challengeHandConfirmationPending
-                ? 'Could not confirm. Checking...'
-                : challengeHandRaised ? 'Waiting to be selected...' : '';
+            if (selectedAsChallenger) {
+                status.textContent = 'You have been selected as the challenger.';
+            } else {
+                status.textContent = challengeHandConfirmationPending
+                    ? 'Could not confirm. Checking...'
+                    : challengeHandRaised ? 'Waiting to be selected...' : '';
+            }
         }
     }
 
@@ -2862,7 +3136,8 @@ function renderChallengeUI(state) {
 }
 
 window.toggleRaiseHand = async function() {
-    if (_challengeToggleInFlight) return;
+    if (_challengeToggleInFlight ||
+            lastReceivedState?.is_active_challenger === true) return;
     const state = lastReceivedState;
     if (!state) return;
     const presKey = getPresentationKey(state);
@@ -3071,12 +3346,13 @@ function updateCompetitionTeamOptionLabel(option) {
     option.dataset.baseLabel = teamName;
     const memberCount = normalizedParticipationCount(option.dataset.memberCount);
     const neverCount = normalizedParticipationCount(option.dataset.neverCount);
+    const priorCount = Math.max(0, memberCount - neverCount);
     if (memberCount === 0) {
         option.textContent = `${teamName} (empty)`;
         return;
     }
-    const completed = option.dataset.completed === '1' ? ' · completed' : '';
-    option.textContent = `${teamName} · ${neverCount}/${memberCount} no prior turn${completed}`;
+    const completed = option.dataset.completed === '1' ? ' (completed)' : '';
+    option.textContent = `${teamName} · ${priorCount}/${memberCount}${completed}`;
 }
 
 function updateCompetitionTeamSummary(section) {
@@ -3328,6 +3604,7 @@ function renderInstructorChallenge(state) {
                     `${submitted} out of ${eligible} students voted`;
                 const row = document.createElement('div');
                 row.className = 'challenge-active-row';
+                row.dataset.challengeKey = String(ch.challenge_key);
                 row.innerHTML = `<span class="challenge-active-details">
                     <strong>Challenger ${ch.challenge_num}:</strong>
                     ${escapeHtml(ch.challenger_name)} (${escapeHtml(ch.challenger_team_name || '')})
@@ -3339,7 +3616,19 @@ function renderInstructorChallenge(state) {
                     'btn btn-sm btn-danger challenge-mutating-btn';
                 btn.textContent = 'Clear';
                 btn.disabled = ratingsSettling;
-                btn.addEventListener('click', () => clearChallenger(ch.challenge_key));
+                if (state.poll_active) {
+                    btn.title = 'Stop Poll before clearing this challenger';
+                }
+                btn.addEventListener('click', () => {
+                    if (state.poll_active) {
+                        showToast(
+                            'Stop Poll, wait for final ratings to save, then click Clear again.',
+                            'warning'
+                        );
+                        return;
+                    }
+                    clearChallenger(ch.challenge_key);
+                });
                 row.appendChild(btn);
                 activeDiv.appendChild(row);
             }
@@ -3354,7 +3643,7 @@ window.selectChallenger = async function(studentId) {
     });
     _instructorActionInFlight = true;
     try {
-        const data = await postJSON('/api/select_challenger', payload);
+        const data = await postJSONAfterRatingsSettle('/api/select_challenger', payload);
         if (!data.success) {
             showInstructorMutationError(
                 data,
@@ -3371,7 +3660,7 @@ window.selectChallenger = async function(studentId) {
                     'warning'
                 );
             }
-            await reconcileCompetitionParticipationCounts();
+            markCompetitionParticipationCountsDirty();
             window.instructorPollOnce?.();
         }
     } finally {
@@ -3385,7 +3674,7 @@ window.clearChallenger = async function(challengeKey) {
     });
     _instructorActionInFlight = true;
     try {
-        let data = await postJSON('/api/clear_challenger', payload);
+        let data = await postJSONAfterRatingsSettle('/api/clear_challenger', payload);
         if (data.requires_discard) {
             const count = Number(
                 data.challenge_rating_count ?? data.rating_count
@@ -3396,7 +3685,7 @@ window.clearChallenger = async function(challengeKey) {
                     '. Permanently discard them and clear the challenger?')) {
                 return;
             }
-            data = await postJSON('/api/clear_challenger', {
+            data = await postJSONAfterRatingsSettle('/api/clear_challenger', {
                 ...payload,
                 discard_ratings: true
             });
@@ -3407,7 +3696,16 @@ window.clearChallenger = async function(challengeKey) {
                 'Failed to clear challenger'
             );
         } else {
-            await reconcileCompetitionParticipationCounts();
+            document.querySelectorAll('.challenge-active-row').forEach(row => {
+                if (row.dataset.challengeKey === String(challengeKey)) {
+                    row.remove();
+                }
+            });
+            showToast(
+                'Challenger cleared. The student may raise their hand again.',
+                'success'
+            );
+            markCompetitionParticipationCountsDirty();
             window.instructorPollOnce?.();
         }
     } finally {
@@ -3456,13 +3754,13 @@ if (instructor) {
     let _instrConnectionStatusTimer = null;
 
     function showInstructorConnectionStatus(message, recovered = false) {
+        _instrConnectionInterrupted = !recovered;
         const status = document.getElementById('instructor-connection-status');
         if (!status) return;
         if (_instrConnectionStatusTimer) clearTimeout(_instrConnectionStatusTimer);
         status.textContent = message;
         status.classList.toggle('recovered', recovered);
         status.hidden = false;
-        _instrConnectionInterrupted = !recovered;
         if (recovered) {
             _instrConnectionStatusTimer = setTimeout(() => {
                 status.hidden = true;
@@ -3471,8 +3769,20 @@ if (instructor) {
         }
     }
 
+    function revalidateInstructorQuestions() {
+        const hasQuestionUI =
+            document.getElementById('disc-questions-list') ||
+            document.getElementById('setup-week-select') ||
+            document.getElementById('comp-question');
+        if (!hasQuestionUI) return;
+        renderedDiscQuestionsVersion = null;
+        clearQuestionLoadRetry();
+        void initWeekSelector();
+    }
+
     function instructorPollDelay(interval) {
-        const base = Math.max(1000, Number(interval) || 3000);
+        const minimum = document.hidden ? 7500 : 1000;
+        const base = Math.max(minimum, Number(interval) || 3000);
         const backedOff = Math.min(30000, base * Math.pow(2, _instrPollFailures));
         return Math.round(backedOff * (1 + Math.random() * 0.2));
     }
@@ -3562,8 +3872,8 @@ if (instructor) {
         return true;
     }
 
-    // Mirror the server-rendered "— previously presented" option suffix
-    // once a presentation moves into the history.
+    // Mirror the server-rendered completed suffix once a presentation moves
+    // into the history.
     function markPresentedCompQuestionOptions(history) {
         const select = document.getElementById('comp-question');
         if (!select || !Array.isArray(history)) return;
@@ -3572,9 +3882,12 @@ if (instructor) {
         );
         select.querySelectorAll('option[value]').forEach(option => {
             if (!option.value || !presented.has(option.value)) return;
-            if (!option.textContent.endsWith(' — previously presented')) {
-                option.textContent += ' — previously presented';
-            }
+            const suffix = ' (completed)';
+            const baseLabel = option.dataset.baseLabel ||
+                option.textContent.trim().replace(/ \(completed\)$/, '');
+            option.dataset.baseLabel = baseLabel;
+            option.dataset.completed = '1';
+            option.textContent = `${baseLabel}${suffix}`;
         });
     }
 
@@ -3633,6 +3946,7 @@ if (instructor) {
             }
             if (!res.ok) throw new Error('poll failed');
             if (_instrConnectionInterrupted) {
+                revalidateInstructorQuestions();
                 showInstructorConnectionStatus('Live updates restored.', true);
             }
             _instrPollFailures = 0;
@@ -3661,13 +3975,14 @@ if (instructor) {
             }
 
 
-            if (document.getElementById('disc-questions-list') &&
-                    (Number(state.discussion_questions_version) || 0) !== renderedDiscQuestionsVersion) {
-                try {
-                    await refreshDiscussionQuestions();
-                } catch (e) {
-                    // Retry on the next poll without blocking other updates.
-                }
+            const hasQuestionUI = document.getElementById('setup-week-select') ||
+                document.getElementById('disc-questions-list') ||
+                document.getElementById('comp-question');
+            if (state && hasQuestionUI &&
+                    Date.now() >= _questionLoadRetryAt &&
+                    (Number(state.discussion_questions_version) || 0) !==
+                        renderedDiscQuestionsVersion) {
+                await initWeekSelector();
             }
             const participation = document.getElementById('thumb-participation');
             if (participation) {
@@ -3720,7 +4035,7 @@ if (instructor) {
                                 `/api/teams?version=${encodeURIComponent(state.roster_version)}`
                             );
                         if (!rosterResponse.ok) throw new Error('roster refresh failed');
-                        renderRosterGrid(rosterGrid, rosterData, null);
+                        renderRosterGrid(rosterGrid, rosterData, null, { instructorSetup: true });
                         _instrRosterVersion = state.roster_version;
                         instructor.dataset.rosterVersion = String(state.roster_version || 0);
                     } catch (e) {
@@ -3760,13 +4075,7 @@ if (instructor) {
                 if (qText && state.active_question) {
                     const qKey = `${state.active_question.id}:${state.active_question.revision || ''}`;
                     if (qKey !== lastRenderedQuestionKey) {
-                        let newHtml;
-                        if (state.active_question.html_content) {
-                            newHtml = sanitizeHtml(state.active_question.html_content);
-                        } else {
-                            newHtml = renderPresentationQuestion(state.active_question);
-                        }
-                        qText.innerHTML = newHtml;
+                        qText.innerHTML = renderPresentationQuestion(state.active_question);
                         safeTypeset(qText);
                         safeHighlight(qText);
                         lastRenderedQuestionKey = qKey;
@@ -3860,7 +4169,10 @@ if (instructor) {
     });
     window.addEventListener('online', instructorPollOnce);
     document.addEventListener('visibilitychange', () => {
-        if (!document.hidden) instructorPollOnce();
+        if (!document.hidden) {
+            revalidateInstructorQuestions();
+            instructorPollOnce();
+        }
     });
     instructorPollOnce();
     // Expose for global functions (randomAssign, unassignAll, etc.)
@@ -3907,24 +4219,29 @@ window.cancelModifyTeams = function() {
     _originalMaxTeams = null;
 };
 
+function applyInstructorTeamsLocked(locked) {
+    const isLocked = Boolean(locked);
+    if (instructor) instructor.dataset.teamsLocked = isLocked ? '1' : '0';
+    const lockButton = document.getElementById('btn-toggle-lock');
+    if (!lockButton) return;
+    lockButton.textContent = isLocked ? 'Unlock Teams' : 'Lock Teams';
+    lockButton.classList.toggle('btn-danger', isLocked);
+    lockButton.classList.toggle('btn-primary', !isLocked);
+}
+
 window.toggleLock = async function(btn) {
-    const wasLocked = btn.textContent.includes('Unlock');
+    const wasLocked = instructor?.dataset?.teamsLocked === '1';
     btn.disabled = true;
     try {
         const data = await postJSON('/api/toggle_lock_teams', instructorStatePayload({
             locked: !wasLocked
         }));
         if (data.success) {
-            if (wasLocked) {
-                btn.textContent = 'Lock Teams';
-                btn.classList.remove('btn-danger');
-                btn.classList.add('btn-primary');
-                showToast('Teams unlocked');
-            } else {
-                btn.textContent = 'Unlock Teams';
-                btn.classList.remove('btn-primary');
-                btn.classList.add('btn-danger');
+            applyInstructorTeamsLocked(data.locked);
+            if (data.locked) {
                 showToast('Teams locked', 'warning');
+            } else {
+                showToast('Teams unlocked');
             }
         } else {
             showInstructorMutationError(data, 'Failed to change team locking');
@@ -4101,7 +4418,7 @@ window.setPhase = async function(phase) {
             phase,
             confirm_end_session: confirmEndSession
         });
-        const data = await postJSON('/api/set_phase', phasePayload);
+        const data = await postJSONAfterRatingsSettle('/api/set_phase', phasePayload);
         if (data.success) {
             window.location.reload();
         } else {
@@ -4116,18 +4433,32 @@ window.setPhase = async function(phase) {
 let studentSort = 'student_id';
 let studentOrder = 'asc';
 let studentPage = 1;
-let studentPerPage = parseInt(localStorage.getItem('popping-student-per-page') || '10', 10);
+let storedStudentPerPage = '10';
+try {
+    storedStudentPerPage =
+        localStorage.getItem('popping-student-per-page') || '10';
+} catch (error) {
+    // Storage can be blocked without disabling student management.
+}
+let studentPerPage = parseInt(storedStudentPerPage, 10);
 if (![10, 25, 50, 100].includes(studentPerPage)) studentPerPage = 10;
 let teamFilterVal = '';
 let _studentTableLoading = false;
 let _studentTableLoadFailed = false;
 let _studentTableRetryTimer = null;
+let _studentTableReloadPending = false;
+let _studentTableTrailingReloadTimer = null;
+let _studentTableRenderSignature = null;
 
 window.setStudentPerPage = function(value) {
     const size = parseInt(value, 10);
     if (![10, 25, 50, 100].includes(size)) return;
     studentPerPage = size;
-    localStorage.setItem('popping-student-per-page', String(size));
+    try {
+        localStorage.setItem('popping-student-per-page', String(size));
+    } catch (error) {
+        // Keep the selection for this page even when persistence is blocked.
+    }
     studentPage = 1;
     loadStudentTable();
 };
@@ -4172,13 +4503,29 @@ window.toggleTeamFilter = function(e) {
 };
 
 window.setTeamFilter = function(val, label) {
-    teamFilterVal = val;
-    document.getElementById('team-filter-label').textContent = label;
+    teamFilterVal = String(val ?? '');
+    const legacyLabel = document.getElementById('team-filter-label');
+    if (legacyLabel) legacyLabel.textContent = label || 'All teams';
     setTeamFilterExpanded(false);
     document.getElementById('team-filter-trigger')?.focus();
+    const nativeSelect = document.getElementById('team-filter-select');
+    if (nativeSelect && nativeSelect.value !== teamFilterVal) {
+        nativeSelect.value = teamFilterVal;
+    }
     studentPage = 1;
     loadStudentTable();
 };
+
+window.setTeamFilterFromSelect = function(select) {
+    teamFilterVal = String(select?.value ?? '');
+    studentPage = 1;
+    loadStudentTable();
+};
+
+const initialTeamFilterSelect = document.getElementById('team-filter-select');
+if (initialTeamFilterSelect) {
+    teamFilterVal = String(initialTeamFilterSelect.value || '');
+}
 
 window.teamFilterOptionKeydown = function(event, val, label) {
     if (event.key !== 'Enter' && event.key !== ' ') return;
@@ -4197,7 +4544,38 @@ window.debouncedStudentSearch = function() {
 };
 
 window.loadStudentTable = async function() {
-    if (_studentTableLoading) return;
+    const captureFocus = () => {
+        const active = document.activeElement;
+        const key = active?.dataset?.studentFocus;
+        return key ? String(key) : null;
+    };
+    const restoreFocus = key => {
+        if (!key) return;
+        const target = Array.from(document.querySelectorAll(
+            '[data-student-focus]'
+        )).find(element => element.dataset.studentFocus === key);
+        if (target?.focus) {
+            target.focus();
+            return;
+        }
+        const fallback = document.querySelector(
+            '#student-pagination .btn-primary'
+        ) || document.getElementById('student-search');
+        fallback?.focus?.();
+    };
+    const renderSignatureFor = (data, page, totalPages, students, teams) =>
+        JSON.stringify({
+            page, totalPages,
+            total: Number(data.total) || 0,
+            courseTotal: Number(data.course_total) || 0,
+            students, teams,
+            sort: studentSort, order: studentOrder,
+            perPage: studentPerPage, team: teamFilterVal
+        });
+    if (_studentTableLoading) {
+        _studentTableReloadPending = true;
+        return;
+    }
     _studentTableLoading = true;
     const search = document.getElementById('student-search')?.value || '';
     const params = new URLSearchParams({
@@ -4241,13 +4619,36 @@ window.loadStudentTable = async function() {
         return;
     } finally {
         _studentTableLoading = false;
+        if (_studentTableReloadPending &&
+                _studentTableTrailingReloadTimer === null) {
+            _studentTableReloadPending = false;
+            _studentTableTrailingReloadTimer = window.setTimeout(() => {
+                _studentTableTrailingReloadTimer = null;
+                void loadStudentTable();
+            }, 0);
+        }
     }
     _studentTableLoadFailed = false;
     if (_studentTableRetryTimer !== null) {
         window.clearTimeout(_studentTableRetryTimer);
         _studentTableRetryTimer = null;
     }
-    window._lastTeams = data.teams || [];
+    const teams = Array.isArray(data.teams) ? data.teams : [];
+    const students = Array.isArray(data.students) ? data.students : [];
+    const totalPages = Math.max(1, Number(data.total_pages) || 1);
+    const responsePage = Number(data.page) || studentPage || 1;
+    const clampedPage = Math.min(totalPages, Math.max(1, responsePage));
+    const needsClampedReload = responsePage !== clampedPage &&
+        students.length === 0 && (Number(data.total) || 0) > 0;
+    studentPage = clampedPage;
+    if (needsClampedReload) {
+        _studentTableRenderSignature = null;
+        void loadStudentTable();
+        return;
+    }
+    data.page = clampedPage;
+    data.total_pages = totalPages;
+    window._lastTeams = teams;
     const instructorPage = document.querySelector('.instructor[data-student-count]');
     if (instructorPage && data.course_total != null) {
         instructorPage.dataset.studentCount = String(
@@ -4257,24 +4658,34 @@ window.loadStudentTable = async function() {
 
     const tbody = document.getElementById('student-tbody');
     if (!tbody) return;
+    const renderSignature = renderSignatureFor(
+        data, clampedPage, totalPages, students, teams
+    );
+    if (_studentTableRenderSignature === renderSignature &&
+            (!tbody.dataset || tbody.dataset.renderSignature === renderSignature)) {
+        return;
+    }
+    const focusKey = captureFocus();
+    _studentTableRenderSignature = renderSignature;
+    if (tbody.dataset) tbody.dataset.renderSignature = renderSignature;
     tbody.innerHTML = '';
 
-    const teams = data.teams || [];
-
-    data.students.forEach(s => {
+    students.forEach(s => {
+        const name = s.name || s.student_id;
+        const pickerLabel =
+            `Change team assignment for ${escapeAttrValue(name)}`;
         const teamHtml = s.team_name
-            ? `<span class="team-tag clickable" style="--team-color:${escapeAttrValue(s.team_color || '#94a3b8')}" onclick="toggleTeamPicker(event, ${s.id})" data-student="${s.id}">${escapeHtmlValue(s.team_name)}</span>`
-            : `<span class="team-tag unassigned-tag clickable" onclick="toggleTeamPicker(event, ${s.id})" data-student="${s.id}">Unassigned</span>`;
+            ? `<button type="button" class="team-tag clickable" style="--team-color:${escapeAttrValue(s.team_color || '#94a3b8')}" onclick="toggleTeamPicker(event, ${s.id})" data-student="${s.id}" data-student-focus="team-${s.id}" aria-label="${pickerLabel}" aria-haspopup="menu" aria-expanded="false">${escapeHtmlValue(s.team_name)}</button>`
+            : `<button type="button" class="team-tag unassigned-tag clickable" onclick="toggleTeamPicker(event, ${s.id})" data-student="${s.id}" data-student-focus="team-${s.id}" aria-label="${pickerLabel}" aria-haspopup="menu" aria-expanded="false">Unassigned</button>`;
         const statusHtml = s.is_online
             ? '<span class="online-dot"></span> Online'
             : '<span class="offline-dot"></span> Offline';
         const loginTime = s.last_login_at ? s.last_login_at.substring(0, 19) : 'Not yet';
         const presentationCount = normalizedParticipationCount(s.presentation_count);
         const challengerCount = normalizedParticipationCount(s.challenger_count);
-        const name = s.name || s.student_id;
         const actionCell = isDemoInstructor
             ? ''
-            : `<td><button class="btn btn-sm btn-danger" onclick="removeStudent(${s.id}, this)">Remove</button></td>`;
+            : `<td><button class="btn btn-sm btn-danger" data-student-focus="remove-${s.id}" onclick="removeStudent(${s.id}, this)">Remove</button></td>`;
 
         const tr = document.createElement('tr');
         tr.setAttribute('data-id', s.id);
@@ -4309,10 +4720,11 @@ window.loadStudentTable = async function() {
     if (pag) {
         let html = `<span class="pag-info">${data.total} students</span>`;
         for (let p = 1; p <= data.total_pages; p++) {
-            html += `<button class="btn btn-sm ${p === data.page ? 'btn-primary' : 'btn-outline'}" onclick="goToStudentPage(${p})">${p}</button>`;
+            html += `<button class="btn btn-sm ${p === data.page ? 'btn-primary' : 'btn-outline'}" data-student-focus="page-${p}" onclick="goToStudentPage(${p})">${p}</button>`;
         }
         pag.innerHTML = html;
     }
+    restoreFocus(focusKey);
 };
 
 window.sortStudents = function(col) {
@@ -4343,25 +4755,40 @@ if (document.getElementById('student-tbody')) {
     loadStudentTable();
 }
 
+function removeIndividualTeamPicker(picker, restoreFocus = false) {
+    if (typeof picker?._closeIndividualTeamPicker === 'function') {
+        picker._closeIndividualTeamPicker(restoreFocus);
+    } else {
+        picker?.remove();
+    }
+}
+
 window.toggleTeamPicker = function(e, studentId) {
     e.stopPropagation();
-    document.querySelectorAll('.team-picker:not(.filter-picker)').forEach(el => el.remove());
+    document.querySelectorAll('.team-tag[aria-expanded="true"]').forEach(tag => {
+        tag.setAttribute('aria-expanded', 'false');
+    });
+    document.querySelectorAll('.team-picker:not(.filter-picker)').forEach(
+        picker => removeIndividualTeamPicker(picker)
+    );
 
     const tag = e.currentTarget;
     const rect = tag.getBoundingClientRect();
     const picker = document.createElement('div');
     picker.className = 'team-picker';
+    picker.setAttribute('role', 'menu');
+    picker.setAttribute('aria-label', tag.getAttribute('aria-label') || 'Choose team');
 
     const teams = window._lastTeams || [];
-    let html = '<div class="team-picker-item" onclick="pickTeam(' + studentId + ', null)">Unassigned</div>';
+    let html = '<button type="button" class="team-picker-item" role="menuitem" onclick="pickTeam(' + studentId + ', null)">Unassigned</button>';
     teams.forEach(t => {
-        html += `<div class="team-picker-item" style="border-left:3px solid ${escapeAttrValue(t.color)}" onclick="pickTeam(${studentId}, ${t.id})">${escapeHtmlValue(t.name)}</div>`;
+        html += `<button type="button" class="team-picker-item" role="menuitem" style="border-left:3px solid ${escapeAttrValue(t.color)}" onclick="pickTeam(${studentId}, ${t.id})">${escapeHtmlValue(t.name)}</button>`;
     });
     picker.innerHTML = html;
     picker.style.position = 'fixed';
-    picker.style.left = rect.left + 'px';
+    picker.style.visibility = 'hidden';
 
-    // Position: below or above based on available space
+    // Position below or above, and keep the menu inside the viewport.
     const pickerHeight = Math.min((teams.length + 1) * 36, 260);
     if (rect.bottom + pickerHeight + 8 > window.innerHeight) {
         picker.style.bottom = (window.innerHeight - rect.top + 4) + 'px';
@@ -4370,19 +4797,69 @@ window.toggleTeamPicker = function(e, studentId) {
     }
 
     document.body.appendChild(picker);
+    const viewportWidth =
+        window.innerWidth || document.documentElement.clientWidth;
+    const left = Math.max(
+        8,
+        Math.min(rect.left, viewportWidth - picker.offsetWidth - 8)
+    );
+    picker.style.left = left + 'px';
+    picker.style.visibility = '';
+    tag.setAttribute('aria-expanded', 'true');
+    picker.querySelector('.team-picker-item')?.focus();
+
+    let outsideClickHandler = null;
+    const closePicker = (restoreFocus = false) => {
+        picker.remove();
+        tag.setAttribute('aria-expanded', 'false');
+        if (outsideClickHandler) {
+            document.removeEventListener('click', outsideClickHandler);
+            outsideClickHandler = null;
+        }
+        if (restoreFocus) tag.focus();
+    };
+    picker._closeIndividualTeamPicker = closePicker;
+
+    picker.addEventListener('keydown', event => {
+        if (event.key === 'Escape') {
+            event.preventDefault();
+            closePicker(true);
+            return;
+        }
+        const items = Array.from(
+            picker.querySelectorAll('.team-picker-item')
+        );
+        const current = items.indexOf(document.activeElement);
+        let next = null;
+        if (event.key === 'ArrowDown') {
+            next = items[(current + 1 + items.length) % items.length];
+        } else if (event.key === 'ArrowUp') {
+            next = items[(current - 1 + items.length) % items.length];
+        } else if (event.key === 'Home') {
+            next = items[0];
+        } else if (event.key === 'End') {
+            next = items[items.length - 1];
+        }
+        if (next) {
+            event.preventDefault();
+            next.focus();
+        }
+    });
 
     setTimeout(() => {
-        document.addEventListener('click', function close() {
-            picker.remove();
-            document.removeEventListener('click', close);
-        }, { once: true });
+        if (!picker.isConnected) return;
+        outsideClickHandler = () => closePicker(false);
+        document.addEventListener('click', outsideClickHandler, { once: true });
     }, 0);
 };
 
 window.pickTeam = async function(studentId, teamId) {
     if (!beginRosterMutation()) return;
+    document.querySelectorAll('.team-tag[aria-expanded="true"]').forEach(tag => {
+        tag.setAttribute('aria-expanded', 'false');
+    });
     document.querySelectorAll('.team-picker:not(.filter-picker)').forEach(
-        el => el.remove()
+        picker => removeIndividualTeamPicker(picker)
     );
     try {
         const data = await postJSON('/api/assign_student', instructorStatePayload({
@@ -4440,100 +4917,286 @@ window.addStudent = async function(btn) {
 /* ===== DISCUSSION QUESTIONS (weekly .md files) ===== */
 
 let discussionCurrentWeek = null;
-let renderedDiscQuestionsVersion = 0;
+let renderedDiscQuestionsVersion = null;
+let _questionLoadInFlight = null;
+let _questionLoadRetryTimer = null;
+let _questionLoadRetryAt = 0;
+let _questionLoadFailures = 0;
 
-// Populate setup week selector and discussion loader
-async function initWeekSelector() {
-    let data;
-    try {
-        const { res, data: questionData } = await fetchJSONWithTimeout(
-            '/api/discussion_questions'
-        );
-        if (res.status === 401) {
-            redirectToSessionEnded();
-            return;
+function questionLoadRetryDelay(failures) {
+    return Math.min(30000, 1000 * Math.pow(2, Math.max(0, failures - 1)));
+}
+
+function clearQuestionLoadRetry() {
+    if (_questionLoadRetryTimer !== null) {
+        window.clearTimeout(_questionLoadRetryTimer);
+        _questionLoadRetryTimer = null;
+    }
+    _questionLoadRetryAt = 0;
+}
+
+function scheduleQuestionLoadRetry() {
+    if (_questionLoadRetryTimer !== null || pageNavigationInProgress) return;
+    _questionLoadFailures = Math.min(_questionLoadFailures + 1, 6);
+    const delay = questionLoadRetryDelay(_questionLoadFailures);
+    _questionLoadRetryAt = Date.now() + delay;
+    _questionLoadRetryTimer = window.setTimeout(() => {
+        _questionLoadRetryTimer = null;
+        _questionLoadRetryAt = 0;
+        void initWeekSelector();
+    }, delay);
+}
+
+function setSetupQuestionControlsDisabled(disabled) {
+    const select = document.getElementById('setup-week-select');
+    if (select) select.disabled = disabled;
+    const previewButton = document.getElementById('btn-preview-week');
+    const applyButton = document.getElementById('btn-apply-week');
+    if (previewButton) previewButton.disabled = disabled;
+    if (applyButton) applyButton.disabled = disabled;
+}
+
+function updateQuestionReadinessWarning(data) {
+    let warning = document.getElementById('question-readiness-warning');
+    if (!warning) {
+        const setupSelect = document.getElementById('setup-week-select');
+        const anchor = setupSelect?.closest?.('#setup-week-selector') ||
+            setupSelect?.parentElement;
+        if (anchor) {
+            warning = document.createElement('p');
+            warning.id = 'question-readiness-warning';
+            warning.className = 'hint question-readiness-warning';
+            warning.setAttribute('role', 'status');
+            warning.setAttribute('aria-live', 'polite');
+            anchor.insertAdjacentElement('afterend', warning);
         }
-        if (!res.ok) {
-            const loadError = new Error('question load failed');
-            loadError.serverMessage = (questionData && questionData.error) || null;
-            throw loadError;
-        }
-        data = questionData;
-        discussionCurrentWeek = Number(data.current_week) || null;
-    } catch (error) {
-        const serverMessage = error && error.serverMessage;
-        const setupSel = document.getElementById('setup-week-select');
-        if (setupSel) {
-            setupSel.innerHTML = '<option value="" selected disabled>Could not load question weeks</option>';
-            setupSel.disabled = true;
-        }
-        const container = document.getElementById('disc-questions-list');
-        if (container) {
-            container.innerHTML = `<p class="empty">${escapeHtmlValue(
-                serverMessage || 'Could not load discussion questions. Please refresh.'
-            )}</p>`;
-        }
-        if (serverMessage) showToast(serverMessage, 'error');
+    }
+    if (!warning) return;
+    const ready = data?.ready !== false;
+    warning.hidden = ready;
+    if (ready) {
+        warning.textContent = '';
         return;
     }
+    const week = Number(data?.current_week) ||
+        Number(instructor?.dataset?.discussionWeek) || 1;
+    const issues = (Array.isArray(data?.issues) ? data.issues : [])
+        .map(issue => String(issue || '').trim())
+        .filter(Boolean)
+        .slice(0, 2);
+    warning.textContent = `Week ${week} weekly questions are not ready.` +
+        (issues.length ? ` ${issues.join(' ')}` : '') +
+        ' Appendix questions remain available.';
+}
 
-    // Setup page week selector
-    const setupSel = document.getElementById('setup-week-select');
-    const weeks = data.weeks || [];
-    if (setupSel) {
-        if (weeks.length > 0) {
-            setupSel.disabled = false;
-            setupSel.innerHTML = weeks.map(w => {
-                const status = w.ready ? '' : ' (not ready)';
-                const selected = w.num === data.current_week ? 'selected' : '';
-                const disabled = w.ready ? '' : 'disabled';
-                const issue = Array.isArray(w.issues) && w.issues[0]
-                    ? ` title="${escapeAttrValue(w.issues[0])}"`
-                    : '';
-                return `<option value="${w.num}" ${selected} ${disabled}${issue}>Week ${w.num}${status}</option>`;
-            }).join('');
-        } else {
-            setupSel.innerHTML = '<option value="" selected disabled>No question weeks found</option>';
-            setupSel.disabled = true;
+function competitionQuestionLabel(question, position) {
+    const title = String(question?.title || 'Untitled');
+    const truncated = title.length > 60 ? `${title.slice(0, 60)}...` : title;
+    const appendix = question?.source === 'appendix' || question?.appendix_id;
+    const number = discussionQuestionNumber(question, position);
+    return appendix ? `Appendix — ${truncated}` : `#${number}: ${truncated}`;
+}
+
+function rebuildCompetitionQuestionOptions(data) {
+    const select = document.getElementById('comp-question');
+    if (!select) return;
+    const questions = Array.isArray(data?.questions) ? data.questions : [];
+    const existing = Array.from(select.querySelectorAll('option[value]'))
+        .filter(option => option.value);
+    const existingById = new Map(existing.map(option => [
+        String(option.value || ''), option
+    ]));
+    const existingByKey = new Map(existing
+        .filter(option => option.dataset.questionKey)
+        .map(option => [option.dataset.questionKey, option]));
+    const selectedValue = String(select.value || '');
+    const history = (() => {
+        try {
+            return JSON.parse(instructor?.dataset?.presentationHistory || '[]');
+        } catch (error) {
+            return [];
         }
+    })();
+    const completedIds = new Set(history.map(item =>
+        String(item?.question_id ?? '')).filter(Boolean));
+    existing.forEach(option => {
+        if (option.dataset.completed === '1') {
+            completedIds.add(String(option.value));
+        }
+    });
+
+    let hasMissingIds = false;
+    const renderedIds = new Set();
+    const optionHtml = questions.map((question, position) => {
+        const questionKey = discussionQuestionKey(question);
+        let questionId = Number(question?.question_id) || null;
+        let prior = questionId ? existingById.get(String(questionId)) : null;
+        if (!prior && questionKey) prior = existingByKey.get(questionKey);
+        if (!questionId && prior?.value) {
+            questionId = Number(prior.value) || null;
+        }
+        if (!questionId) {
+            hasMissingIds = true;
+            return '';
+        }
+        const id = String(questionId);
+        renderedIds.add(id);
+        const completed = completedIds.has(id);
+        const baseLabel = competitionQuestionLabel(question, position);
+        return `<option value="${escapeAttrValue(id)}"` +
+            ` data-question-key="${escapeAttrValue(questionKey)}"` +
+            ` data-base-label="${escapeAttrValue(baseLabel)}"` +
+            ` data-completed="${completed ? '1' : '0'}">` +
+            `${escapeHtmlValue(baseLabel)}${completed ? ' (completed)' : ''}</option>`;
+    }).join('');
+
+    const preserved = hasMissingIds ? existing
+        .filter(option => option.value && !renderedIds.has(String(option.value)))
+        .map(option => option.outerHTML)
+        .join('') : '';
+    select.innerHTML = '<option value="">-- Choose question --</option>' +
+        optionHtml + preserved;
+    if (selectedValue && Array.from(select.options).some(
+            option => option.value === selectedValue)) {
+        select.value = selectedValue;
     }
+}
 
-    // Preview and Apply are separate actions. Keep this fallback for older
-    // cached templates, but changing the select itself never commits a week.
-    if (setupSel && weeks.length > 0) {
-        let previewBtn = document.getElementById('btn-preview-week');
-        if (!previewBtn) {
-            previewBtn = document.createElement('button');
-            previewBtn.type = 'button';
-            previewBtn.id = 'btn-preview-week';
-            previewBtn.className = 'btn btn-sm btn-secondary';
-            previewBtn.textContent = 'Preview';
-            previewBtn.onclick = previewDiscussionWeek;
-            setupSel.insertAdjacentElement('afterend', previewBtn);
+// Populate Setup controls and the Discussion list from the same endpoint.
+async function initWeekSelector() {
+    if (_questionLoadInFlight) return _questionLoadInFlight;
+    const request = (async () => {
+        let data;
+        const hadKnownGoodQuestions = renderedDiscQuestionsVersion !== null;
+        try {
+            const { res, data: questionData } = await fetchJSONWithTimeout(
+                '/api/discussion_questions',
+                { cache: 'no-store' }
+            );
+            if (res.status === 401) {
+                clearQuestionLoadRetry();
+                redirectToSessionEnded();
+                return null;
+            }
+            if (!res.ok) {
+                const loadError = new Error('question load failed');
+                loadError.serverMessage =
+                    (questionData && questionData.error) || null;
+                throw loadError;
+            }
+            data = questionData;
+        } catch (error) {
+            const serverMessage = error && error.serverMessage;
+            const firstFailure = _questionLoadFailures === 0;
+            if (!hadKnownGoodQuestions) {
+                const setupSel = document.getElementById('setup-week-select');
+                if (setupSel) {
+                    setupSel.innerHTML =
+                        '<option value="" selected disabled>Could not load question weeks</option>';
+                }
+                setSetupQuestionControlsDisabled(true);
+                const container = document.getElementById('disc-questions-list');
+                if (container) {
+                    container.innerHTML = `<p class="empty">${escapeHtmlValue(
+                        serverMessage ||
+                        'Could not load discussion questions. Retrying automatically.'
+                    )}</p>`;
+                }
+            }
+            if (firstFailure) {
+                showToast(
+                    serverMessage ||
+                    'Could not load discussion questions. Retrying automatically.',
+                    'error'
+                );
+            }
+            scheduleQuestionLoadRetry();
+            return null;
         }
-        if (!document.getElementById('btn-apply-week')) {
-            const applyBtn = document.createElement('button');
-            applyBtn.type = 'button';
-            applyBtn.id = 'btn-apply-week';
-            applyBtn.className = 'btn btn-sm btn-primary';
-            applyBtn.textContent = 'Apply Week';
-            applyBtn.onclick = setDiscussionWeek;
-            previewBtn.insertAdjacentElement('afterend', applyBtn);
-        }
-    }
 
-    // Discussion page: auto-load questions for current week
-    const container = document.getElementById('disc-questions-list');
-    if (container) {
-        renderDiscussionQuestions(data);
+        clearQuestionLoadRetry();
+        _questionLoadFailures = 0;
+        discussionCurrentWeek = Number(data.current_week) || null;
+        renderedDiscQuestionsVersion = Number(data.version) || 0;
+
+        updateQuestionReadinessWarning(data);
+        // Setup page week selector
+        const setupSel = document.getElementById('setup-week-select');
+        const weeks = Array.isArray(data.weeks) ? data.weeks : [];
+        const previousSetupSelection = String(setupSel?.value || '');
+        const setupSelection = weeks.some(week =>
+            String(week.num) === previousSetupSelection)
+            ? previousSetupSelection
+            : String(data.current_week || '');
+        if (setupSel) {
+            if (weeks.length > 0) {
+                setupSel.disabled = false;
+                setupSel.innerHTML = weeks.map(w => {
+                    const status = w.ready ? '' : ' (not ready)';
+                    const selected = String(w.num) === setupSelection ? 'selected' : '';
+                    const disabled = w.ready ? '' : 'disabled';
+                    const issue = Array.isArray(w.issues) && w.issues[0]
+                        ? ` title="${escapeAttrValue(w.issues[0])}"`
+                        : '';
+                    return `<option value="${w.num}" ${selected} ${disabled}${issue}>Week ${w.num}${status}</option>`;
+                }).join('');
+            } else {
+                setupSel.innerHTML =
+                    '<option value="" selected disabled>No question weeks found</option>';
+                setupSel.disabled = true;
+            }
+        }
+
+        // Preview and Apply are separate actions. Keep this fallback for older
+        // cached templates, but changing the select itself never commits a week.
+        if (setupSel && weeks.length > 0) {
+            let previewBtn = document.getElementById('btn-preview-week');
+            if (!previewBtn) {
+                previewBtn = document.createElement('button');
+                previewBtn.type = 'button';
+                previewBtn.id = 'btn-preview-week';
+                previewBtn.className = 'btn btn-sm btn-secondary';
+                previewBtn.textContent = 'Preview';
+                previewBtn.onclick = previewDiscussionWeek;
+                setupSel.insertAdjacentElement('afterend', previewBtn);
+            }
+            if (!document.getElementById('btn-apply-week')) {
+                const applyBtn = document.createElement('button');
+                applyBtn.type = 'button';
+                applyBtn.id = 'btn-apply-week';
+                applyBtn.className = 'btn btn-sm btn-primary';
+                applyBtn.textContent = 'Apply Week';
+                applyBtn.onclick = setDiscussionWeek;
+                previewBtn.insertAdjacentElement('afterend', applyBtn);
+            }
+        }
+        setSetupQuestionControlsDisabled(weeks.length === 0);
+
+        // Discussion page: auto-load questions for current week.
+        const container = document.getElementById('disc-questions-list');
+        rebuildCompetitionQuestionOptions(data);
+        if (container) renderDiscussionQuestions(data);
+        return data;
+    })();
+    _questionLoadInFlight = request;
+    try {
+        return await request;
+    } finally {
+        if (_questionLoadInFlight === request) _questionLoadInFlight = null;
     }
 }
 
 /* ===== WEEK PREVIEW MODAL ===== */
 // Shows a week's questions (fetched with ?week=N) without committing; the
 // explicit "Use this week" action runs the normal setDiscussionWeek flow.
-function closeWeekPreviewModal() {
+let weekPreviewReturnFocus = null;
+
+function closeWeekPreviewModal({ restoreFocus = true } = {}) {
     document.getElementById('week-preview-overlay')?.remove();
+    document.body.classList.remove('modal-open');
+    const focusTarget = weekPreviewReturnFocus;
+    weekPreviewReturnFocus = null;
+    if (restoreFocus && focusTarget?.isConnected) focusTarget.focus();
 }
 window.closeWeekPreviewModal = closeWeekPreviewModal;
 
@@ -4544,38 +5207,52 @@ window.usePreviewedWeek = function(week) {
     setDiscussionWeek();
 };
 
-function showWeekPreviewModal(week, questions) {
-    closeWeekPreviewModal();
+function showWeekPreviewModal(
+        week, questions, returnFocus = document.activeElement) {
+    closeWeekPreviewModal({ restoreFocus: false });
+    weekPreviewReturnFocus = returnFocus;
     const overlay = document.createElement('div');
     overlay.id = 'week-preview-overlay';
+    overlay.setAttribute('role', 'dialog');
+    overlay.setAttribute('aria-modal', 'true');
+    overlay.setAttribute('aria-labelledby', 'week-preview-title');
+    overlay.setAttribute('tabindex', '-1');
     overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.55);display:flex;align-items:center;justify-content:center;z-index:1000;padding:16px;';
     const panel = document.createElement('div');
     panel.className = 'card';
     panel.style.cssText = 'max-width:720px;width:100%;max-height:80vh;overflow-y:auto;margin:0;';
     const body = questions.length
-        ? questions.map((q, i) => `
+        ? questions.map((q, i) => {
+            const bodyId = `week-preview-question-body-${i}`;
+            return `
         <div class="disc-question-card">
-            <div class="disc-question-header" role="button" tabindex="0" aria-expanded="false" onclick="toggleDiscQuestionCard(this)" onkeydown="discQuestionHeaderKeydown(event)">
-                <span class="disc-question-num">#${discussionQuestionNumber(q, i)}</span>
-                <span class="disc-question-title">${escapeHtmlValue(q.title || 'Untitled')}</span>
-            </div>
-            <div class="disc-question-body">
+            ${discussionQuestionHeaderHtml(
+                discussionQuestionNumber(q, i), q.title, bodyId, false
+            )}
+            <div class="disc-question-body" id="${bodyId}" hidden>
                 <div class="markdown-content">${renderMarkdown(q.content || '')}</div>
             </div>
-        </div>`).join('')
+        </div>`;
+        }).join('')
         : '<p class="empty">No questions found for this week.</p>';
     panel.innerHTML = `
-        <h2>Week ${week} questions preview</h2>
+        <h2 id="week-preview-title">Week ${week} questions preview</h2>
         ${body}
         <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:12px;">
-            <button type="button" class="btn btn-secondary" onclick="closeWeekPreviewModal()">Cancel</button>
+            <button type="button" class="btn btn-secondary week-preview-cancel" onclick="closeWeekPreviewModal()">Cancel</button>
             <button type="button" class="btn btn-primary" onclick="usePreviewedWeek(${week})">Use this week</button>
         </div>`;
     overlay.appendChild(panel);
     overlay.addEventListener('click', (e) => {
         if (e.target === overlay) closeWeekPreviewModal();
     });
+    overlay.addEventListener(
+        'keydown',
+        event => handleModalKeydown(event, overlay, closeWeekPreviewModal)
+    );
     document.body.appendChild(overlay);
+    document.body.classList.add('modal-open');
+    panel.querySelector('.week-preview-cancel')?.focus();
     safeTypeset(panel);
     safeHighlight(panel);
 }
@@ -4588,7 +5265,8 @@ window.previewDiscussionWeek = async function() {
     if (previewButton) previewButton.disabled = true;
     try {
         const { res, data } = await fetchJSONWithTimeout(
-            '/api/discussion_questions?week=' + encodeURIComponent(week)
+            '/api/discussion_questions?week=' + encodeURIComponent(week),
+            { cache: 'no-store' }
         );
         if (res.status === 401) {
             redirectToSessionEnded();
@@ -4601,7 +5279,7 @@ window.previewDiscussionWeek = async function() {
             );
             return;
         }
-        showWeekPreviewModal(parseInt(week, 10), data.questions || []);
+        showWeekPreviewModal(parseInt(week, 10), data.questions || [], previewButton);
     } catch (error) {
         showToast(
             'Could not load the week preview. Check your connection and try again.',
@@ -4643,7 +5321,9 @@ window.setDiscussionWeek = async function() {
 };
 
 // Load on page load
-if (document.getElementById('setup-week-select') || document.getElementById('disc-questions-list')) {
+if (document.getElementById('setup-week-select') ||
+        document.getElementById('disc-questions-list') ||
+        document.getElementById('comp-question')) {
     initWeekSelector();
 }
 
@@ -4734,9 +5414,9 @@ window.nextPresentation = async function() {
 
     _instructorActionInFlight = true;
     try {
-        const data = await postJSON('/api/next_presentation', instructorStatePayload());
+        const data = await postJSONAfterRatingsSettle('/api/next_presentation', instructorStatePayload());
         if (data.success) {
-            await reconcileCompetitionParticipationCounts();
+            markCompetitionParticipationCountsDirty();
             if (typeof window.instructorPollOnce === 'function') {
                 window.instructorPollOnce();
             } else {
@@ -4755,7 +5435,7 @@ window.cancelPresentation = async function() {
     if (!confirm('Cancel this mistaken presentation without adding it to history?')) return;
     _instructorActionInFlight = true;
     try {
-        let data = await postJSON('/api/cancel_presentation', instructorStatePayload());
+        let data = await postJSONAfterRatingsSettle('/api/cancel_presentation', instructorStatePayload());
         if (data.requires_discard) {
             const hasDetailedCounts =
                 data.presentation_rating_count != null ||
@@ -4783,13 +5463,13 @@ window.cancelPresentation = async function() {
             if (!confirm(
                     'This will permanently discard ' + description +
                     '. Continue?')) return;
-            data = await postJSON(
+            data = await postJSONAfterRatingsSettle(
                 '/api/cancel_presentation',
                 instructorStatePayload({ discard_ratings: true })
             );
         }
         if (data.success) {
-            await reconcileCompetitionParticipationCounts();
+            markCompetitionParticipationCountsDirty();
             if (typeof window.instructorPollOnce === 'function') {
                 window.instructorPollOnce();
             } else {
@@ -4950,7 +5630,7 @@ window.startPoll = async function() {
     if (button?.classList.contains('gliding')) return;
     _instructorActionInFlight = true;
     try {
-        const data = await postJSON(
+        const data = await postJSONAfterRatingsSettle(
             '/api/start_poll',
             instructorStatePayload()
         );
@@ -5168,14 +5848,15 @@ function initStarRows() {
 // ===== UNASSIGN ALL =====
 
 window.unassignAll = async function(btn) {
-    if (!confirm('Clear all team assignments?')) return;
+    if (!confirm('Clear all team assignments and lock team joining?')) return;
     if (!beginRosterMutation()) return;
     if (btn) btn.disabled = true;
     try {
         const data = await postJSON('/api/unassign_all', instructorStatePayload());
         if (data.success) {
             applyRosterMutationVersion(data);
-            showToast('All team assignments cleared', 'warning');
+            applyInstructorTeamsLocked(data.locked);
+            showToast('All teams are empty and team joining is locked', 'warning');
             refreshRosterInPlace();
         } else {
             showInstructorMutationError(data, 'Failed to clear team assignments');
@@ -5191,6 +5872,8 @@ window.unassignAll = async function(btn) {
 let appendixMutationInProgress = false;
 let editingAppendixId = null;
 let restoredAppendixEditId = null;
+let appendixCreateRequestId = null;
+let appendixCreateRequestFingerprint = null;
 const appendixQuestionsById = new Map();
 
 function displayedAppendixWeek() {
@@ -5198,6 +5881,41 @@ function displayedAppendixWeek() {
         discussionCurrentWeek || instructor?.dataset?.discussionWeek || 0
     );
     return Number.isInteger(week) && week > 0 ? week : null;
+}
+
+function appendixDraftFingerprint(title, content, week) {
+    return JSON.stringify([
+        String(title || '').trim(),
+        String(content || '').trim(),
+        Number(week) || 0
+    ]);
+}
+
+function resetAppendixCreateRequest() {
+    appendixCreateRequestId = null;
+    appendixCreateRequestFingerprint = null;
+}
+
+function newAppendixCreateRequestId() {
+    try {
+        if (typeof window.crypto?.randomUUID === 'function') {
+            return window.crypto.randomUUID();
+        }
+    } catch (error) {
+        // Fall through to a local, high-entropy-enough request identifier.
+    }
+    return 'appendix-' + Date.now().toString(36) + '-' +
+        Math.random().toString(36).slice(2, 12);
+}
+
+function ensureAppendixCreateRequest(title, content, week) {
+    const fingerprint = appendixDraftFingerprint(title, content, week);
+    if (!appendixCreateRequestId ||
+            appendixCreateRequestFingerprint !== fingerprint) {
+        appendixCreateRequestId = newAppendixCreateRequestId();
+        appendixCreateRequestFingerprint = fingerprint;
+    }
+    return appendixCreateRequestId;
 }
 
 function beginAppendixMutation(button, pendingLabel) {
@@ -5234,14 +5952,19 @@ function upsertCompQuestionOption(data) {
     const text = `Appendix — ${truncated}`;
     const existing = select.querySelector(`option[value="${questionId}"]`);
     if (existing) {
-        const presented = existing.textContent.endsWith(' — previously presented');
-        existing.textContent = presented ? `${text} — previously presented` : text;
+        const completed = existing.dataset.completed === '1' ||
+            existing.textContent.endsWith(' (completed)');
+        existing.dataset.baseLabel = text;
+        existing.dataset.completed = completed ? '1' : '0';
+        existing.textContent = completed ? `${text} (completed)` : text;
         return true;
     }
     const placeholder = select.querySelector('option[value=""][disabled]');
     if (placeholder) placeholder.remove();
     const option = document.createElement('option');
     option.value = String(questionId);
+    option.dataset.baseLabel = text;
+    option.dataset.completed = '0';
     option.textContent = text;
     select.appendChild(option);
     return true;
@@ -5255,13 +5978,22 @@ window.addAppendixQuestion = async function(button) {
     if (!week) { showToast('Could not determine the displayed week', 'error'); return; }
     const editingId = editingAppendixId;
     if (!beginAppendixMutation(button, editingId ? 'Saving...' : 'Adding...')) return;
+    const createRequestId = editingId
+        ? null
+        : ensureAppendixCreateRequest(title, content, week);
+    if (!editingId) stashAppendixDraft();
     let keepPending = false;
     try {
         const data = await postJSON(
             editingId ? '/api/edit_appendix_question' : '/api/questions',
             instructorStatePayload(editingId
                 ? { appendix_id: editingId, title, content, week }
-                : { title, content, week })
+                : {
+                    title,
+                    content,
+                    week,
+                    client_request_id: createRequestId
+                })
         );
         if (data && data.success) {
             document.getElementById('appendix-title').value = '';
@@ -5314,11 +6046,13 @@ window.editAppendixQuestion = function(button) {
     if (!question || !titleInput || !contentInput || !addButton) return;
     restoredAppendixEditId = null;
     editingAppendixId = appendixId;
+    resetAppendixCreateRequest();
     titleInput.value = question.title.replace(/^A\d+:\s*/, '');
     contentInput.value = question.content;
     addButton.textContent = `Save ${appendixId}`;
     const cancelButton = document.querySelector('.appendix-cancel-edit-btn');
     if (cancelButton) cancelButton.style.display = '';
+    stashAppendixDraft();
     titleInput.scrollIntoView({ behavior: 'smooth', block: 'center' });
     titleInput.focus();
 };
@@ -5346,14 +6080,30 @@ function stashAppendixDraft() {
     const key = appendixDraftStorageKey();
     try {
         if (!titleInput.value && !contentInput.value) {
+            resetAppendixCreateRequest();
             sessionStorage.removeItem(key);
             return;
         }
+        const week = displayedAppendixWeek();
+        const fingerprint = appendixDraftFingerprint(
+            titleInput.value,
+            contentInput.value,
+            week
+        );
+        if (editingAppendixId ||
+                (appendixCreateRequestId &&
+                 appendixCreateRequestFingerprint !== fingerprint)) {
+            resetAppendixCreateRequest();
+        }
         sessionStorage.setItem(key, JSON.stringify({
-            week: Number(instructor?.dataset?.discussionWeek) || null,
+            week,
             title: titleInput.value,
             content: contentInput.value,
-            editingId: editingAppendixId
+            editingId: editingAppendixId,
+            clientRequestId: editingAppendixId
+                ? null : appendixCreateRequestId,
+            clientRequestFingerprint: editingAppendixId
+                ? null : appendixCreateRequestFingerprint
         }));
     } catch (e) {
         // sessionStorage unavailable (e.g. some private modes): the draft
@@ -5362,12 +6112,14 @@ function stashAppendixDraft() {
 }
 
 function clearAppendixDraft() {
+    resetAppendixCreateRequest();
     try {
         sessionStorage.removeItem(appendixDraftStorageKey());
     } catch (e) { /* ignore */ }
 }
 
 function setRestoredAppendixEditMode(appendixId) {
+    resetAppendixCreateRequest();
     editingAppendixId = appendixId;
     const addButton = document.querySelector('.appendix-add-btn');
     if (addButton) addButton.textContent = `Save ${appendixId}`;
@@ -5377,6 +6129,7 @@ function setRestoredAppendixEditMode(appendixId) {
 
 function restoreAppendixDraftAsAdd(message) {
     resetAppendixFormMode();
+    resetAppendixCreateRequest();
     // Rewrite the restored draft immediately so a later reload cannot
     // resurrect the stale target again. The typed text stays untouched.
     stashAppendixDraft();
@@ -5424,6 +6177,19 @@ function restoreAppendixDraft() {
     if (draft.week && currentWeek && draft.week !== currentWeek) return;
     titleInput.value = draft.title || '';
     contentInput.value = draft.content || '';
+    if (!draft.editingId) {
+        const fingerprint = appendixDraftFingerprint(
+            titleInput.value,
+            contentInput.value,
+            currentWeek
+        );
+        const requestId = String(draft.clientRequestId || '');
+        if (/^[A-Za-z0-9._:-]{8,128}$/.test(requestId) &&
+                draft.clientRequestFingerprint === fingerprint) {
+            appendixCreateRequestId = requestId;
+            appendixCreateRequestFingerprint = fingerprint;
+        }
+    }
     if (draft.editingId) {
         if (instructor?.dataset?.phase === 'discussion') {
             // The question map is populated asynchronously. Do not expose a
@@ -5697,7 +6463,11 @@ updateThemeIcon();
 window.toggleTheme = function() {
     const html = document.documentElement;
     const isLight = html.classList.toggle('light');
-    localStorage.setItem('popping-theme', isLight ? 'light' : 'dark');
+    try {
+        localStorage.setItem('popping-theme', isLight ? 'light' : 'dark');
+    } catch (error) {
+        // Theme still changes for this page when storage is blocked.
+    }
     updateThemeIcon();
 };
 
@@ -5764,8 +6534,9 @@ function renderDiscussionQuestions(data) {
 
     container.innerHTML = data.questions.map((q, i) => {
         const key = discussionQuestionKey(q) || `week-${data.current_week}-q${i}`;
-        const safeTitle = escapeHtmlValue(q.title || 'Untitled');
-        const expanded = _discQuestionExpanded.has(key) ? ' expanded' : '';
+        const isExpanded = _discQuestionExpanded.has(key);
+        const expanded = isExpanded ? ' expanded' : '';
+        const bodyId = `instructor-disc-question-body-${i}`;
         const appendixId = q.appendix_id || '';
         if (appendixId) {
             appendixQuestionsById.set(appendixId, {
@@ -5774,29 +6545,23 @@ function renderDiscussionQuestions(data) {
             });
         }
         const editBtn = appendixId
-            ? `<button class="btn btn-sm btn-secondary appendix-edit-btn" data-appendix-id="${escapeAttrValue(appendixId)}" onclick="event.stopPropagation(); editAppendixQuestion(this)">✏️ Edit</button>`
+            ? `<button class="btn btn-sm btn-secondary appendix-edit-btn" data-appendix-id="${escapeAttrValue(appendixId)}" onclick="editAppendixQuestion(this)">✏️ Edit</button>`
             : '';
         const deleteBtn = appendixId
-            ? `<button class="btn btn-sm btn-danger appendix-delete-btn" data-appendix-id="${escapeAttrValue(appendixId)}" onclick="event.stopPropagation(); deleteAppendixQuestion(this)">🗑 Delete</button>`
+            ? `<button class="btn btn-sm btn-danger appendix-delete-btn" data-appendix-id="${escapeAttrValue(appendixId)}" onclick="deleteAppendixQuestion(this)">🗑 Delete</button>`
             : '';
-        const hiddenBadge = q.hidden
-            ? '<span class="hidden-question-badge">Hidden from students</span>'
+        const action = editBtn || deleteBtn
+            ? `<div class="disc-question-actions">
+                   ${editBtn}
+                   ${deleteBtn}
+               </div>`
             : '';
-        const toggleBtn = `<button class="btn btn-sm ${q.hidden ? 'btn-primary' : 'btn-secondary'} toggle-question-btn" data-question-key="${escapeAttrValue(key)}" data-hidden="${q.hidden ? 1 : 0}" onclick="event.stopPropagation(); toggleDiscussionQuestion(this)">${q.hidden ? 'Show' : 'Hide'}</button>`;
-        const action = `<div class="disc-question-actions">
-               ${hiddenBadge}
-               ${toggleBtn}
-               ${editBtn}
-               ${deleteBtn}
-           </div>`;
         return `
-        <div class="disc-question-card${q.hidden ? ' is-hidden' : ''}${expanded}" data-question-key="${escapeAttrValue(key)}">
-            <div class="disc-question-header" role="button" tabindex="0" aria-expanded="${expanded ? 'true' : 'false'}" onclick="toggleDiscQuestionCard(this)" onkeydown="discQuestionHeaderKeydown(event)">
-                <span class="disc-question-num">#${discussionQuestionNumber(q, i)}</span>
-                <span class="disc-question-title">${safeTitle}</span>
-                ${action}
-            </div>
-            <div class="disc-question-body">
+        <div class="disc-question-card${expanded}" data-question-key="${escapeAttrValue(key)}">
+            ${discussionQuestionHeaderHtml(
+                discussionQuestionNumber(q, i), q.title, bodyId, isExpanded, action
+            )}
+            <div class="disc-question-body" id="${bodyId}"${isExpanded ? '' : ' hidden'}>
                 <div class="markdown-content">${renderMarkdown(q.content || '')}</div>
             </div>
         </div>
@@ -5808,38 +6573,6 @@ function renderDiscussionQuestions(data) {
 }
 
 async function refreshDiscussionQuestions() {
-    const container = document.getElementById('disc-questions-list');
-    if (!container) return;
-    const { res, data } = await fetchJSONWithTimeout('/api/discussion_questions');
-    if (res.status === 401) {
-        redirectToSessionEnded();
-        return;
-    }
-    if (!res.ok) throw new Error('question load failed');
-    renderDiscussionQuestions(data);
+    if (!document.getElementById('disc-questions-list')) return null;
+    return initWeekSelector();
 }
-
-window.toggleDiscussionQuestion = async function(btn) {
-    const key = btn.dataset.questionKey;
-    const currentlyHidden = btn.dataset.hidden === '1';
-    if (!key) return;
-    btn.disabled = true;
-    try {
-        const data = await postJSON('/api/toggle_discussion_question', instructorStatePayload({
-            question_key: key,
-            visible: currentlyHidden
-        }));
-        if (data && data.success) {
-            showToast(currentlyHidden
-                ? 'Question is visible to students'
-                : 'Question hidden from students', 'success');
-            // No direct refresh here: the toggle bumps
-            // discussion_questions_version and the instructor poll loop
-            // re-renders the list on that version change.
-        } else {
-            showInstructorMutationError(data, 'Failed to update question visibility');
-        }
-    } finally {
-        btn.disabled = false;
-    }
-};

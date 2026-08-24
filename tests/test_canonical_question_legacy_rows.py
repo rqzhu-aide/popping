@@ -5,6 +5,7 @@ from tests.test_canonical_question_upload import (
     _confirm_upload,
     _connect,
     _instructor_client,
+    _student_client,
     _weekly_source,
     upload_env,
 )
@@ -63,3 +64,50 @@ def test_legacy_rows_neither_render_nor_start_after_canonical_sync(upload_env):
             },
         )
         assert response.status_code in (404, 409)
+
+
+def test_active_legacy_row_does_not_substitute_new_or_pre_rendered_content(
+        upload_env):
+    canonical = _weekly_source((
+        "same-title",
+        "Shared title",
+        "New canonical body that was not active when the session started.",
+    ))
+    (upload_env["class_dir"] / "week-1-questions.md").write_bytes(canonical)
+    legacy_dir = upload_env["class_dir"] / "week1"
+    legacy_dir.mkdir()
+    (legacy_dir / "q01.html").write_text(
+        "<p>Obsolete pre-rendered body.</p>", encoding="utf-8"
+    )
+
+    with _connect(upload_env) as db:
+        team_id = db.execute(
+            "SELECT team_id FROM students WHERE id = ?",
+            (upload_env["student_id"],),
+        ).fetchone()[0]
+        legacy_id = db.execute(
+            """INSERT INTO questions
+               (course_id, question_num, question_text, title, content,
+                week_num, source_key)
+               VALUES (?, 1, 'Shared title', 'Shared title', NULL, 1,
+                       'presentation:1:1')""",
+            (upload_env["course_id"],),
+        ).lastrowid
+        db.execute(
+            """UPDATE course_state
+               SET phase = 'competition', active_team_id = ?,
+                   active_question_id = ?, current_question = 'Shared title'
+               WHERE course_id = ?""",
+            (team_id, legacy_id, upload_env["course_id"]),
+        )
+        db.commit()
+
+    active = _student_client(upload_env).get(
+        "/api/poll"
+    ).get_json()["state"]["active_question"]
+
+    assert active["id"] == legacy_id
+    assert active["source_key"] == "presentation:1:1"
+    assert active["question_text"] == "Shared title"
+    assert active["content"] is None
+    assert "html_content" not in active

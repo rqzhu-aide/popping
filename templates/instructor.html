@@ -59,8 +59,11 @@
         </div>
         <div class="phase-buttons">
             {% for p in phases %}
-            <button class="btn phase-btn {% if p == 'ended' %}btn-danger{% endif %} {% if state.phase == p %}active{% endif %}"
-                    data-phase="{{ p }}" onclick="setPhase('{{ p }}')">
+            <button type="button"
+                    class="btn phase-btn{% if p == 'ended' %} phase-btn-end{% endif %}{% if state.phase == p %} active{% endif %}"
+                    data-phase="{{ p }}" aria-pressed="{{ 'true' if state.phase == p else 'false' }}"
+                    {% if state.phase == p %}aria-current="step"{% endif %}
+                    onclick="setPhase('{{ p }}')">
                 {{ p | phase_label }}
             </button>
             {% endfor %}
@@ -78,7 +81,7 @@
                 <button class="btn btn-sm btn-secondary" id="btn-modify-members" onclick="startModifyMembers()">Modify</button>
             </div>
             <div class="week-selector" id="setup-week-selector">
-                <span class="week-label">Discussion week</span>
+                <label class="week-label" for="setup-week-select">Discussion week</label>
                 <select id="setup-week-select">
                     <option value="">Loading...</option>
                 </select>
@@ -89,13 +92,11 @@
             </div>
         </div>
             <div class="phase-settings phase-settings-secondary">
-                <button class="btn btn-sm {% if teams_locked %}btn-danger{% else %}btn-primary{% endif %}" onclick="toggleLock(this)">
+                <button class="btn btn-sm {% if teams_locked %}btn-danger{% else %}btn-primary{% endif %}"
+                        id="btn-toggle-lock" onclick="toggleLock(this)">
                     {% if teams_locked %}Unlock Teams{% else %}Lock Teams{% endif %}
                 </button>
                 <button class="btn btn-sm btn-secondary" onclick="unassignAll(this)">Clear All Teams</button>
-                {% if not session.get('is_demo') %}
-                <button class="btn btn-sm btn-danger" onclick="resetData()">Reset Course Data</button>
-                {% endif %}
             </div>
         {% endif %}
     </section>
@@ -160,15 +161,18 @@
                 {% set team_students = students | selectattr('team_id', 'equalto', t.id) | list %}
                 {% if team_students %}
                     {% for s in team_students %}
-                    <div class="roster-member">
+                    <div class="roster-member setup-roster-member">
                         <span class="team-dot" style="background:{{ t.color }}"></span>
-                        <span class="roster-member-name">{{ s | display_name }}</span>
-                        <span class="participation-badges" aria-label="Participation history">
-                            <span class="participation-badge{% if (s.presentation_count or 0) == 0 %} is-zero{% endif %}"
-                                  title="Completed presentation-team turns">Team turns: <strong>{{ s.presentation_count or 0 }}</strong></span>
-                            <span class="participation-badge{% if (s.challenger_count or 0) == 0 %} is-zero{% endif %}"
-                                  title="Confirmed challenger turns">Challenge turns: <strong>{{ s.challenger_count or 0 }}</strong></span>
-                        </span>
+                        <div class="setup-roster-member-body">
+                            <div class="setup-roster-member-topline">
+                                <span class="setup-roster-member-id">{{ s.student_id }}</span>
+                                <span class="participation-badge setup-roster-team-turns{% if (s.presentation_count or 0) == 0 %} is-zero{% endif %}"
+                                      title="Completed presentation-team turns">Team turns: <strong>{{ s.presentation_count or 0 }}</strong></span>
+                            </div>
+                            {% if s.name and s.name != s.student_id %}
+                            <div class="setup-roster-member-name">{{ s.name }}</div>
+                            {% endif %}
+                        </div>
                     </div>
                     {% endfor %}
                 {% else %}
@@ -196,39 +200,30 @@
         <p class="hint">Counts cover this course offering and are tracked from v1.1.0 onward.</p>
         {% if not session.get('is_demo') %}
         <div class="add-student-form">
+            <label class="visually-hidden" for="new-student-id">Student ID</label>
             <input type="text" id="new-student-id" placeholder="Student ID" required>
+            <label class="visually-hidden" for="new-name">Student name</label>
             <input type="text" id="new-name" placeholder="Name (optional)">
-            <input type="text" id="new-pin" placeholder="PIN (4 digits)" required maxlength="4" pattern="\d{4}">
-            <button class="btn btn-primary" onclick="addStudent(this)">Add Student</button>
+            <label class="visually-hidden" for="new-pin">Student PIN, 4 to 32 digits</label>
+            <input type="text" id="new-pin" placeholder="PIN (4-32 digits)" required
+                   inputmode="numeric" maxlength="32" pattern="[0-9]{4,32}">
+            <button type="button" class="btn btn-primary" onclick="addStudent(this)">Add Student</button>
         </div>
         {% endif %}
 
         <div class="table-toolbar">
+            <label class="visually-hidden" for="student-search">Search students by ID</label>
             <input type="text" id="student-search" placeholder="Search by ID..." oninput="debouncedStudentSearch()">
             <div class="filter-group">
-                <span class="filter-label">Filter by team</span>
-                <div class="filter-dropdown" id="team-filter-dropdown">
-                    <button type="button" class="filter-btn" id="team-filter-trigger"
-                            aria-controls="team-filter-menu" aria-expanded="false"
-                            onclick="toggleTeamFilter(event)">
-                        <span id="team-filter-label">All</span> ▾
-                    </button>
-                    <div class="team-picker filter-picker" id="team-filter-menu"
-                         role="group" aria-label="Team filter options" style="display:none;">
-                        <div class="team-picker-item" role="button" tabindex="0"
-                             onclick="setTeamFilter('', 'All')"
-                             onkeydown="teamFilterOptionKeydown(event, '', 'All')">All</div>
-                        {% for t in teams[:max_teams] %}
-                        <div class="team-picker-item" role="button" tabindex="0"
-                             style="border-left:3px solid {{ t.color }}"
-                             onclick="setTeamFilter({{ t.id }}, {{ t.name | tojson }})"
-                             onkeydown="teamFilterOptionKeydown(event, {{ t.id }}, {{ t.name | tojson }})">{{ t.name }}</div>
-                        {% endfor %}
-                        <div class="team-picker-item" role="button" tabindex="0"
-                             onclick="setTeamFilter('none', 'Unassigned')"
-                             onkeydown="teamFilterOptionKeydown(event, 'none', 'Unassigned')">Unassigned</div>
-                    </div>
-                </div>
+                <label class="filter-label" for="team-filter-select">Filter by team</label>
+                <select class="filter-select" id="team-filter-select"
+                        onchange="setTeamFilterFromSelect(this)">
+                    <option value="">All</option>
+                    {% for t in teams[:max_teams] %}
+                    <option value="{{ t.id }}">{{ t.name }}</option>
+                    {% endfor %}
+                    <option value="none">Unassigned</option>
+                </select>
             </div>
         </div>
         <div class="table-wrapper">
@@ -264,7 +259,8 @@
 
     <section class="card">
         <h2>Discussion Questions</h2>
-        <p class="hint">All questions below are visible to students. Hide a question to remove it from student screens.</p>
+        <p class="hint">These same questions, in this order, are used in Discussion and Presentation.</p>
+        <p id="question-readiness-warning" class="hint question-readiness-warning" role="status" aria-live="polite" hidden></p>
         <div class="disc-questions-list" id="disc-questions-list">
             <p class="loading">Loading questions...</p>
         </div>
@@ -273,7 +269,9 @@
     <section class="card">
         <h2>➕ Add Appendix Question</h2>
         <div class="add-student-form" style="flex-direction:column; gap:8px;">
+            <label for="appendix-title">Question title</label>
             <input type="text" id="appendix-title" placeholder="Question title" style="width:100%">
+            <label for="appendix-content">Question content</label>
             <textarea id="appendix-content" placeholder="Question content (supports Markdown)..." rows="4" style="width:100%"></textarea>
             <button class="btn btn-primary appendix-add-btn" onclick="addAppendixQuestion(this)">Add to Appendix</button>
             <button class="btn btn-secondary appendix-cancel-edit-btn" style="display:none" onclick="cancelAppendixEdit()">Cancel Edit</button>
@@ -293,11 +291,10 @@
 
     <section class="card">
         <h2>🎯 Group Presentation</h2>
-        {% if not state.presentation_catalog_ready %}
-        <p class="hint text-warning">
-            Week {{ state.discussion_week or 1 }} has no validated weekly question set. Appendix questions remain available.
+        <p id="question-readiness-warning" class="hint question-readiness-warning"
+           role="status" aria-live="polite"{% if state.presentation_catalog_ready %} hidden{% endif %}>
+            {% if not state.presentation_catalog_ready %}Week {{ state.discussion_week or 1 }} has no validated weekly question set. Appendix questions remain available.{% endif %}
         </p>
-        {% endif %}
         <div class="competition-control">
             {# Both presentation blocks render server-side and the poll loop
                toggles which one is visible, so start/next/cancel can switch
@@ -371,7 +368,7 @@
             {# --- No active presentation --- #}
             <div class="form-row">
                 <div class="form-group">
-                    <label>Select Team</label>
+                    <label for="comp-team">Select Team</label>
                     <select id="comp-team">
                         <option value="">-- Choose team --</option>
                         {% for t in teams[:max_teams] %}
@@ -386,25 +383,25 @@
                                 data-team-name="{{ t.name }}"
                                 data-member-count="{{ presentation_members | length }}"
                                 data-never-count="{{ participation.never }}"
-                                {% if not presentation_members %}disabled{% endif %}>{{ t.name }}{% if not presentation_members %} (empty){% else %} · {{ participation.never }}/{{ presentation_members | length }} no prior turn{% endif %}</option>
+                                {% if not presentation_members %}disabled{% endif %}>{{ t.name }}{% if not presentation_members %} (empty){% else %} · {{ (presentation_members | length) - participation.never }}/{{ presentation_members | length }}{% endif %}</option>
                         {% endfor %}
                     </select>
                 </div>
                 <div class="form-group">
-                    <label>Select Question</label>
+                    <label for="comp-question">Select Question</label>
                     <select id="comp-question">
                         <option value="">-- Choose question --</option>
                         {% for q in questions %}
                         {% set q_title = q.title if q.title else q.question_text %}
-                        <option value="{{ q.id }}">{% if q.source_key and q.source_key[:9] == 'appendix:' %}Appendix — {% else %}#{{ q.question_num }}: {% endif %}{{ q_title[:60] }}{% if q_title|length > 60 %}...{% endif %}{% if q.id in presented_question_ids %} — previously presented{% endif %}</option>
+                        <option value="{{ q.id }}" data-completed="{{ 1 if q.id in presented_question_ids else 0 }}">{% if q.source_key and q.source_key[:9] == 'appendix:' %}Appendix — {% else %}#{{ q.question_num }}: {% endif %}{{ q_title[:60] }}{% if q_title|length > 60 %}...{% endif %}{% if q.id in presented_question_ids %} (completed){% endif %}</option>
                         {% endfor %}
                         {% if not questions %}
                         <option value="" disabled>No questions available for this week</option>
                         {% endif %}
                     </select>
                 </div>
-                <div class="form-group">
-                    <label>Time Cap (sec)</label>
+                <div class="form-group time-cap-group">
+                    <label for="time-cap">Time Cap (sec)</label>
                     <input type="number" id="time-cap" value="300" min="10" max="3600">
                 </div>
             </div>
@@ -468,7 +465,9 @@
         <h2>➕ Add Appendix Question</h2>
         <p class="hint">Saved to Week {{ state.discussion_week or 1 }} and added to the presentation question list.</p>
         <div class="add-student-form" style="flex-direction:column; gap:8px;">
+            <label for="appendix-title">Question title</label>
             <input type="text" id="appendix-title" placeholder="Question title" style="width:100%">
+            <label for="appendix-content">Question content</label>
             <textarea id="appendix-content" placeholder="Question content (supports Markdown)..." rows="4" style="width:100%"></textarea>
             <button class="btn btn-primary appendix-add-btn" onclick="addAppendixQuestion(this)">Add to Appendix</button>
             <button class="btn btn-secondary appendix-cancel-edit-btn" style="display:none" onclick="cancelAppendixEdit()">Cancel Edit</button>
@@ -482,9 +481,6 @@
         <h2>🏁 Class Ended</h2>
         <p class="hint">The class session has ended. Download the results export for your records.</p>
         <a href="{{ url_for('export_data', slug=course.slug) }}" class="btn btn-primary">⬇ Download Current Week Results</a>
-        {% if not session.get('is_demo') %}
-        <button class="btn btn-danger" onclick="resetData()">Reset Course Data</button>
-        {% endif %}
     </section>
 
     {% if end_stats %}

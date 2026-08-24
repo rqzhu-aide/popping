@@ -98,6 +98,13 @@
         </div>
         <div id="challenge-cards"></div>
     </section>
+    <!-- Session Results (shown when phase == 'ended') -->
+    <section class="card session-results" id="session-results" style="display:none;">
+        <h2>🏆 Final Results</h2>
+        <p class="hint" style="margin-bottom: 16px;">Thank you for participating!</p>
+        <div id="top-teams-display"></div>
+        <div id="top-challengers-display" style="margin-top: 20px;"></div>
+    </section>
 
     <!-- Team section -->
     {% if not team %}
@@ -139,11 +146,13 @@
                 {% if teams_locked %}
                 <p class="hint text-warning" style="margin-top:12px;">Teams are Locked by Instructor</p>
                 {% else %}
-                <button class="btn btn-sm btn-secondary" id="btn-change-team" onclick="showTeamPicker()" style="margin-top:12px;">Change Team</button>
-                <div id="team-picker-panel" style="display:none; margin-top:14px;">
+                <button type="button" class="btn btn-sm btn-secondary" id="btn-change-team"
+                        aria-expanded="false" aria-controls="team-picker-panel"
+                        onclick="showTeamPicker()" style="margin-top:12px;">Change Team</button>
+                <div id="team-picker-panel" role="region" aria-labelledby="btn-change-team" style="display:none; margin-top:14px;">
                     <p class="hint">Select a new team:</p>
                     <div class="team-grid" id="team-picker-grid"></div>
-                    <button class="btn btn-sm btn-secondary" onclick="hideTeamPicker()" style="margin-top:10px;">Cancel</button>
+                    <button type="button" class="btn btn-sm btn-secondary" id="btn-cancel-team-picker" onclick="hideTeamPicker()" style="margin-top:10px;">Cancel</button>
                 </div>
                 {% endif %}
                 {% elif state.phase == 'discussion' %}
@@ -166,9 +175,9 @@
                          data-student-id="{{ m.student_id }}"
                          id="card-{{ m.student_id }}">
                         <div class="card-circle" style="border-color:{{ team.color }}">
-                            <span class="card-name">{{ m.name or m.student_id }}</span>
+                            <span class="card-name" title="{{ m.name or m.student_id }}">{{ m.name or m.student_id }}</span>
                             {% if m.name and m.name != m.student_id %}
-                            <span class="card-id">{{ m.student_id }}</span>
+                            <span class="card-id" title="{{ m.student_id }}">{{ m.student_id }}</span>
                             {% endif %}
                             <button class="thumb-btn thumb-up"
                                     aria-label="Thumbs up to {{ m.name or m.student_id }}"
@@ -180,7 +189,7 @@
                     <div class="teammate-card" draggable="true" data-student-id="you" id="card-you">
                         <div class="card-circle" style="border-color:{{ team.color }}; background:{{ team.color }}15;">
                             <span class="card-name">You</span>
-                            <span class="card-id">{{ student.student_id }}</span>
+                            <span class="card-id" title="{{ student.student_id }}">{{ student.student_id }}</span>
                         </div>
                     </div>
                 </div>
@@ -190,21 +199,15 @@
     </section>
     {% endif %}
 
-    <!-- Session Results (shown when phase == 'ended') -->
-    <section class="card session-results" id="session-results" style="display:none;">
-        <h2>🏆 Final Results</h2>
-        <p class="hint" style="margin-bottom: 16px;">Thank you for participating!</p>
-        <div id="top-teams-display"></div>
-        <div id="top-challengers-display" style="margin-top: 20px;"></div>
-    </section>
 
     <!-- Roster (always bottom) -->
     <section class="card roster">
         <div style="display:flex; align-items:center; justify-content:space-between;">
-            <h2 style="margin:0;">Team Overview</h2>
-            <button class="btn btn-sm btn-primary" onclick="toggleRoster()" id="btn-toggle-roster">Hide</button>
+            <h2 id="team-overview-heading" style="margin:0;">Team Overview</h2>
+            <button type="button" class="btn btn-sm btn-primary" onclick="toggleRoster()"
+                    id="btn-toggle-roster" aria-expanded="true" aria-controls="roster-content">Hide</button>
         </div>
-        <div id="roster-content">
+        <div id="roster-content" role="region" aria-labelledby="team-overview-heading">
             <div id="roster-table" class="roster-grid" style="margin-top:14px;">
                 <p class="loading">Loading roster...</p>
             </div>

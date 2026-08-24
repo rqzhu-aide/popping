@@ -102,8 +102,10 @@ directly. An older compatibility line must go through the supported database
 migration so that its record versions remain available through Download Legacy
 Data. Verification checks the archive; it does not migrate the database.
 
-For an existing `v1.0.x` database, keep all workers stopped and run this from
-the `v1.1.0` repository root before starting the web service:
+For an existing `v1.0.x` database, use the offline boundary described in the
+main README. Locally, stop all workers and type `SERVICE STOPPED`. On Render,
+deploy the course as `active: false`, use Render Shell, and type
+`COURSE OFFLINE`. Then run this from the `v1.1.0` repository root:
 
 ```bash
 python scripts/migrate-course-db.py 432fall2026
@@ -117,8 +119,9 @@ not infer participation events from old ratings.
 The restore is intentionally explicit because it replaces live course data.
 
 1. Verify the bundle with the command above.
-2. Stop every Flask or Gunicorn worker. On Render, suspend the web service and
-   wait for all workers to stop.
+2. Take the affected course offline. Locally, stop all Flask or Gunicorn
+   workers. On Render, deploy that course as `active: false`, confirm it is no
+   longer public, and keep the service running for Render Shell and `/data`.
 3. Extract the verified bundle into a new, empty recovery directory:
 
    ```bash
@@ -136,8 +139,9 @@ The restore is intentionally explicit because it replaces live course data.
 6. Copy the extracted `questions/` and `appendix/` directories, when present,
    into `DATA_DIR/432fall2026/`. If one is absent from the bundle, leave that
    directory absent because it was empty at backup time.
-7. Restart the service. Verify instructor login, student login, the selected
-   week, and the displayed question count.
+7. Locally, restart the service. On Render, change the restored course back to
+   `active: true` in GitHub and deploy. Then verify instructor login, student
+   login, the selected week, and the displayed question count.
 8. Keep the renamed pre-restore directories until the restored class has been
    checked. Remove them later according to your retention policy.
 

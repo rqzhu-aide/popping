@@ -12,7 +12,13 @@
     <script>
         // Theme restore must run before paint to avoid a FOUC flash.
         (function() {
-            const storedTheme = localStorage.getItem('popping-theme');
+            let storedTheme = null;
+            try {
+                storedTheme = localStorage.getItem('popping-theme');
+            } catch (error) {
+                // Storage can be blocked by browser privacy settings. Keep the
+                // default light theme and allow the rest of the page to load.
+            }
             if (storedTheme === null || storedTheme === 'light') {
                 document.documentElement.classList.add('light');
             }
@@ -71,19 +77,39 @@
                 </form>
             {% elif session.instructor_id and session.slug %}
                 <div class="nav-dropdown" id="tools-dropdown">
-                    <button class="nav-link nav-dropdown-btn" onclick="toggleToolsDropdown()">Tools ▾</button>
+                    <button class="nav-link nav-dropdown-btn" id="tools-dropdown-trigger"
+                            type="button" aria-haspopup="true" aria-expanded="false"
+                            aria-controls="tools-menu" onclick="toggleToolsDropdown()">Tools ▾</button>
                     <div class="nav-dropdown-menu" id="tools-menu">
                         {% set export_week = ((state.discussion_week if state is defined and state else 1) or 1) | int %}
                         <div class="nav-dropdown-item nav-submenu">
-                            <button type="button" class="nav-submenu-label" onclick="toggleDownloadResults(event)">⬇ Download Results <span class="nav-submenu-arrow">▸</span></button>
+                            <button type="button" class="nav-submenu-label"
+                                    id="download-results-trigger" aria-haspopup="true"
+                                    aria-expanded="false" aria-controls="download-results-menu"
+                                    onclick="toggleDownloadResults(event)">⬇ Download Results <span class="nav-submenu-arrow">▸</span></button>
                             <div class="nav-submenu-menu" id="download-results-menu">
+                                {% set exports_disabled = state is defined and state and state.phase in ['discussion', 'competition'] %}
+                                {% if exports_disabled %}
+                                <span class="nav-dropdown-item disabled" aria-disabled="true"
+                                      title="Results can be downloaded during Setup or after End Session">Current Week ({{ export_week }}) (available after End Session)</span>
+                                {% for w in range(export_week - 1, 0, -1) %}
+                                <span class="nav-dropdown-item disabled" aria-disabled="true"
+                                      title="Results can be downloaded during Setup or after End Session">Week {{ w }} (available after End Session)</span>
+                                {% endfor %}
+                                {% else %}
                                 <a href="{{ url_for('export_data', slug=session.slug) }}" class="nav-dropdown-item">Current Week ({{ export_week }})</a>
                                 {% for w in range(export_week - 1, 0, -1) %}
                                 <a href="{{ url_for('export_data', slug=session.slug, week=w) }}" class="nav-dropdown-item">Week {{ w }}</a>
                                 {% endfor %}
+                                {% endif %}
                             </div>
                         </div>
+                        {% if exports_disabled %}
+                        <span class="nav-dropdown-item disabled" aria-disabled="true"
+                              title="Legacy data can be downloaded during Setup or after End Session">Download Legacy Data (available after End Session)</span>
+                        {% else %}
                         <a href="{{ url_for('export_legacy_feedback', slug=session.slug) }}" class="nav-dropdown-item" title="Older-version or unclassified records excluded from current-week results">⬇ Download Legacy Data</a>
+                        {% endif %}
                         {% if not session.get('is_demo') %}
                         {% if state is defined and state and state.phase != 'setup' %}
                         <span class="nav-dropdown-item disabled" title="The roster can only be replaced during setup">📋 Upload Student Roster (setup only)</span>
@@ -92,6 +118,16 @@
                         {% endif %}
                         <a href="/roster_template.csv" class="nav-dropdown-item">📄 Download Roster Template</a>
                         <input type="file" id="roster-file-input" accept=".csv" style="display:none" onchange="handleRosterFile(event)">
+                        <div class="nav-dropdown-separator" role="separator"></div>
+                        {% if state is defined and state and state.phase in ['setup', 'ended'] %}
+                        <button type="button" class="nav-dropdown-item nav-dropdown-action nav-dropdown-danger"
+                                id="reset-course-data-menu-item"
+                                onclick="closeToolsMenu(false); resetData()">Reset Course Data</button>
+                        {% else %}
+                        <span class="nav-dropdown-item nav-dropdown-danger disabled" id="reset-course-data-menu-item"
+                              aria-disabled="true"
+                              title="Course data can only be reset during Setup or after End Session">Reset Course Data (Setup or Ended)</span>
+                        {% endif %}
                         {% endif %}
                     </div>
                 </div>
@@ -141,12 +177,15 @@
          role="status" aria-live="polite" aria-atomic="true"></div>
     {% endif %}
 
-    <main class="container">
+    <main class="container{% if session.instructor_id and session.slug %} instructor-container{% endif %}">
         {% with messages = get_flashed_messages(with_categories=true) %}
             {% if messages %}
-                <div class="flash-messages">
+                <div class="flash-messages" aria-label="System messages">
                     {% for category, message in messages %}
-                        <div class="flash flash-{{ category }}">{{ message }}</div>
+                        {% set urgent_message = category in ['error', 'danger'] %}
+                        <div class="flash flash-{{ category }}"
+                             role="{{ 'alert' if urgent_message else 'status' }}"
+                             aria-live="{{ 'assertive' if urgent_message else 'polite' }}">{{ message }}</div>
                     {% endfor %}
                 </div>
             {% endif %}

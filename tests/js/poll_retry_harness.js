@@ -597,6 +597,12 @@ async function scenarioCompactPollClosePreservesDraftWarning() {
                 changed: false,
                 state_version: 8,
                 poll_interval: 1000,
+                poll_closed: false,
+            }),
+            ok({
+                changed: false,
+                state_version: 8,
+                poll_interval: 1000,
                 poll_closed: true,
             }),
         ]],
@@ -623,6 +629,23 @@ async function scenarioCompactPollClosePreservesDraftWarning() {
         'ratingDraftDirty = true; pollSelections = { q1: 4, q2: 3 };' +
             'activeChallengeRatingsOpen = true;',
         session.sandbox
+    );
+    session.advance(1500);
+    await session.pollOnce();
+    assert.strictEqual(
+        vm.runInContext('activePollOpen', session.sandbox),
+        true,
+        'compact open heartbeat should keep rating controls open'
+    );
+    assert.strictEqual(
+        vm.runInContext('activeChallengeRatingsOpen', session.sandbox),
+        true,
+        'compact open heartbeat should keep challenge controls open'
+    );
+    assert.strictEqual(
+        session.elementsById['poll-pulse'].style.display,
+        'flex',
+        'compact open heartbeat should keep the countdown visible'
     );
     session.advance(1500);
     await session.pollOnce();

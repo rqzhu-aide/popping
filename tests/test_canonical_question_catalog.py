@@ -135,3 +135,22 @@ title: Empty body
 def test_parser_rejects_ambiguous_or_incomplete_identity(source, message):
     with pytest.raises(ValueError, match=message):
         parse_week_questions(source, week_num=1)
+
+
+def test_parser_rejects_later_id_first_block_without_title():
+    source = """---
+id: valid
+title: Valid question
+---
+
+Valid body.
+
+---
+id: missing-title
+---
+
+This later block must not be folded into the first body.
+"""
+
+    with pytest.raises(ValueError, match="frontmatter"):
+        parse_week_questions(source, week_num=1)

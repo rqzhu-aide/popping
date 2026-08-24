@@ -107,12 +107,14 @@ data/432fall2026/
 
 ### Weekly Question File
 
-Before class, upload one UTF-8 Markdown file from the instructor Setup page.
-Select a positive week number and choose a `.md` file. Bundled fallback files
-use the name `week-N-questions.md`, where `N` is the week number. The discussion
+For each week, provide one UTF-8 Markdown file named
+`week-N-questions.md`, where `N` is the week number. You can commit it under
+`classes/{slug}/` and deploy it through GitHub, or upload it from the instructor
+Setup page. The application loads a bundled GitHub file automatically, and the
+browser formats its Markdown, equations, and fenced code blocks. The discussion
 phase and group presentation phase read the exact same ordered set from this
-file. The presentation index is the parsed file order, so there is no
-separate `index.md` or `qNN.html` source.
+file. The presentation index is the parsed file order, so there is no separate
+`index.md` or `qNN.html` source.
 
 Each question is one YAML-frontmatter block followed by its Markdown content:
 
@@ -133,81 +135,157 @@ Explain how the number of trees affects random-forest variance.
 ```
 
 Question order is the block order. Each `id` must be unique and stable, and
-each `title` must be unique within the file. The upload is previewed before it
-is confirmed. A confirmed upload is saved under
-`data/{slug}/questions/week-N-questions.md` and overrides the bundled file with
-the same name under `classes/{slug}/`. Legacy `weekN/index.md` and `qNN.html`
-files are ignored.
+each `title` must be unique within the file. Keep one Markdown file per week.
+Do not split questions into separate files and do not provide raw HTML. The
+single Markdown file gives the server one atomic, ordered document to validate
+and gives the browser safe Markdown, equation, and code rendering.
+
+The same strict parser drives upload preview, saving, readiness, Discussion,
+and Presentation. If any block is malformed, the whole upload is rejected and
+the previous valid source remains in place. A confirmed valid upload is saved
+under `data/{slug}/questions/week-N-questions.md` and overrides the bundled
+file with the same name under `classes/{slug}/`, including after later GitHub
+deploys. Do not use both sources for the same week unless that override is
+intentional. Legacy `weekN/index.md` and `qNN.html` files are ignored.
+
+## Server Terminal Operations
+
+Run these commands from the deployed repository root, which is the directory
+containing `app.py`. In Render Shell, this is normally
+`/opt/render/project/src`:
+
+```bash
+cd /opt/render/project/src
+printf 'DATA_DIR=%s\n' "$DATA_DIR"
+```
+
+On Render, `DATA_DIR` must print `/data`. Stop if it does not. Only files under
+that mounted disk persist across restarts and deploys. Course definitions and
+bundled weekly questions under `classes/` must come from GitHub.
+
+> Do not run `scripts/create-course.sh` only in Render Shell. It writes to the
+> deployed source checkout, so those changes disappear on the next deploy.
+
+### Set Up a New Course
+
+1. In a local, source-controlled checkout, run:
+
+   ```bash
+   bash scripts/create-course.sh
+   ```
+
+   Use a simple course slug made from letters, digits, hyphens, or underscores,
+   such as `546fall2026`.
+2. Keep the generated course set to `active: false`. Add any bundled
+   `week-N-questions.md` files, commit the course folder to GitHub, and wait for
+   the inactive course to deploy.
+3. From the server shell at the repository root, initialize the persistent
+   database:
+
+   ```bash
+   bash classes/546fall2026/init-db.sh
+   ```
+
+4. Enter the instructor username, display name, and PIN when prompted. The PIN
+   must contain 4 to 32 ASCII digits (`0-9`).
+5. After initialization succeeds, change `active` to `true` in GitHub, commit
+   and push, and wait for the next deploy. Add students through the instructor
+   panel after signing in.
+
+Do not rerun `init-db.sh` just to change a forgotten PIN. That command resets
+the entire course database. Use the PIN command below instead.
 
 ### To Change or Recover the Instructor PIN
 
-No website login is required, so this also works when the PIN is forgotten.
-On Render, run in the Shell:
+The instructor password is called a PIN in the application. No website login is
+required, so this also works when the PIN is forgotten. From the server shell,
+run the single-course form by default:
 
 ```bash
-python scripts/set-instructor-pin.py              # every course
-python scripts/set-instructor-pin.py 432fall2026  # one course
+python3 scripts/set-instructor-pin.py 432fall2026
 ```
 
-The script prompts twice for the new PIN (hidden input, 4-32 digits, matching
-the login form) and updates each course database in its own transaction. The
-new PIN is active on the next login attempt; no restart is needed.
+The script prompts twice for the new PIN (hidden input, 4-32 digits using only
+`0-9`, matching the login form) and updates each course database in its own
+transaction. The new PIN is active immediately; no restart is needed. Existing
+instructor sessions for a changed course are signed out on their next request
+and must log in with the new PIN.
+
+Omitting the course slug changes every course database to the same new PIN. Use
+that form only when this is intentional:
+
+```bash
+python3 scripts/set-instructor-pin.py
+```
+
+Any older instructor PIN outside this policy, including a 1-3 digit PIN, must
+be replaced with this script before the instructor can log in. The application
+does not pad or otherwise transform an existing PIN.
 
 ### To Reset a Course (wipe student data and start over)
 
-Stop every Flask or Gunicorn worker before resetting an existing course, then
-restart the service after the script finishes. On Render, suspend the web
-service first. Do not run the reset while students or instructors are using the
-site.
+Do not run a reset while students or instructors can reach that course.
+
+For local operation, stop every Flask or Gunicorn worker, run the command, and
+type `SERVICE STOPPED` when prompted:
 
 ```bash
-cd classes/432fall2026
-bash init-db.sh
+bash classes/432fall2026/init-db.sh
 ```
 
-This will:
+For Render, keep the service running so Render Shell and `/data` remain
+available:
+
+1. Change only the affected course to `active: false` in GitHub and deploy.
+2. Confirm the course is absent from the landing page.
+3. Open Render Shell, run the command above, and type `COURSE OFFLINE` when
+   prompted. The script verifies that the deployed `course.yaml` is inactive.
+4. After the reset succeeds, change the course back to `active: true`, commit,
+   and deploy again.
+
+The reset will:
 
 - Build and validate a replacement database before touching the current one
 - Prompt you for new instructor credentials
-- Require the course slug and `SERVICE STOPPED` confirmations when replacing an existing database
+- Require the course slug and an offline-safety confirmation
 - Save a verified copy of the previous database under `data/{slug}/init-backups/`
 - Atomically replace `popping.db` only after the candidate and backup pass validation
 - Keep the same course name, code, semester, and team structure from `course.yaml`
 
-### To Create Another Course
-
-```bash
-bash scripts/create-course.sh
-```
-
-The generated course starts with `active: false`. For local use, initialize its
-database, change `active` to `true` in `course.yaml`, then start the app. For
-Render, follow the inactive deployment sequence below.
-
 ### Upgrade an Existing v1.0 Course to v1.1.0
 
-This is an offline operation. Complete it between classes for every existing
-course database:
+This is an offline operation for each affected course. Complete it between
+classes.
 
-1. End or reset any active classroom session, then stop every Flask or Gunicorn
-   worker. On Render, suspend the web service and wait for all workers to stop.
-2. Make the `v1.1.0` code available on the same machine and persistent disk
-   while keeping the web workers stopped.
-3. From the repository root, run:
+For a local deployment, end any active session, stop every Flask or Gunicorn
+worker, run the command below, and type `SERVICE STOPPED`.
+
+For Render:
+
+1. In the old code, change every course that needs migration to `active: false`
+   and deploy. Confirm those courses disappear from the landing page.
+2. Deploy the new code while those courses remain inactive. This keeps the
+   schema health check from blocking the deployment before migration.
+3. Open Render Shell and run, for each course:
 
    ```bash
-   python scripts/migrate-course-db.py 432fall2026
+   python3 scripts/migrate-course-db.py 432fall2026
    ```
 
-4. Type the course slug, then type `SERVICE STOPPED` when prompted.
-5. Repeat for each course. Start or resume the `v1.1.0` service only after every
-   required migration succeeds.
+4. Type the course slug, then type `COURSE OFFLINE`. The script verifies that
+   the deployed course configuration is inactive.
+5. After every required migration succeeds, reactivate the courses in GitHub
+   and deploy again.
 
 The command validates the course database, creates a verified snapshot under
 `data/{slug}/migration-backups/`, and applies the schema change in one
 transaction. The migration deliberately does not infer participation from
 `v1.0.x` ratings. Presentation-team and challenger counts begin with activity
 recorded by `v1.1.0`.
+
+Website release `v1.1.7` still uses database schema and export format
+`v1.1.0`. Updating from any earlier `v1.1.x` website to `v1.1.7` does not require a
+database migration.
 
 Normal web traffic and `/healthz` only validate an exact current schema. They
 never migrate or repair a persistent course database.
@@ -229,13 +307,11 @@ never migrate or repair a persistent course database.
    initialize each new course database:
    ```bash
    # STAT 432
-   cd classes/432fall2026
-   bash init-db.sh
+   bash classes/432fall2026/init-db.sh
    # Enter instructor credentials when prompted
 
    # STAT 546
-   cd ../546fall2026
-   bash init-db.sh
+   bash classes/546fall2026/init-db.sh
    # Enter instructor credentials when prompted
    ```
 8. Confirm each initialization succeeds. Change that course's `active` field to
@@ -312,18 +388,16 @@ popping/
 
 ### Adding a New Course
 
-```bash
-bash scripts/create-course.sh
-```
-
-The scaffold deliberately uses `active: false`. Commit and deploy it in that
-state, initialize the database in Render Shell, then change `active` to `true`
-and deploy again. For local use, initialize first and activate the course before
-starting the app.
+Follow [Set Up a New Course](#set-up-a-new-course). The two-stage inactive
+deployment prevents the website from advertising a course before its persistent
+database exists.
 
 ### Customizing Teams
 
-Edit the `teams` array in `classes/{slug}/course.yaml`, then run `bash init-db.sh` to recreate the database.
+Edit the `teams` array in `classes/{slug}/course.yaml`. Applying the new team
+structure requires a complete course reset with `init-db.sh`, which wipes the
+roster, sessions, ratings, and participation history. Follow
+[Safe Database Maintenance](#safe-database-maintenance) before running it.
 
 ### Tuning the Rating Window
 
@@ -348,32 +422,34 @@ instructor panel. Do not add students with the `sqlite3` command-line tool.
 
 ### Safe Database Maintenance
 
-Never edit, replace, initialize, or restore a course's `popping.db` while the
-web service is running. The running workers keep database connections open, so
-changing the file underneath them can cause failed requests, stale data, or
-data loss.
+Never edit, replace, initialize, migrate, or restore a course's `popping.db`
+while that course is reachable. Concurrent requests can otherwise cause failed
+requests, stale data, or data loss.
 
-For an initialization, reset, or restore:
+For local maintenance, stop all Flask or Gunicorn processes, run the command,
+type `SERVICE STOPPED`, restart the service, and verify both logins.
 
-1. Stop all local Flask or Gunicorn processes. On Render, suspend the web
-   service and wait for all workers to stop.
-2. Run the appropriate command. For a restore from the repository root, use:
+For Render maintenance, do not suspend the service before using Render Shell.
+A shell attaches to a running instance, and the persistent disk is available
+to that running instance. Instead:
 
-```bash
-python scripts/restore-course-db.py 432fall2026 /path/to/backup.db
-```
+1. Set the affected course to `active: false` in GitHub and deploy.
+2. Confirm that the course is absent from the landing page.
+3. Open Render Shell and run the appropriate command:
 
-For the required `v1.0.x` to `v1.1.0` schema migration, use:
+   ```bash
+   python scripts/restore-course-db.py 432fall2026 /path/to/backup.db
+   python scripts/migrate-course-db.py 432fall2026
+   ```
 
-```bash
-python scripts/migrate-course-db.py 432fall2026
-```
+4. Type `COURSE OFFLINE`. The script checks the deployed inactive setting.
+5. Reactivate the course in GitHub, deploy, and verify instructor and student
+   login before class.
 
-3. Restart the service and verify instructor and student login before class.
-
-The initialization and restore scripts ask you to confirm that the service is
-stopped. That confirmation is a safety check, not a substitute for actually
-stopping every worker.
+The confirmation is a safety boundary, not a substitute for the corresponding
+service stop or inactive-course deployment. Render Maintenance Mode alone is
+not sufficient: it blocks public traffic at the edge, but it does not make the
+application reject that course or exclude its database from readiness checks.
 
 ### Complete Off-Disk Backups
 
@@ -401,9 +477,13 @@ contents, exact recovery steps, and the remaining provider-specific setup.
 
 ## Data Isolation
 
-- Each course folder has its own `popping.db`.
+- Each course has its own `data/{slug}/popping.db`.
 - No global database. Courses are discovered by scanning the `classes/` directory for active `course.yaml` files.
-- Deleting a course folder completely removes that course's data.
+- Deleting `classes/{slug}/` removes the course definition after deployment,
+  but it does not delete the persistent database under `data/{slug}/` or
+  `/data/{slug}/` on Render.
+- Completely deleting a course requires separately removing both its GitHub
+  course folder and its persistent data directory.
 - Resetting a course (running `init-db.sh`) only affects that one course.
 
 ## License

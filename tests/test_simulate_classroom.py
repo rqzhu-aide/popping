@@ -181,6 +181,45 @@ def test_discussion_thumb_does_not_depend_on_a_visible_question(tmp_path):
     ]
 
 
+def test_cleared_challenger_is_rearmed_to_raise_again(tmp_path):
+    simulator = simulator_module.ClassroomSimulator(
+        simulator_module.Settings(students=2, teams=2),
+        root=tmp_path / "runtime",
+    )
+    simulator.delay = lambda *args: 0
+    student = _student()
+    hand_key = "hand:pres-1"
+    student.done.add(hand_key)
+    calls = []
+
+    async def fake_post(student_arg, operation, path, body):
+        calls.append((operation, path, body))
+        return "ok"
+
+    simulator.safe_post = fake_post
+    selected_state = {
+        "poll_question_key": "pres-1",
+        "active_team": {"id": 22},
+        "my_team": {"id": 11},
+        "is_active_challenger": True,
+        "active_challenges": [],
+    }
+    asyncio.run(simulator.react_competition(student, selected_state))
+    assert calls == []
+
+    cleared_state = {**selected_state, "is_active_challenger": False}
+    asyncio.run(simulator.react_competition(student, cleared_state))
+
+    assert calls == [
+        (
+            "student.raise_hand",
+            "/api/raise_hand",
+            {"presentation_key": "pres-1"},
+        )
+    ]
+    assert hand_key in student.done
+
+
 def test_setup_rejoins_after_reset_and_uses_an_available_team(tmp_path):
     simulator = simulator_module.ClassroomSimulator(
         simulator_module.Settings(students=4, teams=2),
@@ -354,3 +393,118 @@ def test_simulator_never_calls_instructor_mutation_routes():
     )
     for route in forbidden:
         assert route not in source
+def _presentation_rating_state(poll_active):
+    return {
+        "phase": "competition",
+        "poll_active": poll_active,
+        "poll_question_key": "pres-1",
+        "active_team": {"id": 22},
+        "my_team": {"id": 11},
+        "active_challenges": [],
+        "challenge_ratings_open": False,
+    }
+
+
+def test_simulator_fails_an_action_rejected_while_last_state_was_eligible(
+        tmp_path):
+    simulator = simulator_module.ClassroomSimulator(
+        simulator_module.Settings(students=2, teams=2),
+        root=tmp_path / "runtime",
+    )
+    student = _student()
+    student.last_state = _presentation_rating_state(True)
+
+    async def rejected(*_args, **_kwargs):
+        return simulator_module.httpx.Response(
+            409, json={"error": "The presentation has changed"}
+        )
+
+    simulator.request = rejected
+    with pytest.raises(RuntimeError, match="eligible in the last state"):
+        asyncio.run(
+            simulator.safe_post(
+                student,
+                "student.presentation_rating",
+                "/api/submit_rating",
+                {
+                    "presentation_key": "pres-1",
+                    "q1_developed": 4,
+                    "q2_easy": 5,
+                },
+            )
+        )
+
+    assert simulator.rejection_summary() == {
+        "student.presentation_rating": {
+            "unexpected_while_eligible": {
+                "409: The presentation has changed": 1,
+            }
+        }
+    }
+    assert simulator.error_counts[
+        "student.presentation_rating_unexpected_rejection"
+    ] == 1
+
+
+def test_simulator_counts_a_rejection_as_expected_when_last_state_was_closed(
+        tmp_path):
+    simulator = simulator_module.ClassroomSimulator(
+        simulator_module.Settings(students=2, teams=2),
+        root=tmp_path / "runtime",
+    )
+    student = _student()
+    student.last_state = _presentation_rating_state(False)
+
+    async def rejected(*_args, **_kwargs):
+        return simulator_module.httpx.Response(
+            403, json={"error": "The rating poll is closed"}
+        )
+
+    simulator.request = rejected
+    result = asyncio.run(
+        simulator.safe_post(
+            student,
+            "student.presentation_rating",
+            "/api/submit_rating",
+            {
+                "presentation_key": "pres-1",
+                "q1_developed": 4,
+                "q2_easy": 5,
+            },
+        )
+    )
+
+    assert result == "closed"
+    assert simulator.rejection_summary() == {
+        "student.presentation_rating": {
+            "expected_closed": {
+                "403: The rating poll is closed": 1,
+            }
+        }
+    }
+    assert not simulator.error_counts
+
+
+def test_simulator_status_exposes_operation_reason_rejection_counters(tmp_path):
+    simulator = simulator_module.ClassroomSimulator(
+        simulator_module.Settings(students=2, teams=2),
+        root=tmp_path / "runtime",
+    )
+    simulator.rejection_counts[
+        (
+            "student.thumb",
+            "expected_closed",
+            403,
+            "Not in discussion phase",
+        )
+    ] = 2
+
+    traffic = simulator.status_payload()["traffic"]
+
+    assert traffic["rejections"] == {
+        "student.thumb": {
+            "expected_closed": {
+                "403: Not in discussion phase": 2,
+            }
+        }
+    }

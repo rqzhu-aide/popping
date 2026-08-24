@@ -433,6 +433,9 @@ def test_transient_course_unavailability_preserves_session_and_recovers(
         browser_session["slug"] = slug
         browser_session["role"] = "instructor"
         browser_session["instructor_id"] = instructor_id
+        browser_session["instructor_auth_token"] = (
+            app_module._instructor_session_token(slug, instructor_id, "9999")
+        )
 
     assert client.get("/api/poll").status_code == 200
 
@@ -502,6 +505,9 @@ def test_temporary_database_disappearance_preserves_session_and_recovers(
         browser_session["slug"] = slug
         browser_session["role"] = "instructor"
         browser_session["instructor_id"] = instructor_id
+        browser_session["instructor_auth_token"] = (
+            app_module._instructor_session_token(slug, instructor_id, "9999")
+        )
 
     assert client.get("/api/poll").status_code == 200
 
@@ -553,6 +559,9 @@ def test_existing_instructor_session_is_revoked_when_course_is_deactivated(
         browser_session["slug"] = slug
         browser_session["role"] = "instructor"
         browser_session["instructor_id"] = instructor_id
+        browser_session["instructor_auth_token"] = (
+            app_module._instructor_session_token(slug, instructor_id, "9999")
+        )
 
     assert client.get("/api/poll").status_code == 200
     with sqlite3.connect(db_path) as db:
@@ -677,3 +686,32 @@ def test_unadoptable_legacy_database_is_not_ready(catalog_env):
     response = app_module.app.test_client().get("/healthz")
     assert response.status_code == 503
     assert response.get_json() == {"status": "unavailable"}
+
+
+def test_current_yaml_metadata_is_display_authority_without_rewriting_database(
+        catalog_env):
+    slug = "metadata_authority"
+    _write_config(catalog_env, slug)
+    db_path = _write_database(catalog_env, slug)
+
+    page = app_module.app.test_client().get(f"/login/{slug}")
+
+    assert page.status_code == 200
+    html = page.get_data(as_text=True)
+    assert f"Course {slug}" in html
+    assert "Test Course" not in html
+    with sqlite3.connect(db_path) as db:
+        assert db.execute("SELECT name FROM courses").fetchone()[0] == "Test Course"
+
+
+def test_health_rejects_course_database_without_matching_state(catalog_env):
+    slug = "missing_course_state"
+    _write_config(catalog_env, slug)
+    db_path = _write_database(catalog_env, slug)
+    with sqlite3.connect(db_path) as db:
+        db.execute("DELETE FROM course_state")
+
+    app_module._clear_course_availability_cache(slug)
+
+    assert app_module._course_availability(slug)["status"] == "invalid"
+    assert app_module.app.test_client().get("/healthz").status_code == 503

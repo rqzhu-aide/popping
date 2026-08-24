@@ -72,7 +72,7 @@ def test_create_bundle_captures_database_and_persistent_question_files(
     manifest = backup_course_module.verify_archive(archive_path)
     assert manifest["format"] == "popping-course-backup-v1"
     assert manifest["course_slug"] == "safe101"
-    assert manifest["website_version"] == "v1.1.0"
+    assert manifest["website_version"] == "v1.1.7"
     assert manifest["database_schema_version"] == "v1.0.0"
     assert manifest["export_format_version"] == "v1.1.0"
     assert manifest["contained_data_versions"] == []
@@ -97,6 +97,35 @@ def test_create_bundle_captures_database_and_persistent_question_files(
         assert db.execute("SELECT value FROM notes").fetchone()[0] == "captured"
 
 
+def test_create_bundle_rejects_database_with_more_than_one_course(
+    backup_course_module, tmp_path, monkeypatch
+):
+    data_dir = tmp_path / "live-data"
+    course_dir = create_course(data_dir)
+    with sqlite3.connect(course_dir / "popping.db") as db:
+        instructor_id = db.execute(
+            "INSERT INTO instructors (username, name, pin) "
+            "VALUES ('other', 'Other', '1357')"
+        ).lastrowid
+        other_course_id = db.execute(
+            """INSERT INTO courses
+               (name, code, semester, slug, instructor_id)
+               VALUES ('Other', 'OTHER', 'Test', 'other101', ?)""",
+            (instructor_id,),
+        ).lastrowid
+        db.execute(
+            "INSERT INTO course_state (course_id, phase) VALUES (?, 'setup')",
+            (other_course_id,),
+        )
+
+    monkeypatch.setenv("DATA_DIR", str(data_dir))
+    with pytest.raises(
+        backup_course_module.BackupError,
+        match="exactly one course record",
+    ):
+        backup_course_module.create_backup("safe101", tmp_path / "offsite")
+
+
 def test_bundle_manifest_uses_archived_database_schema_ledger(
     backup_course_module, tmp_path, monkeypatch
 ):
@@ -119,7 +148,7 @@ def test_bundle_manifest_uses_archived_database_schema_ledger(
     archive_path = backup_course_module.create_backup("safe101", destination)
 
     manifest = backup_course_module.verify_archive(archive_path)
-    assert manifest["website_version"] == "v1.1.0"
+    assert manifest["website_version"] == "v1.1.7"
     assert manifest["database_schema_version"] == "v1.2.0"
     assert manifest["contained_data_versions"] == ["v1.2.7"]
     assert manifest["contains_unclassified_data"] is True

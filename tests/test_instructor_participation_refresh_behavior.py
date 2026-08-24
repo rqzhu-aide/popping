@@ -50,16 +50,16 @@ def test_participation_readback_is_wired_to_instructor_mutations():
         "window.nextPresentation",
         "window.cancelPresentation",
     ):
-        assert (
-            "await reconcileCompetitionParticipationCounts();"
-            in _handler(source, name)
-        ), name
+        handler = _handler(source, name)
+        assert "markCompetitionParticipationCountsDirty();" in handler, name
+        assert "reconcileCompetitionParticipationCounts();" not in handler, name
+        assert "instructorPollOnce" in handler, name
 
     finish = _handler(source, "window.nextPresentation")
     assert "permanently recorded" in finish
     assert "Use Cancel" in finish
     assert "Mistake first" in finish
-    assert finish.index("confirm(") < finish.index("postJSON(")
+    assert finish.index("confirm(") < finish.index("postJSONAfterRatingsSettle(")
 
     phase_change = _handler(source, "window.setPhase")
     assert "permanentParticipationWarning" in phase_change

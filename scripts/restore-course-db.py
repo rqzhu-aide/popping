@@ -11,7 +11,6 @@ import tempfile
 
 SLUG_RE = re.compile(r'^[A-Za-z0-9_-]+$')
 BACKUP_RETENTION = 3
-OFFLINE_CONFIRMATION = 'SERVICE STOPPED'
 DATABASE_SIDECARS = ('-wal', '-shm', '-journal')
 REQUIRED_SCHEMA = {
     'instructors': {'id', 'username', 'name', 'pin'},
@@ -42,6 +41,7 @@ from database import (
     validate_legacy_adoption_candidate,
     validate_schema_compatibility,
 )
+from scripts.maintenance_safety import confirmation_prompt, validate_confirmation
 from versioning import SCHEMA_VERSION
 
 
@@ -361,11 +361,14 @@ def main(argv=None):
         if confirmation != slug:
             print("Cancelled: course slug did not match.")
             return 1
-        offline_confirmation = input(
-            f"Type {OFFLINE_CONFIRMATION} to confirm all web workers are stopped: "
-        ).strip()
-        if offline_confirmation != OFFLINE_CONFIRMATION:
-            print("Cancelled: web service stop was not confirmed.")
+        offline_confirmation = input(confirmation_prompt()).strip()
+        try:
+            validate_confirmation(
+                offline_confirmation,
+                Path(PROJECT_ROOT) / 'classes' / slug / 'course.yaml',
+            )
+        except ValueError as exc:
+            print(f"Cancelled: {exc}.")
             return 1
 
         print("Backing up current live database...")

@@ -1,6 +1,6 @@
 # Known Issues and Improvement Backlog
 
-Last reviewed: 2026-08-22
+Last reviewed: 2026-08-23
 
 ## Current status
 
@@ -14,7 +14,7 @@ The full automated suite passes. Current coverage includes:
 - presentation and challenger ratings arriving before a close cutoff
 - transient presence-write and demo-marker failures
 - retry and read-back behavior after interrupted vote responses
-- stable discussion-question visibility across edits
+- exact Discussion/Presentation question parity across edits and deploys
 - current-week and previous-week presentation, challenge, and
   teammate-thumb exports with identical workbook layout
 - v1.0 to v1.1 schema migration, backup, restore, and export routing
@@ -49,7 +49,7 @@ non-sensitive course database:
 3. Trigger one synchronized presence refresh.
 4. Submit at least 60 ratings during one open poll, including requests close
    to the deadline.
-5. Change phases and question visibility while the clients continue polling.
+5. Change phases and deploy a valid same-week question edit while clients continue polling.
 
 **Acceptance checks**
 
@@ -82,15 +82,15 @@ jsDelivr.
 Self-host the pinned MathJax browser bundle if fully offline equation rendering
 is required.
 
-## P3: Broad login abuse can rotate submitted IDs
+## P3: Aggregate login throttling needs live-network calibration
 
-The login throttle now serializes concurrent attempts for the same course,
-role, submitted identity, and source. A deliberate client can still rotate
-submitted IDs to avoid that per-identity limit.
+The application now bounds failed attempts both per submitted ID and across all
+IDs for one course, role, and proxy-aware client source. The aggregate threshold
+is intentionally high so a shared campus network does not lock out a class.
 
-A low application-wide source limit could lock out a class whose students
-share one campus network address. Add this protection at a trusted network edge,
-or add a trusted-proxy-aware source limit calibrated with real campus traffic.
+Calibrate the threshold in staging with the production proxy configuration and
+normal class login traffic. Provider-level controls are still useful for a
+distributed attack across many source addresses.
 
 ## P3: Off-site backups are not scheduled automatically
 

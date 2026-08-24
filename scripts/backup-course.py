@@ -114,18 +114,39 @@ def _database_course_slug(path):
                 raise BackupError(
                     "SQLite integrity check failed: " + "; ".join(integrity)
                 )
-            row = db.execute("SELECT slug FROM courses LIMIT 1").fetchone()
+            courses = db.execute(
+                "SELECT id, slug, instructor_id FROM courses"
+            ).fetchall()
             foreign_key_issues = db.execute("PRAGMA foreign_key_check").fetchall()
             if foreign_key_issues:
                 raise BackupError(
                     "SQLite foreign key check failed for "
                     f"{len(foreign_key_issues)} row(s)"
                 )
+            if len(courses) != 1 or not courses[0][1]:
+                raise BackupError(
+                    "SQLite snapshot must contain exactly one course record"
+                )
+            course_id, slug, instructor_id = courses[0]
+            instructor_count = db.execute(
+                "SELECT COUNT(*) FROM instructors WHERE id = ?",
+                (instructor_id,),
+            ).fetchone()[0]
+            if instructor_count != 1:
+                raise BackupError(
+                    "SQLite snapshot course must reference one instructor"
+                )
+            state_rows = db.execute(
+                "SELECT course_id FROM course_state"
+            ).fetchall()
+            if state_rows != [(course_id,)]:
+                raise BackupError(
+                    "SQLite snapshot must contain exactly one matching "
+                    "course_state row"
+                )
     except sqlite3.Error as exc:
         raise BackupError(f"Could not validate SQLite snapshot: {exc}") from exc
-    if not row or not row[0]:
-        raise BackupError("SQLite snapshot has no course record")
-    return str(row[0])
+    return str(slug)
 
 
 def _manifest_public_version(value, field_name):

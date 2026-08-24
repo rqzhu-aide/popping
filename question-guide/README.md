@@ -21,6 +21,18 @@ data/<course-slug>/questions/week-N-questions.md
 The uploaded file overrides the bundled file for the same week. Question order
 is the order of the blocks in the Markdown file.
 
+Keep one Markdown file per week. Do not split the questions across files.
+Do not provide raw HTML. One canonical file preserves ordering, supports safe
+Markdown and equation rendering, and lets the server accept or reject the
+entire week atomically. Preview, persistence, readiness, Discussion, and
+Presentation all use the same strict parse result. If any question block is
+invalid, the whole upload is rejected and the previous valid source remains.
+
+If you manage questions in GitHub, commit the bundled file and deploy it. The
+application loads it automatically and the browser formats its Markdown,
+equations, and fenced code blocks. Do not also upload that week from Setup
+unless you intend the persistent uploaded copy to override later GitHub edits.
+
 ## File format
 
 Each question consists of YAML frontmatter between two `---` lines, followed by
@@ -82,7 +94,8 @@ Directories such as `classes/<course-slug>/weekN/` containing `index.md` and
 `qNN.html` are an obsolete pre-rendered workflow. The current application
 does not read, sync, or display questions from those files. Do not author
 them for a future class. Move any question you still need into the canonical
-`week-N-questions.md` file and upload that file from Setup.
+`week-N-questions.md` file, either as a bundled GitHub file or as a Setup
+upload.
 
 For a starting point, see
 [`classes/templates/question-template.md`](../classes/templates/question-template.md)

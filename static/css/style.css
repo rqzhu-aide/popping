@@ -230,6 +230,26 @@ a:visited:hover { color: var(--primary-hover); }
 .nav-dropdown-item:hover {
     background: var(--bg);
 }
+.nav-dropdown-action {
+    width: 100%;
+    text-align: left;
+    border: none;
+    background: none;
+    cursor: pointer;
+    font-family: inherit;
+}
+.nav-dropdown-separator {
+    border-top: 1px solid var(--border);
+    margin: 4px 0;
+}
+.nav-dropdown-danger {
+    color: var(--error-text);
+}
+.nav-dropdown-danger:not(.disabled):hover,
+.nav-dropdown-danger:focus-visible {
+    background: var(--error-soft);
+    color: var(--error-text);
+}
 .nav-dropdown-item.disabled {
     color: var(--text-muted);
     cursor: default;
@@ -280,7 +300,6 @@ a:visited:hover { color: var(--primary-hover); }
     z-index: 210;
 }
 .nav-submenu:hover .nav-submenu-menu,
-.nav-submenu:focus-within .nav-submenu-menu,
 .nav-submenu-menu.open {
     display: block;
 }
@@ -305,6 +324,35 @@ a:visited:hover { color: var(--primary-hover); }
     .nav-user-name { display: none; }
     .navbar { padding: 0 12px; gap: 12px; }
     .nav-links { gap: 12px; }
+}
+
+@media (max-width: 640px) {
+    .nav-dropdown-menu {
+        max-height: calc(100vh - 64px);
+        max-width: calc(100vw - 24px);
+        min-width: min(240px, calc(100vw - 24px));
+        overflow-y: auto;
+    }
+    .nav-submenu-menu {
+        border-left: 0;
+        border-radius: 0;
+        border-right: 0;
+        box-shadow: none;
+        margin: 0;
+        max-height: min(240px, 45vh);
+        min-width: 0;
+        position: static;
+        width: 100%;
+    }
+    .nav-submenu-menu .nav-dropdown-item {
+        padding-left: 28px;
+    }
+    .nav-submenu-menu.open {
+        display: block;
+    }
+    .nav-submenu:has(.nav-submenu-menu.open) .nav-submenu-arrow {
+        transform: rotate(90deg);
+    }
 }
 
 @media (max-width: 420px) {
@@ -1004,10 +1052,17 @@ input:focus, textarea:focus {
 }
 .team-tag.clickable {
     cursor: pointer;
+    font-family: inherit;
+    line-height: inherit;
     transition: opacity 0.1s;
 }
 .team-tag.clickable:hover {
     opacity: 0.8;
+}
+.team-tag.clickable:focus-visible,
+.team-picker-item:focus-visible {
+    outline: 3px solid var(--primary);
+    outline-offset: 2px;
 }
 .unassigned-tag {
     --team-color: var(--text-muted);
@@ -1026,13 +1081,21 @@ input:focus, textarea:focus {
     z-index: 300;
 }
 .team-picker-item {
-    padding: 8px 14px;
-    font-size: 0.85rem;
+    background: none;
+    border: 0;
+    color: var(--text);
     cursor: pointer;
+    display: block;
+    font-family: inherit;
+    font-size: 0.85rem;
     font-weight: 500;
+    padding: 8px 14px;
+    text-align: left;
     transition: background 0.1s;
+    width: 100%;
 }
-.team-picker-item:hover {
+.team-picker-item:hover,
+.team-picker-item:focus-visible {
     background: var(--bg);
 }
 
@@ -1095,7 +1158,7 @@ input:focus, textarea:focus {
 
 .course-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    grid-template-columns: repeat(auto-fill, minmax(min(280px, 100%), 1fr));
     gap: 16px;
 }
 .course-card {
@@ -1192,6 +1255,10 @@ input:focus, textarea:focus {
     flex: 1;
     min-width: 200px;
     margin-bottom: 0;
+}
+.form-row .time-cap-group {
+    flex: 0 0 140px;
+    min-width: 120px;
 }
 .form-row select {
     width: 100%;
@@ -1383,19 +1450,7 @@ input:focus, textarea:focus {
     border-radius: 8px;
     overflow: hidden;
 }
-.disc-question-card.is-hidden {
-    opacity: 0.6;
-}
-.hidden-question-badge {
-    color: var(--text-muted);
-    background: var(--bg);
-    border: 1px solid var(--border);
-    border-radius: 999px;
-    padding: 3px 8px;
-    font-size: 0.75rem;
-    font-weight: 700;
-    white-space: nowrap;
-}
+
 .disc-question-header {
     display: flex;
     align-items: center;
@@ -1460,6 +1515,35 @@ input:focus, textarea:focus {
 .disc-question-body .markdown-content pre code {
     background: none;
     padding: 0;
+}
+
+/* Keep active and previewed Markdown inside its card on narrow screens. */
+.markdown-content {
+    max-width: 100%;
+    min-width: 0;
+    overflow-wrap: anywhere;
+}
+.markdown-content pre {
+    max-width: 100%;
+    overflow-x: auto;
+}
+.markdown-content table {
+    display: block;
+    max-width: 100%;
+    overflow-x: auto;
+}
+.markdown-content img {
+    height: auto;
+    max-width: 100%;
+}
+.markdown-content mjx-container[jax="CHTML"][display="true"] {
+    max-width: 100%;
+    overflow-x: auto;
+    overflow-y: hidden;
+}
+.info-value.markdown-content {
+    flex: 1;
+    min-width: 0;
 }
 
 /* Team table with free-position draggable cards */
@@ -2134,6 +2218,7 @@ html.light .student-timer {
     z-index: 1200;
 }
 .modal-backdrop[hidden] { display: none; }
+body.modal-open { overflow: hidden; }
 .modal-card {
     background: var(--surface);
     border: 1px solid var(--border);
@@ -2348,7 +2433,7 @@ html.light .student-timer {
     padding: 8px 12px;
     border: 1px solid var(--warning);
     border-radius: 6px;
-    background: var(--warning-bg);
+    background: var(--warning-soft);
     color: var(--warning-text);
     font-weight: 700;
 }
@@ -2395,6 +2480,37 @@ html.light .student-timer {
     gap: 5px;
     justify-content: flex-end;
     margin-left: auto;
+}
+.instructor .setup-roster-member {
+    align-items: flex-start;
+    flex-wrap: nowrap;
+}
+.setup-roster-member-body {
+    display: flex;
+    flex: 1 1 auto;
+    flex-direction: column;
+    min-width: 0;
+}
+.setup-roster-member-topline {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+}
+.setup-roster-member-id {
+    flex: 1 1 auto;
+    min-width: 0;
+    font-weight: 600;
+    overflow-wrap: anywhere;
+}
+.setup-roster-team-turns {
+    flex: 0 0 auto;
+}
+.setup-roster-member-name {
+    margin-top: 3px;
+    color: var(--text-muted);
+    line-height: 1.35;
+    overflow-wrap: anywhere;
 }
 .participation-badge {
     align-items: center;
@@ -2519,5 +2635,200 @@ html.light .student-timer {
     }
     .challenge-hand-row .challenge-mutating-btn {
         margin-left: 0;
+    }
+}
+/* ===== Visual and accessibility refinements ===== */
+.instructor-container {
+    max-width: 1200px;
+}
+
+.visually-hidden {
+    position: absolute !important;
+    width: 1px !important;
+    height: 1px !important;
+    padding: 0 !important;
+    margin: -1px !important;
+    overflow: hidden !important;
+    clip: rect(0, 0, 0, 0) !important;
+    white-space: nowrap !important;
+    border: 0 !important;
+}
+
+.nav-dropdown-item[aria-disabled="true"] {
+    opacity: 0.72;
+    overflow-wrap: anywhere;
+}
+
+.phase-buttons .phase-btn {
+    flex: 1 1 150px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    color: var(--text);
+    box-shadow: none;
+}
+.phase-buttons .phase-btn:not(.active):not(.phase-btn-end):not(:disabled):hover {
+    background: var(--accent-bg);
+    border-color: var(--primary);
+    color: var(--primary);
+}
+.phase-buttons .phase-btn.active {
+    background: var(--phase-active-solid);
+    border-color: var(--phase-active-solid);
+    color: #fff;
+    box-shadow: 0 0 0 2px rgba(194, 65, 12, 0.24);
+}
+.phase-buttons .phase-btn-end {
+    background: var(--surface);
+    border-color: var(--error-border);
+    color: var(--error-text);
+}
+.phase-buttons .phase-btn-end:not(.active):not(:disabled):hover {
+    background: var(--error-soft);
+    border-color: var(--danger);
+    color: var(--error-text);
+}
+.phase-buttons .phase-btn-end.active {
+    background: var(--danger-solid);
+    border-color: var(--danger-solid);
+    color: #fff;
+    box-shadow: 0 0 0 2px rgba(185, 28, 28, 0.22);
+}
+
+.filter-select {
+    min-width: 150px;
+    padding: 7px 32px 7px 10px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--surface);
+    color: var(--text);
+    font: inherit;
+    font-size: 0.85rem;
+}
+.filter-select:focus-visible {
+    border-color: var(--primary);
+    outline: 3px solid var(--primary);
+    outline-offset: 1px;
+}
+.filter-dropdown[hidden] {
+    display: none !important;
+}
+
+#student-table {
+    min-width: 960px;
+}
+
+.add-student-form > label:not(.visually-hidden) {
+    color: var(--text-muted);
+    font-size: 0.85rem;
+    font-weight: 600;
+    margin-bottom: -4px;
+}
+
+.question-readiness-warning {
+    background: var(--warning-soft);
+    border: 1px solid var(--warning-border);
+    border-radius: 8px;
+    color: var(--warning-text);
+    font-weight: 600;
+    padding: 8px 10px;
+}
+.question-readiness-warning[hidden] {
+    display: none;
+}
+
+.disc-question-header {
+    cursor: default;
+    padding: 0;
+}
+.disc-question-header:hover {
+    background: var(--bg);
+}
+.disc-question-toggle {
+    align-items: center;
+    align-self: stretch;
+    background: transparent;
+    border: 0;
+    color: var(--text);
+    cursor: pointer;
+    display: flex;
+    flex: 1 1 auto;
+    font: inherit;
+    gap: 10px;
+    min-width: 0;
+    padding: 10px 14px;
+    text-align: left;
+}
+.disc-question-toggle:hover {
+    background: var(--accent-bg);
+}
+.disc-question-toggle:focus-visible {
+    border-radius: 6px;
+    outline: 3px solid var(--primary);
+    outline-offset: -3px;
+}
+.disc-question-chevron {
+    color: var(--text-muted);
+    flex: 0 0 auto;
+    transition: transform 0.15s ease;
+}
+.disc-question-card.expanded .disc-question-chevron {
+    transform: rotate(90deg);
+}
+.disc-question-header > .disc-question-actions {
+    flex: 0 0 auto;
+    padding: 7px 12px 7px 0;
+}
+
+.history-item {
+    align-items: baseline;
+    flex-wrap: wrap;
+    gap: 4px 12px;
+    min-width: 0;
+}
+.history-item > span:first-child {
+    flex: 1 1 260px;
+    min-width: 0;
+    overflow-wrap: anywhere;
+}
+.history-item > span:last-child {
+    margin-left: auto;
+    white-space: nowrap;
+}
+
+.card-id {
+    font-size: 0.72rem;
+    font-weight: 600;
+    max-width: 60px;
+}
+
+@media (max-width: 640px) {
+    .container {
+        padding-left: 14px;
+        padding-right: 14px;
+    }
+    .phase-buttons .phase-btn {
+        flex-basis: calc(50% - 5px);
+        padding-left: 10px;
+        padding-right: 10px;
+    }
+    .table-toolbar,
+    .filter-group {
+        align-items: stretch;
+    }
+    .table-toolbar > input,
+    .filter-group,
+    .filter-select {
+        max-width: none;
+        width: 100%;
+    }
+    .disc-question-header {
+        align-items: stretch;
+        flex-wrap: wrap;
+    }
+    .disc-question-header > .disc-question-actions {
+        border-top: 1px solid var(--border);
+        justify-content: flex-start;
+        padding: 7px 12px;
+        width: 100%;
     }
 }

@@ -8,16 +8,16 @@ Usage:
     python scripts/set-instructor-pin.py              # every course database
     python scripts/set-instructor-pin.py <slug>       # one course database
 
-Prompts for the new PIN twice (hidden input). The PIN must be 4-32 digits,
-matching the instructor login form. Each course database is updated in its
-own immediate transaction; a live web service picks up the new PIN on the
-next login attempt, so no downtime is required.
+Prompts for the new PIN twice (hidden input). The PIN must contain only 4-32
+ASCII digits, matching the instructor login form. Each course database is
+updated in its own immediate transaction; a live web service picks up the new
+PIN immediately. Existing instructor sessions are rejected on their next
+authenticated request, so no restart is required.
 """
 
 import getpass
 import os
 from pathlib import Path
-import re
 import sqlite3
 import sys
 
@@ -31,9 +31,8 @@ from database import (  # noqa: E402
     inspect_schema_version,
     validate_slug,
 )
+from pin_policy import is_valid_instructor_pin  # noqa: E402
 from versioning import SCHEMA_VERSION, public_version  # noqa: E402
-
-PIN_RE = re.compile(r"\d{4,32}")
 DATABASE_SIDECARS = ("-wal", "-shm", "-journal")
 
 
@@ -56,11 +55,11 @@ def find_course_databases(data_dir, only_slug=None):
 def prompt_new_pin():
     """Prompt twice for a 4-32 digit PIN; return it once confirmed."""
     while True:
-        pin = getpass.getpass("New instructor PIN (4-32 digits): ").strip()
-        if not PIN_RE.fullmatch(pin):
-            print("PIN must be 4 to 32 digits. Try again.")
+        pin = getpass.getpass("New instructor PIN (4-32 digits): ")
+        if not is_valid_instructor_pin(pin):
+            print("PIN must contain only 4 to 32 digits (0-9). Try again.")
             continue
-        confirm = getpass.getpass("Confirm new instructor PIN: ").strip()
+        confirm = getpass.getpass("Confirm new instructor PIN: ")
         if pin != confirm:
             print("The two PIN entries do not match. Try again.")
             continue
@@ -69,6 +68,10 @@ def prompt_new_pin():
 
 def set_instructor_pin(database_path, slug, pin):
     """Update every instructor row in one course database atomically."""
+    if not is_valid_instructor_pin(pin):
+        raise ValueError(
+            "Instructor PIN must contain only 4 to 32 digits (0-9)"
+        )
     connection = sqlite3.connect(str(database_path), timeout=30)
     try:
         connection.execute("PRAGMA busy_timeout = 30000")
@@ -120,7 +123,11 @@ def main(argv=None):
         print("=== Set Instructor PIN ===")
         print(f"Courses: {', '.join(databases)}")
         print(
-            "Every listed course will accept the new PIN on the next login."
+            "Every listed course will accept the new PIN immediately."
+        )
+        print(
+            "Existing instructor sessions will be signed out on their "
+            "next request."
         )
         pin = prompt_new_pin()
 

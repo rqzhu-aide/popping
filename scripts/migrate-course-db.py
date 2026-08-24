@@ -23,6 +23,11 @@ from database import (  # noqa: E402
     validate_schema_compatibility,
     validate_slug,
 )
+from scripts.maintenance_safety import (  # noqa: E402
+    SERVICE_STOPPED_CONFIRMATION,
+    confirmation_prompt,
+    validate_confirmation,
+)
 from versioning import (  # noqa: E402
     BASELINE_SCHEMA_VERSION,
     SCHEMA_VERSION,
@@ -32,7 +37,7 @@ from versioning import (  # noqa: E402
 
 BACKUP_RETENTION = 3
 DATABASE_SIDECARS = ("-wal", "-shm", "-journal")
-OFFLINE_CONFIRMATION = "SERVICE STOPPED"
+OFFLINE_CONFIRMATION = SERVICE_STOPPED_CONFIRMATION
 
 
 def course_database_path(slug):
@@ -230,11 +235,14 @@ def main(argv=None):
         if confirmation != slug:
             print("Cancelled: course slug did not match.")
             return 1
-        offline_confirmation = input(
-            f"Type {OFFLINE_CONFIRMATION} to confirm all web workers are stopped: "
-        ).strip()
-        if offline_confirmation != OFFLINE_CONFIRMATION:
-            print("Cancelled: web service stop was not confirmed.")
+        offline_confirmation = input(confirmation_prompt()).strip()
+        try:
+            validate_confirmation(
+                offline_confirmation,
+                PROJECT_ROOT / "classes" / slug / "course.yaml",
+            )
+        except ValueError as exc:
+            print(f"Cancelled: {exc}.")
             return 1
 
         backup_path = create_migration_backup(database_path, slug)

@@ -273,7 +273,7 @@ def parse_question_blocks(text):
         raise QuestionParseError("No valid question frontmatter found")
 
     for delimiter, unclosed in _stray_frontmatter_delimiters(
-            lines, delimiters, headers, _looks_like_title_frontmatter):
+            lines, delimiters, headers, _looks_like_frontmatter):
         if unclosed:
             raise QuestionParseError(
                 f"Unclosed question frontmatter near line {delimiter + 1}"
@@ -442,9 +442,22 @@ def validate_discussion_week(course_dir, week_num):
                 line,
             ))
 
+    strict_questions = None
+    try:
+        strict_questions = parse_week_questions(
+            text, source_path=path, week_num=week_num
+        )
+    except QuestionParseError as exc:
+        issues.append(_issue(
+            "discussion_parse_invalid",
+            str(exc),
+            path,
+        ))
+
     return CatalogSectionStatus(
-        ready=bool(blocks) and not issues,
-        count=len(blocks),
+        ready=bool(strict_questions) and not issues,
+        count=(len(strict_questions)
+               if strict_questions is not None else len(blocks)),
         path=str(path),
         issues=tuple(issues),
     )

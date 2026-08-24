@@ -113,6 +113,10 @@ def test_set_pin_retries_until_valid_and_matching(pin_module, tmp_path, monkeypa
         ["alpha"],
         (
             "123",            # too short -> retry
+            "١٢٣٤",           # Unicode digits -> retry
+            "１２３４",          # full-width digits -> retry
+            " 1234",          # surrounding whitespace -> retry
+            "1234 ",          # surrounding whitespace -> retry
             "12345678",       # valid
             "12345679",       # mismatch -> retry
             "87654321", "87654321",
@@ -121,6 +125,23 @@ def test_set_pin_retries_until_valid_and_matching(pin_module, tmp_path, monkeypa
 
     assert result == 0
     assert _stored_pin(course_dir / "popping.db") == "87654321"
+
+
+@pytest.mark.parametrize(
+    "invalid_pin",
+    ("123", "1" * 33, "12a4", " 1234", "1234 ", "١٢٣٤"),
+)
+def test_set_pin_function_rejects_invalid_pin_without_writing(
+        pin_module, tmp_path, invalid_pin):
+    course_dir = tmp_path / "alpha"
+    course_dir.mkdir()
+    database_path = course_dir / "popping.db"
+    _create_current_course(database_path, "alpha")
+
+    with pytest.raises(ValueError, match="only 4 to 32 digits"):
+        pin_module.set_instructor_pin(database_path, "alpha", invalid_pin)
+
+    assert _stored_pin(database_path) == "9999"
 
 
 def test_set_pin_refuses_unmigrated_course(pin_module, tmp_path, monkeypatch):

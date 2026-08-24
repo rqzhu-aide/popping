@@ -45,12 +45,12 @@ FEEDBACK_TABLES = (*BASELINE_FEEDBACK_TABLES, "presentation_participants")
 
 
 def test_v1_versions_and_public_form_are_aligned():
-    assert APP_VERSION == "1.1.0"
+    assert APP_VERSION == "1.1.7"
     assert SCHEMA_VERSION == "1.1.0"
     assert EXPORT_FORMAT_VERSION == "1.1.0"
     assert BASELINE_SCHEMA_VERSION == "1.0.0"
     assert BASELINE_DATA_VERSION == "1.0.0"
-    assert public_version() == "v1.1.0"
+    assert public_version() == "v1.1.7"
     assert public_version(SCHEMA_VERSION) == "v1.1.0"
     assert parse_version(SCHEMA_VERSION)[2] == 0
 
@@ -245,12 +245,23 @@ def _connect(env):
 
 
 def _student_client(env, student_id):
+    with _connect(env) as db:
+        student = db.execute(
+            "SELECT id, student_id, pin FROM students WHERE student_id = ?",
+            (student_id,),
+        ).fetchone()
     client = app_module.app.test_client()
     with client.session_transaction() as browser_session:
         browser_session["role"] = "student"
-        browser_session["student_id"] = student_id
+        browser_session["student_id"] = student["student_id"]
         browser_session["name"] = student_id
         browser_session["slug"] = env["slug"]
+        browser_session["student_auth_token"] = (
+            app_module._student_session_token(
+                env["slug"], student["id"], student["student_id"],
+                student["pin"],
+            )
+        )
     return client
 
 
@@ -260,6 +271,11 @@ def _instructor_client(env):
         browser_session["role"] = "instructor"
         browser_session["instructor_id"] = env["instructor_id"]
         browser_session["slug"] = env["slug"]
+        browser_session["instructor_auth_token"] = (
+            app_module._instructor_session_token(
+                env["slug"], env["instructor_id"], "9999"
+            )
+        )
     return client
 
 
@@ -644,7 +660,7 @@ def test_weekly_export_routes_only_compatible_known_week_rows_and_versions(
         for row in workbook["Summary"].iter_rows(values_only=True)
         if row[0]
     }
-    assert summary["Website Version"] == "v1.1.0"
+    assert summary["Website Version"] == "v1.1.7"
     assert summary["Database Schema Version"] == "v1.1.0"
     assert summary["Export Format Version"] == "v1.1.0"
     assert summary["Data Compatibility"] == "v1.1.x"
@@ -902,7 +918,7 @@ def test_legacy_export_routes_unknown_incompatible_and_malformed_four_types(
     by_label = {}
     for row in rows:
         by_label.setdefault(row_key(row), []).append(row)
-        assert row["exported_by_website_version"] == "v1.1.0"
+        assert row["exported_by_website_version"] == "v1.1.7"
         assert row["database_schema_version"] == "v1.1.0"
         assert row["export_format_version"] == "v1.1.0"
         _assert_utc_timestamp(row["exported_at_utc"])
@@ -1761,3 +1777,41 @@ def test_challenge_export_joins_require_matching_snapshot_identity(
         ("challenge_rating", scoped_key, "unknown_week"),
         ("challenge_round", legacy_parent_key, "unknown_week"),
     }
+
+
+def test_later_week_with_compatible_saved_rows_remains_exportable(
+        versioned_course_env):
+    from openpyxl import load_workbook
+
+    env = versioned_course_env
+    with _connect(env) as db:
+        db.execute(
+            """INSERT INTO teammate_thumbs
+               (course_id, session_key, week_num, question_key,
+                source_question_key, grader_id, recipient_id, data_version)
+               VALUES (?, ?, 3, 'later-week-thumb', 'later-week-thumb',
+                       ?, ?, '1.1.9')""",
+            (
+                env["course_id"], SESSION_KEY,
+                env["students"]["s1"], env["students"]["s2"],
+            ),
+        )
+        db.commit()
+    _set_state(env, phase="ended", discussion_week=1)
+
+    response = _instructor_client(env).get(
+        f"/export/{env['slug']}?week=3"
+    )
+
+    assert response.status_code == 200
+    assert "week_3_export.zip" in response.headers["Content-Disposition"]
+    with zipfile.ZipFile(io.BytesIO(response.data)) as archive:
+        workbook = load_workbook(
+            io.BytesIO(archive.read("course_data.xlsx")), read_only=True
+        )
+    summary = {
+        row[0]: row[1]
+        for row in workbook["Summary"].iter_rows(values_only=True)
+        if row[0]
+    }
+    assert summary["Lecture Week"] == 3

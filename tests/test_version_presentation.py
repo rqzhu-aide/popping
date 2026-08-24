@@ -32,8 +32,8 @@ def test_templates_present_version_and_unambiguous_download_labels():
     assert "Download Legacy Feedback (week unknown)" not in base
 
 
-def test_instructor_login_accepts_longer_pins():
-    """Instructor PINs may be 4-32 digits; init-db must enforce the same.
+def test_instructor_login_accepts_longer_ascii_digit_pins():
+    """Instructor PINs may be 4-32 ASCII digits everywhere.
 
     Regression: init-course-db.py once accepted any PIN (e.g. 8 digits)
     while the login form clipped input at 4 characters, locking the
@@ -49,7 +49,7 @@ def test_instructor_login_accepts_longer_pins():
     assert 'maxlength="32"' in login
     assert 'pattern="[0-9]{4,32}"' in login
     assert 'maxlength="4"' not in login
-    assert r'\d{4,32}' in init_db
+    assert 'is_valid_instructor_pin(pin)' in init_db
     # Student PINs intentionally remain exactly 4 digits (roster contract).
     student_login = (PROJECT_ROOT / "templates" / "login.html").read_text(
         encoding="utf-8"

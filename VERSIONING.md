@@ -95,18 +95,22 @@ If a schema-line release is accidentally deployed during a session, roll the
 application back to the previous compatible release, end or reset the session,
 then deploy the new release again. Do not bypass the migration-window check.
 
-For the `v1.0.x` to `v1.1.0` transition, stop all web workers and run the
-following command once for each existing course before starting the `v1.1.0`
-service:
+For the `v1.0.x` to `v1.1.0` transition, make each affected course
+unreachable before running the following command once per course:
 
 ```bash
 python scripts/migrate-course-db.py <course_slug>
 ```
 
-The command requires the course slug and `SERVICE STOPPED` confirmations,
-creates a validated pre-migration snapshot, and applies the registered
-migration transactionally. A normal web request is not a substitute for this
-offline step.
+For local operation, stop every web worker and confirm `SERVICE STOPPED`.
+On Render, deploy the affected course with `active: false`, confirm it is absent
+from the landing page, keep the service running so the shell and persistent disk
+remain available, and confirm `COURSE OFFLINE`. After migration, reactivate the
+course in GitHub and deploy again. See the README maintenance procedure.
+
+The command also requires the course slug, creates a validated pre-migration
+snapshot, and applies the registered migration transactionally. A normal web
+request is not a substitute for this offline step.
 
 ## Release checklist
 

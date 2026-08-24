@@ -56,6 +56,7 @@ async function testRosterMutationSerializationAndPickerScope() {
         showToast(message) { toastMessages.push(message); },
         showInstructorMutationError() {},
         refreshRosterInPlace() { refreshCalls += 1; },
+        removeIndividualTeamPicker(picker) { picker.remove(); },
         instructorStatePayload(extra) { return { ...extra }; },
         postJSON() {
             postCalls += 1;
@@ -80,7 +81,10 @@ async function testRosterMutationSerializationAndPickerScope() {
     resolvePost({ success: true, roster_version: 10 });
     await first;
 
-    assert.deepStrictEqual(selectors, ['.team-picker:not(.filter-picker)']);
+    assert.deepStrictEqual(selectors, [
+        '.team-tag[aria-expanded="true"]',
+        '.team-picker:not(.filter-picker)',
+    ]);
     assert.strictEqual(dynamicPicker.removed, 1);
     assert.strictEqual(permanentFilter.removed, 0);
     assert.strictEqual(instructor.dataset.rosterVersion, '10');
@@ -136,7 +140,10 @@ async function testStudentTableKeepsCourseTotalSeparateFromFilterTotal() {
         "let teamFilterVal = '2';" +
         "let _studentTableLoading = false;" +
         "let _studentTableLoadFailed = false;" +
-        "let _studentTableRetryTimer = null;",
+        "let _studentTableRetryTimer = null;" +
+        "let _studentTableReloadPending = false;" +
+        "let _studentTableTrailingReloadTimer = null;" +
+        "let _studentTableRenderSignature = null;",
         sandbox
     );
     vm.runInContext(sourceSlice(
@@ -158,83 +165,16 @@ async function testStudentTableKeepsCourseTotalSeparateFromFilterTotal() {
 }
 
 function testPermanentTeamFilterAccessibility() {
-    const filterStart = instructorTemplate.indexOf('id="team-filter-dropdown"');
+    const filterStart = instructorTemplate.indexOf('id="team-filter-select"');
     const filterEnd = instructorTemplate.indexOf('<div class="table-wrapper">', filterStart);
     assert(filterStart >= 0 && filterEnd > filterStart);
     const filterMarkup = instructorTemplate.slice(filterStart, filterEnd);
-    assert(filterMarkup.includes('id="team-filter-trigger"'));
-    assert(filterMarkup.includes('aria-controls="team-filter-menu"'));
-    assert(filterMarkup.includes('aria-expanded="false"'));
-    assert.strictEqual(
-        (filterMarkup.match(/role="button" tabindex="0"/g) || []).length,
-        3,
-        'all permanent filter option templates must be keyboard reachable'
-    );
-    assert.strictEqual(
-        (filterMarkup.match(/onkeydown="teamFilterOptionKeydown/g) || []).length,
-        3
-    );
-
-    let closeHandler = null;
-    let loadCalls = 0;
-    let focusCalls = 0;
-    const triggerAttributes = { 'aria-expanded': 'false' };
-    const trigger = {
-        setAttribute(name, value) { triggerAttributes[name] = value; },
-        focus() { focusCalls += 1; },
-    };
-    const menu = { style: { display: 'none' } };
-    const label = { textContent: 'All' };
-    const sandbox = {
-        console,
-        window: {},
-        document: {
-            getElementById(id) {
-                if (id === 'team-filter-trigger') return trigger;
-                if (id === 'team-filter-menu') return menu;
-                if (id === 'team-filter-label') return label;
-                return null;
-            },
-            addEventListener(type, handler) {
-                if (type === 'click') closeHandler = handler;
-            },
-            removeEventListener() {},
-        },
-        setTimeout(handler) { handler(); return 1; },
-        loadStudentTable() { loadCalls += 1; },
-    };
-    vm.createContext(sandbox);
-    vm.runInContext("let teamFilterVal = ''; let studentPage = 3;", sandbox);
-    vm.runInContext(sourceSlice(
-        'function setTeamFilterExpanded(expanded) {',
-        'let _searchDebounce = null;'
-    ), sandbox, { filename: 'app-team-filter.js' });
-
-    sandbox.window.toggleTeamFilter({ stopPropagation() {} });
-    assert.strictEqual(menu.style.display, 'block');
-    assert.strictEqual(triggerAttributes['aria-expanded'], 'true');
-    assert.strictEqual(typeof closeHandler, 'function');
-    closeHandler();
-    assert.strictEqual(menu.style.display, 'none');
-    assert.strictEqual(triggerAttributes['aria-expanded'], 'false');
-
-    sandbox.window.toggleTeamFilter({ stopPropagation() {} });
-    let prevented = false;
-    let stopped = false;
-    sandbox.window.teamFilterOptionKeydown({
-        key: ' ',
-        preventDefault() { prevented = true; },
-        stopPropagation() { stopped = true; },
-    }, 'none', 'Unassigned');
-    assert.strictEqual(prevented, true);
-    assert.strictEqual(stopped, true);
-    assert.strictEqual(vm.runInContext('teamFilterVal', sandbox), 'none');
-    assert.strictEqual(vm.runInContext('studentPage', sandbox), 1);
-    assert.strictEqual(label.textContent, 'Unassigned');
-    assert.strictEqual(menu.style.display, 'none');
-    assert.strictEqual(triggerAttributes['aria-expanded'], 'false');
-    assert.strictEqual(focusCalls, 1);
-    assert.strictEqual(loadCalls, 1);
+    assert(instructorTemplate.includes('<label class="filter-label" for="team-filter-select">'));
+    assert(filterMarkup.includes('onchange="setTeamFilterFromSelect(this)"'));
+    assert(filterMarkup.includes('<option value="">All</option>'));
+    assert(filterMarkup.includes('<option value="none">Unassigned</option>'));
+    assert(source.includes('window.setTeamFilterFromSelect = function(select)'));
+    assert(source.includes("teamFilterVal = String(select?.value ?? '')"));
 }
 
 function testPresentationTransitionsReconcileInPlace() {
@@ -340,17 +280,21 @@ function testInstructorVisibilityRecovery() {
     const instructorBlock = source.slice(
         instructorBlockStart, instructorBlockEnd
     );
-    const registrations = instructorBlock.match(
-        /document\.addEventListener\('visibilitychange', \(\) => \{\s*if \(!document\.hidden\) instructorPollOnce\(\);\s*\}\);/g
-    ) || [];
-    assert.strictEqual(
-        registrations.length,
-        1,
-        'the instructor page must register one visibility recovery listener'
+    const registrationStart = instructorBlock.indexOf(
+        "document.addEventListener('visibilitychange'"
     );
+    const registrationEnd = instructorBlock.indexOf(
+        '\n    instructorPollOnce();', registrationStart
+    );
+    assert(registrationStart >= 0 && registrationEnd > registrationStart);
+    const registration = instructorBlock.slice(
+        registrationStart, registrationEnd
+    );
+    assert(registration.includes('revalidateInstructorQuestions();'));
 
     let handler = null;
     let pollCalls = 0;
+    let revalidationCalls = 0;
     const sandbox = {
         document: {
             hidden: true,
@@ -359,10 +303,11 @@ function testInstructorVisibilityRecovery() {
                 handler = callback;
             },
         },
+        revalidateInstructorQuestions() { revalidationCalls += 1; },
         instructorPollOnce() { pollCalls += 1; },
     };
     vm.createContext(sandbox);
-    vm.runInContext(registrations[0], sandbox, {
+    vm.runInContext(registration, sandbox, {
         filename: 'app-instructor-visibility.js',
     });
     assert.strictEqual(typeof handler, 'function');
@@ -371,6 +316,7 @@ function testInstructorVisibilityRecovery() {
     sandbox.document.hidden = false;
     handler();
     assert.strictEqual(pollCalls, 1, 'a visible instructor tab must refresh now');
+    assert.strictEqual(revalidationCalls, 1);
 
     const pollLoop = sourceSlice(
         'async function instructorPollOnce() {',
@@ -381,12 +327,450 @@ function testInstructorVisibilityRecovery() {
     ), 'visibility recovery must reuse the existing overlap guard');
 }
 
+function testMarkdownPreservesMultilineDisplayMath() {
+    const marked = require(path.join(
+        __dirname, '..', '..', 'static', 'vendor', 'marked.min.js'
+    ));
+    let sanitizeCalls = 0;
+    const purifier = {
+        sanitize(html) {
+            sanitizeCalls += 1;
+            return html;
+        },
+    };
+    const sandbox = {
+        console,
+        window: { marked, DOMPurify: purifier },
+        DOMPurify: purifier,
+        document: {
+            createElement() {
+                return {
+                    _text: '',
+                    set textContent(value) { this._text = String(value); },
+                    get innerHTML() { return this._text; },
+                };
+            },
+        },
+        escapeHtmlValue(value) {
+            return String(value)
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#39;');
+        },
+    };
+    vm.createContext(sandbox);
+    vm.runInContext(sourceSlice(
+        'let _markdownParser = null;',
+        'function renderPresentationQuestion(question) {'
+    ), sandbox, { filename: 'app-markdown-render.js' });
+
+    const math = sandbox.renderMarkdown(
+        '$$\nf(x)\n+ g(x)\n- h(x)\n1. k(x)\n\na < b & c\n$$' +
+        '\n\nBetween\n\n$$\nz = 2\n$$'
+    );
+    assert.strictEqual((math.match(/class="math-display"/g) || []).length, 2);
+    assert(!math.includes('<ul>'), 'plus/minus math lines must not become a list');
+    assert(!math.includes('<ol>'), 'numbered math lines must not become a list');
+    assert(math.includes('+ g(x)'));
+    assert(math.includes('&lt;'));
+    assert(math.includes('&amp;'));
+
+    const fenced = sandbox.renderMarkdown(
+        '~~~text\n$$\n+ this is code\n$$\n~~~'
+    );
+    assert(fenced.includes('<pre><code'));
+    assert(!fenced.includes('class="math-display"'));
+    assert.strictEqual(sanitizeCalls, 2, 'DOMPurify must sanitize every result');
+}
+
+function testIndividualTeamPickerKeyboardContract() {
+    const tableRenderer = sourceSlice(
+        'window.loadStudentTable = async function() {',
+        'window.sortStudents = function(col) {'
+    );
+    assert(tableRenderer.includes('<button type="button" class="team-tag'));
+    assert(tableRenderer.includes('aria-haspopup="menu" aria-expanded="false"'));
+
+    const picker = sourceSlice(
+        'window.toggleTeamPicker = function(e, studentId) {',
+        'window.pickTeam = async function(studentId, teamId) {'
+    );
+    assert(source.includes('function removeIndividualTeamPicker('));
+    assert(picker.includes("picker.setAttribute('role', 'menu')"));
+    assert(picker.includes('_closeIndividualTeamPicker'));
+    assert(picker.includes('role="menuitem"'));
+    assert(picker.includes("event.key === 'Escape'"));
+    assert(picker.includes("event.key === 'ArrowDown'"));
+    assert(picker.includes("tag.setAttribute('aria-expanded', 'true')"));
+    assert(picker.includes("picker.querySelector('.team-picker-item')?.focus()"));
+}
+
+function testAppendixCreateRequestIdentity() {
+    let requestNumber = 0;
+    const sandbox = {
+        console,
+        JSON,
+        Math,
+        Date,
+        instructor: { dataset: { discussionWeek: '3' } },
+        window: {
+            crypto: {
+                randomUUID() {
+                    requestNumber += 1;
+                    return 'request-' + requestNumber;
+                },
+            },
+        },
+    };
+    vm.createContext(sandbox);
+    vm.runInContext(
+        'let discussionCurrentWeek = 3;' +
+        sourceSlice(
+            'let appendixMutationInProgress = false;',
+            'function beginAppendixMutation(button, pendingLabel) {'
+        ),
+        sandbox,
+        { filename: 'app-appendix-request-id.js' }
+    );
+
+    const first = vm.runInContext(
+        "ensureAppendixCreateRequest('Title', 'Body', 3)", sandbox
+    );
+    const retry = vm.runInContext(
+        "ensureAppendixCreateRequest('Title', 'Body', 3)", sandbox
+    );
+    const changed = vm.runInContext(
+        "ensureAppendixCreateRequest('Title', 'Changed body', 3)", sandbox
+    );
+    assert.strictEqual(first, retry, 'same add payload must reuse its request key');
+    assert.notStrictEqual(
+        first,
+        changed,
+        'a material draft change must receive a new request key'
+    );
+
+    const addFlow = sourceSlice(
+        'window.addAppendixQuestion = async function(button) {',
+        'function resetAppendixFormMode() {'
+    );
+    assert(addFlow.includes('client_request_id: createRequestId'));
+    const draftFlow = sourceSlice(
+        'function stashAppendixDraft() {',
+        'function setRestoredAppendixEditMode(appendixId) {'
+    );
+    assert(draftFlow.includes('clientRequestId:'));
+    assert(draftFlow.includes('appendixCreateRequestFingerprint !== fingerprint'));
+}
+
+async function testStudentTableQueuesTrailingReload() {
+    let resolveFirst;
+    let trailingReload = null;
+    const urls = [];
+    const tbody = {
+        innerHTML: '',
+        appendChild() {},
+        querySelector() { return null; },
+    };
+    const pagination = { innerHTML: '' };
+    const search = { value: 'first search' };
+    const elements = {
+        'student-search': search,
+        'student-tbody': tbody,
+        'student-pagination': pagination,
+    };
+    const successfulData = {
+        course_total: 2,
+        total: 0,
+        total_pages: 1,
+        page: 1,
+        students: [],
+        teams: [],
+    };
+    const sandbox = {
+        console,
+        URLSearchParams,
+        instructor: { dataset: { studentCount: '2' } },
+        isDemoInstructor: false,
+        window: {
+            _lastTeams: [],
+            clearTimeout() {},
+            setTimeout(handler, delay) {
+                if (delay === 0) trailingReload = handler;
+                return 1;
+            },
+        },
+        document: {
+            getElementById(id) { return elements[id] || null; },
+            querySelector(selector) {
+                if (selector === '.instructor[data-student-count]') {
+                    return sandbox.instructor;
+                }
+                return null;
+            },
+            querySelectorAll() { return []; },
+            createElement() {
+                return { setAttribute() {}, innerHTML: '' };
+            },
+        },
+        fetchJSONWithTimeout(url) {
+            urls.push(url);
+            if (urls.length === 1) {
+                return new Promise(resolve => { resolveFirst = resolve; });
+            }
+            return Promise.resolve({
+                res: { status: 200, ok: true },
+                data: successfulData,
+            });
+        },
+        redirectToSessionEnded() {},
+        showToast() {},
+        escapeAttrValue(value) { return value; },
+        escapeHtmlValue(value) { return value; },
+    };
+    vm.createContext(sandbox);
+    vm.runInContext(
+        "let studentPage = 1;" +
+        "let studentPerPage = 10;" +
+        "let studentSort = 'student_id';" +
+        "let studentOrder = 'asc';" +
+        "let teamFilterVal = '';" +
+        "let _studentTableLoading = false;" +
+        "let _studentTableLoadFailed = false;" +
+        "let _studentTableRetryTimer = null;" +
+        "let _studentTableReloadPending = false;" +
+        "let _studentTableTrailingReloadTimer = null;" +
+        "let _studentTableRenderSignature = null;",
+        sandbox
+    );
+    vm.runInContext(sourceSlice(
+        'window.loadStudentTable = async function() {',
+        'window.sortStudents = function(col) {'
+    ), sandbox, { filename: 'app-student-table-trailing.js' });
+    sandbox.loadStudentTable = sandbox.window.loadStudentTable;
+
+    const first = sandbox.window.loadStudentTable();
+    search.value = 'newest search';
+    await sandbox.window.loadStudentTable();
+    assert.strictEqual(urls.length, 1, 'an in-flight table request must not overlap');
+
+    resolveFirst({
+        res: { status: 200, ok: true },
+        data: successfulData,
+    });
+    await first;
+    assert.strictEqual(typeof trailingReload, 'function');
+    trailingReload();
+    await new Promise(resolve => setImmediate(resolve));
+    await new Promise(resolve => setImmediate(resolve));
+    assert.strictEqual(urls.length, 2);
+    assert(
+        urls[1].includes('search=newest+search'),
+        'the trailing request must use the latest table controls'
+    );
+}
+
+async function testQuestionLoaderRecoversInitialFailure() {
+    const timers = [];
+    const toasts = [];
+    let fetchCalls = 0;
+    let renderCalls = 0;
+    const select = { innerHTML: '', disabled: false };
+    const preview = { disabled: false };
+    const apply = { disabled: false };
+    const container = { innerHTML: '' };
+    const elements = {
+        'setup-week-select': select,
+        'btn-preview-week': preview,
+        'btn-apply-week': apply,
+        'disc-questions-list': container,
+    };
+    const questionData = {
+        current_week: 1,
+        version: 0,
+        weeks: [{ num: 1, ready: true, issues: [] }],
+        questions: [{ key: 'week-1-q1', title: 'Q1', content: 'Body' }],
+    };
+    const sandbox = {
+        console,
+        Date,
+        Math,
+        pageNavigationInProgress: false,
+        window: {
+            clearTimeout(id) {
+                const timer = timers[id - 1];
+                if (timer) timer.cancelled = true;
+            },
+            setTimeout(handler, delay) {
+                timers.push({ handler, delay, cancelled: false });
+                return timers.length;
+            },
+        },
+        document: {
+            getElementById(id) { return elements[id] || null; },
+            createElement() {
+                return {
+                    className: '',
+                    disabled: false,
+                    id: '',
+                    textContent: '',
+                    type: '',
+                    insertAdjacentElement() {},
+                };
+            },
+        },
+        fetchJSONWithTimeout() {
+            fetchCalls += 1;
+            if (fetchCalls === 1) return Promise.reject(new Error('offline'));
+            return Promise.resolve({
+                res: { status: 200, ok: true },
+                data: questionData,
+            });
+        },
+        redirectToSessionEnded() {},
+        escapeHtmlValue(value) { return String(value); },
+        escapeAttrValue(value) { return String(value); },
+        showToast(message) { toasts.push(String(message)); },
+        renderDiscussionQuestions() { renderCalls += 1; },
+    };
+    vm.createContext(sandbox);
+    vm.runInContext(sourceSlice(
+        'let discussionCurrentWeek = null;',
+        '/* ===== WEEK PREVIEW MODAL ===== */'
+    ), sandbox, { filename: 'app-question-loader.js' });
+
+    await vm.runInContext('initWeekSelector()', sandbox);
+    assert.strictEqual(select.disabled, true);
+    assert.strictEqual(preview.disabled, true);
+    assert.match(container.innerHTML, /Retrying automatically/);
+    assert.strictEqual(timers.length, 1);
+    assert.strictEqual(timers[0].delay, 1000);
+    assert.strictEqual(
+        vm.runInContext('renderedDiscQuestionsVersion', sandbox),
+        null,
+        'version zero must not masquerade as a successful initial load'
+    );
+    assert.strictEqual(toasts.length, 1);
+
+    timers[0].handler();
+    await new Promise(resolve => setImmediate(resolve));
+    await new Promise(resolve => setImmediate(resolve));
+    assert.strictEqual(fetchCalls, 2);
+    assert.strictEqual(select.disabled, false);
+    assert.strictEqual(preview.disabled, false);
+    assert.strictEqual(apply.disabled, false);
+    assert.strictEqual(renderCalls, 1);
+    assert.strictEqual(
+        vm.runInContext('renderedDiscQuestionsVersion', sandbox),
+        0
+    );
+
+    let resolveDeferred;
+    sandbox.fetchJSONWithTimeout = () => {
+        fetchCalls += 1;
+        return new Promise(resolve => { resolveDeferred = resolve; });
+    };
+    const firstReload = vm.runInContext('initWeekSelector()', sandbox);
+    const sharedReload = vm.runInContext('initWeekSelector()', sandbox);
+    assert.strictEqual(fetchCalls, 3, 'question refreshes must share one request');
+    resolveDeferred({
+        res: { status: 200, ok: true },
+        data: { ...questionData, version: 1 },
+    });
+    await Promise.all([firstReload, sharedReload]);
+    assert.strictEqual(
+        vm.runInContext('renderedDiscQuestionsVersion', sandbox),
+        1
+    );
+}
+
+function testContextualRosterBadgesAndTeamLabels() {
+    const sandbox = { console };
+    vm.createContext(sandbox);
+    vm.runInContext(sourceSlice(
+        'function normalizedParticipationCount(value) {',
+        'function renderRosterGrid(container, teams, myId'
+    ), sandbox, { filename: 'app-participation-badges.js' });
+    vm.runInContext(sourceSlice(
+        'function updateCompetitionTeamOptionLabel(option) {',
+        'function updateCompetitionTeamSummary(section) {'
+    ), sandbox, { filename: 'app-team-option-label.js' });
+
+    sandbox.escapeHtmlValue = value => String(value)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
+    sandbox.escapeAttrValue = value => sandbox.escapeHtmlValue(value)
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+    sandbox.setupMember = {
+        student_id: 's<1>',
+        name: 'Ada & Lin',
+        presentation_count: 0,
+        challenger_count: 9,
+    };
+    const setupMemberHtml = vm.runInContext(
+        "instructorSetupRosterMemberHtml(setupMember, '#123456')",
+        sandbox
+    );
+    assert.match(setupMemberHtml, /setup-roster-member-topline/);
+    assert.match(setupMemberHtml, /s&lt;1&gt;/);
+    assert.match(setupMemberHtml, /Ada &amp; Lin/);
+    assert.doesNotMatch(setupMemberHtml, /Challenge turns/);
+    assert(
+        setupMemberHtml.indexOf('setup-roster-member-id') <
+        setupMemberHtml.indexOf('setup-roster-team-turns') &&
+        setupMemberHtml.indexOf('setup-roster-team-turns') <
+        setupMemberHtml.indexOf('setup-roster-member-name')
+    );
+
+    sandbox.record = {
+        presentation_count: 2,
+        challenger_count: 3,
+    };
+    const setupBadges = vm.runInContext(
+        'participationBadgesHtml(record, false)', sandbox
+    );
+    assert.match(setupBadges, /Team turns: <strong>2/);
+    assert.doesNotMatch(setupBadges, /Challenge turns/);
+    const individualBadges = vm.runInContext(
+        'participationBadgesHtml(record, true)', sandbox
+    );
+    assert.match(individualBadges, /Challenge turns: <strong>3/);
+
+    const option = {
+        value: '1',
+        dataset: {
+            teamName: 'Team 1',
+            memberCount: '4',
+            neverCount: '1',
+            completed: '1',
+        },
+        textContent: '',
+    };
+    sandbox.option = option;
+    vm.runInContext('updateCompetitionTeamOptionLabel(option)', sandbox);
+    assert.strictEqual(option.textContent, 'Team 1 · 3/4 (completed)');
+
+    option.dataset.neverCount = '4';
+    option.dataset.completed = '0';
+    vm.runInContext('updateCompetitionTeamOptionLabel(option)', sandbox);
+    assert.strictEqual(option.textContent, 'Team 1 · 0/4');
+}
+
 (async () => {
     await testRosterMutationSerializationAndPickerScope();
     await testStudentTableKeepsCourseTotalSeparateFromFilterTotal();
+    await testStudentTableQueuesTrailingReload();
+    await testQuestionLoaderRecoversInitialFailure();
     testPermanentTeamFilterAccessibility();
     testPresentationTransitionsReconcileInPlace();
     testInstructorVisibilityRecovery();
+    testMarkdownPreservesMultilineDisplayMath();
+    testIndividualTeamPickerKeyboardContract();
+    testAppendixCreateRequestIdentity();
+    testContextualRosterBadgesAndTeamLabels();
     console.log('instructor UI behavior: ok');
 })().catch(error => {
     console.error(error);

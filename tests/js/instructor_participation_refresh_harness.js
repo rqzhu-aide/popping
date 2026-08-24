@@ -85,6 +85,9 @@ async function main() {
         'let lastReceivedState = null;' +
         'function ratingsSettlementBlocksAction() { return false; }' +
         'function instructorStatePayload(extra = {}) { return extra; }' +
+        'async function postJSONAfterRatingsSettle(url, payload) {' +
+            'return postJSON(url, payload);' +
+        '}' +
         'function showInstructorMutationError() {}' +
         'function showToast(message, type) {' +
             'toastMessages.push({ message: String(message), type });' +
@@ -232,38 +235,44 @@ async function main() {
         false
     );
 
-    // Selection performs one bounded retry, applies exact counts, then polls.
+    // Selection marks the counts dirty and asks the normal instructor poll to
+    // reconcile them. It must not perform a second, duplicate /api/teams read.
     fetchLog.length = 0;
     events.length = 0;
     appliedRecords.length = 0;
-    teamsCalls = 0;
     fetchHandler = async url => {
-        if (url === '/api/select_challenger') {
-            return response(200, {
-                success: true, challenge_ratings_open: true,
-            });
-        }
+        assert.strictEqual(url, '/api/select_challenger');
+        return response(200, {
+            success: true, challenge_ratings_open: true,
+        });
+    };
+    await sandbox.window.selectChallenger('s2');
+    assert.deepStrictEqual(fetchLog.map(call =>
+        `${call.method} ${call.url}`
+    ), ['POST /api/select_challenger']);
+    assert.strictEqual(
+        vm.runInContext('_competitionParticipationReadbackDirty', sandbox),
+        true
+    );
+    assert.strictEqual(events[events.length - 1], 'poll');
+
+    fetchHandler = async url => {
         assert.strictEqual(url, '/api/teams');
-        teamsCalls += 1;
-        return teamsCalls === 1 ? response(500, {}) : response(200, [{
+        return response(200, [{
             members: [{
                 id: 's2', presentation_count: 0, challenger_count: 1,
             }],
         }]);
     };
-    await sandbox.window.selectChallenger('s2');
+    vm.runInContext('retryCompetitionParticipationCountsIfDirty();', sandbox);
+    await flush();
     assert.deepStrictEqual(fetchLog.map(call =>
         `${call.method} ${call.url}`
-    ), [
-        'POST /api/select_challenger',
-        'GET /api/teams',
-        'GET /api/teams',
-    ]);
-    assert(timerDelays.includes(300));
+    ), ['POST /api/select_challenger', 'GET /api/teams']);
     assert.strictEqual(appliedRecords[0].challenger_count, 1);
-    assert.strictEqual(events[events.length - 1], 'poll');
 
-    // Declining Finish stops before mutation. Accepting it reads counts back.
+    // Declining Finish stops before mutation. Accepting it lets the poll own
+    // the single authoritative count readback.
     fetchLog.length = 0;
     events.length = 0;
     confirmResult = false;
@@ -277,19 +286,26 @@ async function main() {
 
     confirmResult = true;
     fetchHandler = async url => {
-        if (url === '/api/next_presentation') {
-            return response(200, { success: true });
-        }
+        assert.strictEqual(url, '/api/next_presentation');
+        return response(200, { success: true });
+    };
+    await sandbox.window.nextPresentation();
+    assert.deepStrictEqual(fetchLog.map(call =>
+        `${call.method} ${call.url}`
+    ), ['POST /api/next_presentation']);
+    assert.strictEqual(events[events.length - 1], 'poll');
+
+    fetchHandler = async url => {
         assert.strictEqual(url, '/api/teams');
         return response(200, [{ members: [{
             id: 's2', presentation_count: 1, challenger_count: 1,
         }] }]);
     };
-    await sandbox.window.nextPresentation();
+    vm.runInContext('retryCompetitionParticipationCountsIfDirty();', sandbox);
+    await flush();
     assert.deepStrictEqual(fetchLog.map(call =>
         `${call.method} ${call.url}`
     ), ['POST /api/next_presentation', 'GET /api/teams']);
-    assert.strictEqual(events[events.length - 1], 'poll');
 
     // A history addition from another instructor tab also retries and reconciles.
     fetchLog.length = 0;
