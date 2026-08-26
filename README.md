@@ -40,8 +40,8 @@ for the release history.
 `v1.1.0` added durable participation events. `v1.2.0` adds a separate student
 display name while preserving the instructor-uploaded roster name. Each schema
 update requires an explicit offline migration or a course reset. Do not start
-`v1.2.0` web workers against an older course database until that operation has
-succeeded.
+`v1.2.x` web workers against a course database older than `v1.2.0` until that
+operation has succeeded.
 
 ## Quick Start (Local)
 
@@ -226,6 +226,29 @@ Any older instructor PIN outside this policy, including a 1-3 digit PIN, must
 be replaced with this script before the instructor can log in. The application
 does not pad or otherwise transform an existing PIN.
 
+### To Look Up a Student PIN
+
+Student PINs are stored in the course database but are intentionally not sent
+to either the instructor or student browser. To look up one student from
+Render Shell, run:
+
+```bash
+python3 scripts/check-student-pin.py 546fall2026 STUDENT_ID
+```
+
+Replace the course slug and student ID as needed. Put quotation marks around a
+student ID containing spaces. ASCII letter case is ignored, matching website
+login behavior. The result shows the canonical student ID, whether the account
+is active or archived, and the PIN. An archived account cannot log in, but its
+PIN and participation history remain available.
+
+The script is strictly read-only. It does not change the account, participation
+history, PIN, or active sessions, so the course can remain live and no restart
+is needed. It can show only one student per command. Because the plaintext PIN
+appears in terminal scrollback, do not run it while sharing your screen or copy
+its output into logs or messages. The PIN itself is not a command argument, so
+it is not added to shell command history.
+
 ### To Reset a Course (wipe student data and start over)
 
 Do not run a reset while students or instructors can reach that course.
@@ -287,7 +310,7 @@ one transaction. A `v1.0.x` database is upgraded through both migration steps.
 The `v1.1.0` migration deliberately does not infer participation from older
 ratings. The `v1.2.0` migration adds a nullable `students.display_name` column.
 
-Website release `v1.2.0` uses database schema and export format `v1.2.0`.
+Website releases `v1.2.x` use database schema and export format `v1.2.0`.
 Records written by `v1.0.x` or `v1.1.x` remain available through
 **Download Legacy Data** after the upgrade. A full course reset starts with an
 empty current-version database instead.

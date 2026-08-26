@@ -65,6 +65,8 @@ def test_participation_readback_is_wired_to_instructor_mutations():
     assert "permanentParticipationWarning" in phase_change
     assert "permanently recorded" in phase_change
     assert "Use Cancel Mistake first" in phase_change
+    assert "confirmation_type === 'unassigned_students'" in phase_change
+    assert "phasePayload.confirm_unassigned_students = true" in phase_change
 
 def test_instructor_participation_readback_behavior():
     node = shutil.which("node")

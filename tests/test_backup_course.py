@@ -72,7 +72,7 @@ def test_create_bundle_captures_database_and_persistent_question_files(
     manifest = backup_course_module.verify_archive(archive_path)
     assert manifest["format"] == "popping-course-backup-v1"
     assert manifest["course_slug"] == "safe101"
-    assert manifest["website_version"] == "v1.2.0"
+    assert manifest["website_version"] == "v1.2.1"
     assert manifest["database_schema_version"] == "v1.0.0"
     assert manifest["export_format_version"] == "v1.2.0"
     assert manifest["contained_data_versions"] == []
@@ -148,7 +148,7 @@ def test_bundle_manifest_uses_archived_database_schema_ledger(
     archive_path = backup_course_module.create_backup("safe101", destination)
 
     manifest = backup_course_module.verify_archive(archive_path)
-    assert manifest["website_version"] == "v1.2.0"
+    assert manifest["website_version"] == "v1.2.1"
     assert manifest["database_schema_version"] == "v1.3.0"
     assert manifest["contained_data_versions"] == ["v1.3.7"]
     assert manifest["contains_unclassified_data"] is True

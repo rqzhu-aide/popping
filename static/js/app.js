@@ -2639,19 +2639,49 @@ window.confirmDemoReset = function(form) {
 let rosterMutationInProgress = false;
 
 window.randomAssign = async function(btn) {
-    if (!confirm('Assign all remaining students evenly to teams?')) return;
+    if (!confirm(
+            'Assign all currently online unassigned students evenly to ' +
+            'available teams? Students who are currently offline will be ' +
+            'left unchanged.')) return;
     if (!beginRosterMutation()) return;
     if (btn) btn.disabled = true;
     try {
         const data = await postJSON('/api/random_assign', instructorStatePayload());
         if (data.success) {
             applyRosterMutationVersion(data);
-            if (Number(data.remaining) > 0) {
-                showToast(`Assigned ${data.assigned || 0}; ${data.remaining} remain unassigned because team capacity is full.`, 'warning');
-            } else if (data.assigned === 0) {
-                showToast('All students are already in teams.');
+            const assigned = Math.max(0, Number(data.assigned) || 0);
+            const capacityBlocked = Math.max(0, Number(data.remaining) || 0);
+            const skippedOffline = Math.max(
+                0,
+                Number(data.skipped_offline) || 0
+            );
+            const studentWord = count => count === 1 ? 'student' : 'students';
+            const remainVerb = count => count === 1 ? 'remains' : 'remain';
+            const offlineText = skippedOffline > 0
+                ? ` ${skippedOffline} offline ${studentWord(skippedOffline)} ` +
+                  `${remainVerb(skippedOffline)} unassigned.`
+                : '';
+            if (capacityBlocked > 0) {
+                const message = assigned > 0
+                    ? `Assigned ${assigned} online ${studentWord(assigned)}. ` +
+                      `${capacityBlocked} online ${studentWord(capacityBlocked)} ` +
+                      `${remainVerb(capacityBlocked)} unassigned because teams are full.`
+                    : `Teams are full. ${capacityBlocked} online ` +
+                      `${studentWord(capacityBlocked)} ` +
+                      `${remainVerb(capacityBlocked)} unassigned.`;
+                showToast(message + offlineText, 'warning');
+            } else if (assigned > 0) {
+                showToast(
+                    `Assigned ${assigned} online ${studentWord(assigned)}.` +
+                    offlineText,
+                    'success'
+                );
+            } else if (skippedOffline > 0) {
+                showToast(
+                    'No online students need assignment.' + offlineText
+                );
             } else {
-                showToast(`Assigned ${data.assigned} student(s) to teams.`, 'success');
+                showToast('All students are already in teams.');
             }
             refreshRosterInPlace();
         } else {
@@ -2825,7 +2855,7 @@ function endRosterMutation() {
 // on that version change — so a full-page reload is unnecessary. Kick the
 // poll so the grid (and the roster_version sent with mutation guards)
 // catches up immediately, and refresh the student table explicitly since
-// the poll only re-renders it every 10s. Reload stays as the fallback when
+// the poll only re-renders it every 5s. Reload stays as the fallback when
 // the roster grid isn't on the page (these endpoints are setup-only, so
 // this should not happen — correctness beats smoothness).
 function refreshRosterInPlace() {
@@ -3471,13 +3501,16 @@ function updateCompetitionTeamOptionLabel(option) {
     option.dataset.baseLabel = teamName;
     const memberCount = normalizedParticipationCount(option.dataset.memberCount);
     const neverCount = normalizedParticipationCount(option.dataset.neverCount);
+    const totalTurns = normalizedParticipationCount(option.dataset.totalTurns);
     const priorCount = Math.max(0, memberCount - neverCount);
     if (memberCount === 0) {
         option.textContent = `${teamName} (empty)`;
         return;
     }
-    const completed = option.dataset.completed === '1' ? ' (completed)' : '';
-    option.textContent = `${teamName} · ${priorCount}/${memberCount}${completed}`;
+    const turnWord = totalTurns === 1 ? 'turn' : 'turns';
+    const completionLabel = option.dataset.completed === '1' ? ' (completed)' : '';
+    const turnSummary = ` · ${totalTurns} ${turnWord}${completionLabel}`;
+    option.textContent = `${teamName} · ${priorCount}/${memberCount}${turnSummary}`;
 }
 
 function updateCompetitionTeamSummary(section) {
@@ -3485,9 +3518,11 @@ function updateCompetitionTeamSummary(section) {
     const members = Array.from(
         section.querySelectorAll('.team-participation-member')
     );
-    const neverCount = members.filter(member =>
-        normalizedParticipationCount(member.dataset.presentationCount) === 0
-    ).length;
+    const presentationCounts = members.map(member =>
+        normalizedParticipationCount(member.dataset.presentationCount)
+    );
+    const neverCount = presentationCounts.filter(count => count === 0).length;
+    const totalTurns = presentationCounts.reduce((sum, count) => sum + count, 0);
     const summary = section.querySelector('[data-role="team-summary"]');
     if (summary) {
         summary.textContent = members.length
@@ -3498,6 +3533,7 @@ function updateCompetitionTeamSummary(section) {
     if (option) {
         option.dataset.memberCount = String(members.length);
         option.dataset.neverCount = String(neverCount);
+        option.dataset.totalTurns = String(totalTurns);
         updateCompetitionTeamOptionLabel(option);
     }
 }
@@ -4054,9 +4090,9 @@ if (instructor) {
         el.classList.toggle('capacity-success', !overCapacity && !hasUnassigned);
         let message;
         if (overCapacity) {
-            message = `\u26A0 Capacity warning: ${total} students, but only ${capacity} team places. At least ${total - capacity} cannot be assigned.`;
+            message = `\u26A0 Capacity warning: ${total} enrolled students, but only ${capacity} team places. At least ${total - capacity} must remain unassigned.`;
         } else if (unassigned > 0) {
-            message = `\u26A0 ${unassigned} student${unassigned === 1 ? '' : 's'} still unassigned (${capacity - total} spare team places).`;
+            message = `\u26A0 ${unassigned} student${unassigned === 1 ? ' is' : 's are'} not assigned. Assign everyone attending today; absent students may remain unassigned.`;
         } else {
             message = `\u2713 All ${total} students are assigned. Capacity: ${capacity}.`;
         }
@@ -4588,7 +4624,26 @@ window.setPhase = async function(phase) {
             phase,
             confirm_end_session: confirmEndSession
         });
-        const data = await postJSONAfterRatingsSettle('/api/set_phase', phasePayload);
+        let data = await postJSONAfterRatingsSettle('/api/set_phase', phasePayload);
+        if (data?._status === 409 &&
+                data.requires_confirmation === true &&
+                data.confirmation_type === 'unassigned_students') {
+            const count = Math.max(0, Number(data.unassigned_count) || 0);
+            const studentLabel = count === 1 ? 'student is' : 'students are';
+            const nextPhaseLabel = PHASE_LABELS[phase] || phase;
+            const proceed = confirm(
+                `${count} enrolled ${studentLabel} unassigned. They will be ` +
+                'excluded from team activities and team-based voting totals. ' +
+                `Team selection closes when ${nextPhaseLabel} begins. ` +
+                `Start ${nextPhaseLabel} with the assigned students?`
+            );
+            if (!proceed) return;
+            phasePayload.confirm_unassigned_students = true;
+            data = await postJSONAfterRatingsSettle(
+                '/api/set_phase',
+                phasePayload
+            );
+        }
         if (data.success) {
             window.location.reload();
         } else {

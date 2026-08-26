@@ -154,7 +154,8 @@
     <section class="card">
         <div class="card-header-row">
             <h2>Team and Members</h2>
-            <button class="btn btn-sm btn-primary" onclick="randomAssign(this)">Assign Remaining</button>
+            <button class="btn btn-sm btn-primary" onclick="randomAssign(this)"
+                    title="Assign currently online unassigned students evenly to teams">Assign Online</button>
         </div>
         <div class="roster-grid">
             {% for t in teams[:max_teams] %}
@@ -185,9 +186,9 @@
         <p class="capacity-summary{% if students|length > team_capacity %} capacity-danger{% elif unassigned %} capacity-warning{% else %} capacity-success{% endif %}"
            id="setup-capacity-warning" role="status" aria-live="polite">
             {% if students|length > team_capacity %}
-            &#9888; Capacity warning: {{ students|length }} students, but only {{ team_capacity }} team places. At least {{ students|length - team_capacity }} cannot be assigned.
+            &#9888; Capacity warning: {{ students|length }} enrolled students, but only {{ team_capacity }} team places. At least {{ students|length - team_capacity }} must remain unassigned.
             {% elif unassigned %}
-            &#9888; {{ unassigned|length }} student{{ 's' if unassigned|length != 1 else '' }} still unassigned ({{ team_capacity - students|length }} spare team places).
+            &#9888; {{ unassigned|length }} student{{ ' is' if unassigned|length == 1 else 's are' }} not assigned. Assign everyone attending today; absent students may remain unassigned.
             {% else %}
             &#10003; All {{ students|length }} students are assigned. Capacity: {{ team_capacity }}.
             {% endif %}
@@ -374,9 +375,11 @@
                         <option value="">-- Choose team --</option>
                         {% for t in teams[:max_teams] %}
                         {% set presentation_members = students | selectattr('team_id', 'equalto', t.id) | list %}
-                        {% set participation = namespace(never=0) %}
+                        {% set participation = namespace(never=0, total_turns=0) %}
                         {% for member in presentation_members %}
-                            {% if (member.presentation_count or 0) == 0 %}
+                            {% set member_turns = member.presentation_count or 0 %}
+                            {% set participation.total_turns = participation.total_turns + member_turns %}
+                            {% if member_turns == 0 %}
                                 {% set participation.never = participation.never + 1 %}
                             {% endif %}
                         {% endfor %}
@@ -384,7 +387,8 @@
                                 data-team-name="{{ t.name }}"
                                 data-member-count="{{ presentation_members | length }}"
                                 data-never-count="{{ participation.never }}"
-                                {% if not presentation_members %}disabled{% endif %}>{{ t.name }}{% if not presentation_members %} (empty){% else %} · {{ (presentation_members | length) - participation.never }}/{{ presentation_members | length }}{% endif %}</option>
+                                data-total-turns="{{ participation.total_turns }}"
+                                {% if not presentation_members %}disabled{% endif %}>{{ t.name }}{% if not presentation_members %} (empty){% else %} · {{ (presentation_members | length) - participation.never }}/{{ presentation_members | length }} · {{ participation.total_turns }} turn{{ 's' if participation.total_turns != 1 else '' }}{% endif %}</option>
                         {% endfor %}
                     </select>
                 </div>

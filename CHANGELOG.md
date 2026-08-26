@@ -3,6 +3,27 @@
 All notable changes to Popping are recorded here. Releases use semantic
 versions as defined in `VERSIONING.md`.
 
+## [v1.2.1] - 2026-08-25
+
+### Added
+
+- Added a read-only server-shell command for looking up one student's PIN
+  without exposing PINs through the browser API.
+
+### Changed
+
+- Allowed an instructor to start Group Discussion or Present and Challenge
+  with absent students left unassigned after an explicit confirmation.
+- Limited random team assignment to unassigned students active within the
+  previous minute, while leaving offline unassigned roster members untouched.
+- Added each current team's summed historical presentation turns to the team
+  selector in Present and Challenge.
+
+### Fixed
+
+- Kept the confirmation retry protected by the current phase, session, and
+  roster versions so an intervening roster change cannot be accepted silently.
+
 ## [v1.2.0] - 2026-08-24
 
 ### Added

@@ -57,5 +57,11 @@ def test_readme_documents_safe_server_terminal_operations():
     assert "Do not run `scripts/create-course.sh` only in Render Shell" in readme
     assert "bash classes/546fall2026/init-db.sh" in readme
     assert "python3 scripts/set-instructor-pin.py 432fall2026" in readme
+    assert (
+        "python3 scripts/check-student-pin.py 546fall2026 STUDENT_ID"
+        in readme
+    )
     assert "Omitting the course slug changes every course database" in readme
     assert "must contain 4 to 32 ASCII digits (`0-9`)" in readme
+    assert "The script is strictly read-only" in readme
+    assert "An archived account cannot log in" in readme

@@ -91,6 +91,131 @@ async function testRosterMutationSerializationAndPickerScope() {
     assert.strictEqual(refreshCalls, 1);
 }
 
+async function testRandomAssignmentUsesAuthoritativeOnlineCounts() {
+    const confirmations = [];
+    const toasts = [];
+    const responses = [];
+    const postUrls = [];
+    let responseData = null;
+    let refreshCalls = 0;
+    let appliedVersions = 0;
+    let confirmResult = true;
+    const sandbox = {
+        console,
+        window: {},
+        confirm(message) {
+            confirmations.push(String(message));
+            return confirmResult;
+        },
+        beginRosterMutation() { return true; },
+        endRosterMutation() {},
+        instructorStatePayload() { return {}; },
+        async postJSON(url) {
+            postUrls.push(url);
+            return responseData;
+        },
+        applyRosterMutationVersion() { appliedVersions += 1; },
+        showToast(message, type) {
+            toasts.push({ message: String(message), type });
+        },
+        showInstructorMutationError(data, fallback) {
+            responses.push({ data, fallback });
+        },
+        refreshRosterInPlace() { refreshCalls += 1; },
+    };
+    vm.createContext(sandbox);
+    vm.runInContext(sourceSlice(
+        'window.randomAssign = async function(btn) {',
+        '/* ===== INSTRUCTOR PANEL ===== */'
+    ), sandbox, { filename: 'app-random-assign.js' });
+
+    const button = { disabled: false };
+    responseData = {
+        success: true,
+        assigned: 2,
+        remaining: 0,
+        skipped_offline: 1,
+        roster_version: 10,
+    };
+    await sandbox.window.randomAssign(button);
+    assert.match(confirmations[0], /currently online unassigned students/i);
+    assert.match(confirmations[0], /currently offline will be left unchanged/i);
+    assert.deepStrictEqual(toasts.pop(), {
+        message:
+            'Assigned 2 online students. 1 offline student remains unassigned.',
+        type: 'success',
+    });
+
+    responseData = {
+        success: true,
+        assigned: 1,
+        remaining: 2,
+        skipped_offline: 1,
+        roster_version: 11,
+    };
+    await sandbox.window.randomAssign(button);
+    assert.deepStrictEqual(toasts.pop(), {
+        message:
+            'Assigned 1 online student. ' +
+            '2 online students remain unassigned because teams are full. ' +
+            '1 offline student remains unassigned.',
+        type: 'warning',
+    });
+
+    responseData = {
+        success: true,
+        assigned: 0,
+        remaining: 2,
+        skipped_offline: 1,
+        roster_version: 10,
+    };
+    await sandbox.window.randomAssign(button);
+    assert.deepStrictEqual(toasts.pop(), {
+        message:
+            'Teams are full. 2 online students remain unassigned. ' +
+            '1 offline student remains unassigned.',
+        type: 'warning',
+    });
+
+    responseData = {
+        success: true,
+        assigned: 0,
+        remaining: 0,
+        skipped_offline: 2,
+        roster_version: 10,
+    };
+    await sandbox.window.randomAssign(button);
+    assert.deepStrictEqual(toasts.pop(), {
+        message:
+            'No online students need assignment. ' +
+            '2 offline students remain unassigned.',
+        type: undefined,
+    });
+
+    responseData = {
+        success: true,
+        assigned: 0,
+        remaining: 0,
+        skipped_offline: 0,
+        roster_version: 10,
+    };
+    await sandbox.window.randomAssign(button);
+    assert.strictEqual(toasts.pop().message, 'All students are already in teams.');
+
+    confirmResult = false;
+    await sandbox.window.randomAssign(button);
+
+    assert(postUrls.every(url => url === '/api/random_assign'));
+    assert.strictEqual(postUrls.length, 5);
+    assert.strictEqual(appliedVersions, 5);
+    assert.strictEqual(refreshCalls, 5);
+    assert.strictEqual(confirmations.length, 6);
+    assert.strictEqual(toasts.length, 0);
+    assert.strictEqual(responses.length, 0);
+    assert.strictEqual(button.disabled, false);
+    assert.match(instructorTemplate, />Assign Online<\/button>/);
+}
+
 async function testStudentTableKeepsCourseTotalSeparateFromFilterTotal() {
     const instructor = { dataset: { studentCount: '40' } };
     const tbody = { innerHTML: '', appendChild() {}, querySelector() { return null; } };
@@ -698,7 +823,7 @@ function testContextualRosterBadgesAndTeamLabels() {
     ), sandbox, { filename: 'app-participation-badges.js' });
     vm.runInContext(sourceSlice(
         'function updateCompetitionTeamOptionLabel(option) {',
-        'function updateCompetitionTeamSummary(section) {'
+        'function setMemberParticipationCount(member, kind, value) {'
     ), sandbox, { filename: 'app-team-option-label.js' });
 
     sandbox.escapeHtmlValue = value => String(value)
@@ -748,22 +873,56 @@ function testContextualRosterBadgesAndTeamLabels() {
             teamName: 'Team 1',
             memberCount: '4',
             neverCount: '1',
+            totalTurns: '7',
             completed: '1',
         },
         textContent: '',
     };
     sandbox.option = option;
     vm.runInContext('updateCompetitionTeamOptionLabel(option)', sandbox);
-    assert.strictEqual(option.textContent, 'Team 1 · 3/4 (completed)');
+    assert.strictEqual(
+        option.textContent,
+        'Team 1 · 3/4 · 7 turns (completed)'
+    );
+
+    option.dataset.totalTurns = '1';
+    vm.runInContext('updateCompetitionTeamOptionLabel(option)', sandbox);
+    assert.strictEqual(
+        option.textContent,
+        'Team 1 · 3/4 · 1 turn (completed)'
+    );
 
     option.dataset.neverCount = '4';
+    option.dataset.totalTurns = '0';
     option.dataset.completed = '0';
     vm.runInContext('updateCompetitionTeamOptionLabel(option)', sandbox);
-    assert.strictEqual(option.textContent, 'Team 1 · 0/4');
+    assert.strictEqual(option.textContent, 'Team 1 · 0/4 · 0 turns');
+
+    const members = ['2', '1', '0', '0'].map(presentationCount => ({
+        dataset: { presentationCount },
+    }));
+    const summary = { textContent: '' };
+    const section = {
+        dataset: { teamId: '1' },
+        querySelectorAll() { return members; },
+        querySelector() { return summary; },
+    };
+    sandbox.competitionTeamOption = () => option;
+    sandbox.section = section;
+    vm.runInContext('updateCompetitionTeamSummary(section)', sandbox);
+    assert.strictEqual(option.dataset.memberCount, '4');
+    assert.strictEqual(option.dataset.neverCount, '2');
+    assert.strictEqual(option.dataset.totalTurns, '3');
+    assert.strictEqual(option.textContent, 'Team 1 · 2/4 · 3 turns');
+    assert.strictEqual(
+        summary.textContent,
+        '2 of 4 members have no completed team turns.'
+    );
 }
 
 (async () => {
     await testRosterMutationSerializationAndPickerScope();
+    await testRandomAssignmentUsesAuthoritativeOnlineCounts();
     await testStudentTableKeepsCourseTotalSeparateFromFilterTotal();
     await testStudentTableQueuesTrailingReload();
     await testQuestionLoaderRecoversInitialFailure();

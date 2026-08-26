@@ -27,6 +27,7 @@ async function main() {
     const appliedRecords = [];
     const incrementedTeams = [];
     const toastMessages = [];
+    const mutationErrors = [];
     const participationName = { textContent: 'Old Identity' };
     const participationRow = {
         dataset: { studentId: 's2' },
@@ -73,6 +74,7 @@ async function main() {
         appliedRecords,
         incrementedTeams,
         toastMessages,
+        mutationErrors,
         confirm(message) {
             confirmMessage = String(message);
             events.push('confirm');
@@ -80,7 +82,7 @@ async function main() {
         },
         fetch(url, options = {}) {
             const method = options.method || 'GET';
-            fetchLog.push({ url, method });
+            fetchLog.push({ url, method, body: options.body });
             events.push(`fetch:${method}:${url}`);
             return fetchHandler(url, options);
         },
@@ -108,10 +110,14 @@ async function main() {
         'let lastReceivedState = null;' +
         'function ratingsSettlementBlocksAction() { return false; }' +
         'function instructorStatePayload(extra = {}) { return extra; }' +
+        "const PHASE_LABELS = { discussion: 'Group Discussion', " +
+            "competition: 'Present and Challenge' };" +
         'async function postJSONAfterRatingsSettle(url, payload) {' +
             'return postJSON(url, payload);' +
         '}' +
-        'function showInstructorMutationError() {}' +
+        'function showInstructorMutationError(data, fallback) {' +
+            'mutationErrors.push({ data, fallback });' +
+        '}' +
         'function showToast(message, type) {' +
             'toastMessages.push({ message: String(message), type });' +
         '}' +
@@ -449,6 +455,128 @@ async function main() {
     assert.match(confirmMessage, /permanently recorded/i);
     assert.match(confirmMessage, /Cancel Mistake/);
     assert.strictEqual(fetchLog.length, 0);
+
+    // Leaving Setup with unassigned students asks from the authoritative
+    // server response. Declining does not retry or surface a generic error.
+    vm.runInContext(
+        "instructor.dataset.phase = 'setup'; " +
+        "instructor.dataset.activeTeamId = '';",
+        sandbox
+    );
+    confirmResult = false;
+    confirmMessage = '';
+    fetchLog.length = 0;
+    events.length = 0;
+    mutationErrors.length = 0;
+    fetchHandler = async url => {
+        assert.strictEqual(url, '/api/set_phase');
+        return response(409, {
+            success: false,
+            error: 'Confirm before starting Group Discussion.',
+            requires_confirmation: true,
+            confirmation_type: 'unassigned_students',
+            unassigned_count: 2,
+        });
+    };
+    await sandbox.window.setPhase('discussion');
+    assert.strictEqual(fetchLog.length, 1);
+    assert.strictEqual(
+        Object.prototype.hasOwnProperty.call(
+            JSON.parse(fetchLog[0].body),
+            'confirm_unassigned_students'
+        ),
+        false
+    );
+    assert.match(confirmMessage, /2 enrolled students are unassigned/i);
+    assert.match(confirmMessage, /team-based voting totals/i);
+    assert.match(confirmMessage, /team selection closes/i);
+    assert.strictEqual(events.filter(event => event === 'reload').length, 0);
+    assert.strictEqual(mutationErrors.length, 0);
+
+    // Accepting retries exactly once with the exact JSON boolean and reloads
+    // only after the confirmed mutation succeeds.
+    confirmResult = true;
+    confirmMessage = '';
+    fetchLog.length = 0;
+    events.length = 0;
+    mutationErrors.length = 0;
+    let phaseRequestCount = 0;
+    fetchHandler = async url => {
+        assert.strictEqual(url, '/api/set_phase');
+        phaseRequestCount += 1;
+        if (phaseRequestCount === 1) {
+            return response(409, {
+                success: false,
+                error: 'Confirm before starting Present and Challenge.',
+                requires_confirmation: true,
+                confirmation_type: 'unassigned_students',
+                unassigned_count: 1,
+            });
+        }
+        return response(200, { success: true, phase: 'competition' });
+    };
+    await sandbox.window.setPhase('competition');
+    assert.strictEqual(fetchLog.length, 2);
+    const firstPhaseBody = JSON.parse(fetchLog[0].body);
+    const confirmedPhaseBody = JSON.parse(fetchLog[1].body);
+    assert.strictEqual(
+        Object.prototype.hasOwnProperty.call(
+            firstPhaseBody,
+            'confirm_unassigned_students'
+        ),
+        false
+    );
+    assert.strictEqual(
+        confirmedPhaseBody.confirm_unassigned_students,
+        true
+    );
+    assert.match(confirmMessage, /1 enrolled student is unassigned/i);
+    assert.match(confirmMessage, /Present and Challenge/);
+    assert.strictEqual(events.filter(event => event === 'reload').length, 1);
+    assert.strictEqual(mutationErrors.length, 0);
+
+    // Other confirmation contracts are not mistaken for this retry flow.
+    fetchLog.length = 0;
+    events.length = 0;
+    mutationErrors.length = 0;
+    fetchHandler = async () => response(409, {
+        success: false,
+        error: 'Different confirmation required.',
+        requires_confirmation: true,
+        confirmation_type: 'other',
+    });
+    await sandbox.window.setPhase('discussion');
+    assert.strictEqual(fetchLog.length, 1);
+    assert.strictEqual(events.filter(event => event === 'confirm').length, 0);
+    assert.strictEqual(mutationErrors.length, 1);
+
+    // A roster change during the dialog is handled by the normal stale-state
+    // path after the confirmed retry, without a third request or reload.
+    fetchLog.length = 0;
+    events.length = 0;
+    mutationErrors.length = 0;
+    phaseRequestCount = 0;
+    fetchHandler = async () => {
+        phaseRequestCount += 1;
+        if (phaseRequestCount === 1) {
+            return response(409, {
+                success: false,
+                error: 'Confirm before starting Group Discussion.',
+                requires_confirmation: true,
+                confirmation_type: 'unassigned_students',
+                unassigned_count: 2,
+            });
+        }
+        return response(409, {
+            success: false,
+            error: 'The roster changed in another page.',
+        });
+    };
+    await sandbox.window.setPhase('discussion');
+    assert.strictEqual(fetchLog.length, 2);
+    assert.strictEqual(mutationErrors.length, 1);
+    assert.match(mutationErrors[0].data.error, /roster changed/i);
+    assert.strictEqual(events.filter(event => event === 'reload').length, 0);
 
     console.log('instructor participation refresh behavior: ok');
 }

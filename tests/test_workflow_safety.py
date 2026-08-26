@@ -474,37 +474,67 @@ def test_end_session_requires_explicit_confirmation(course_env):
     assert _state_row(course_env) == before
 
 
-def test_setup_phase_exit_blocks_unassigned_students_without_mutation(
-    course_env,
+@pytest.mark.parametrize("phase", ("discussion", "competition"))
+def test_setup_phase_exit_with_unassigned_students_requires_confirmation(
+    course_env, phase
 ):
     before = _state_row(course_env)
 
     response = _instructor_client(course_env).post(
         "/api/set_phase",
-        json=_setup_payload(phase="discussion"),
+        json=_setup_payload(phase=phase),
     )
 
     assert response.status_code == 409
     data = response.get_json()
     assert "not assigned to a team" in data["error"].lower()
+    assert data["requires_confirmation"] is True
+    assert data["confirmation_type"] == "unassigned_students"
     assert data["unassigned_count"] == 1
     assert _state_row(course_env) == before
 
 
-def test_unassigned_phase_block_cannot_be_bypassed_by_confirmation(course_env):
+@pytest.mark.parametrize("phase", ("discussion", "competition"))
+def test_confirmed_unassigned_students_can_enter_interactive_phase(
+    course_env, phase
+):
+    response = _instructor_client(course_env).post(
+        "/api/set_phase",
+        json=_setup_payload(
+            phase=phase,
+            confirm_unassigned_students=True,
+        ),
+    )
+
+    assert response.status_code == 200
+    assert response.get_json()["phase"] == phase
+    assert _state_row(course_env)["phase"] == phase
+    with _connect(course_env) as db:
+        assert db.execute(
+            """SELECT COUNT(*) FROM students
+               WHERE course_id = ? AND is_active = 1 AND team_id IS NULL""",
+            [course_env["course_id"]],
+        ).fetchone()[0] == 1
+
+
+@pytest.mark.parametrize("confirmation", (False, "true", 1))
+def test_unassigned_confirmation_requires_exact_json_true(
+    course_env, confirmation
+):
     before = _state_row(course_env)
 
     response = _instructor_client(course_env).post(
         "/api/set_phase",
         json=_setup_payload(
             phase="discussion",
-            confirm_unassigned_students=True,
+            confirm_unassigned_students=confirmation,
         ),
     )
 
     assert response.status_code == 409
     data = response.get_json()
-    assert "not assigned to a team" in data["error"].lower()
+    assert data["requires_confirmation"] is True
+    assert data["confirmation_type"] == "unassigned_students"
     assert data["unassigned_count"] == 1
     assert _state_row(course_env) == before
 
@@ -532,6 +562,7 @@ def test_unassigned_phase_exit_rejects_a_stale_roster(course_env):
     payload = _setup_payload(phase="discussion")
     blocked = instructor.post("/api/set_phase", json=payload)
     assert blocked.status_code == 409
+    assert blocked.get_json()["requires_confirmation"] is True
     assert blocked.get_json()["unassigned_count"] == 1
 
     roster_change = _student_client(course_env).post(
@@ -540,13 +571,319 @@ def test_unassigned_phase_exit_rejects_a_stale_roster(course_env):
     )
     assert roster_change.status_code == 200
 
-    retried = instructor.post("/api/set_phase", json=payload)
+    retried = instructor.post(
+        "/api/set_phase",
+        json={**payload, "confirm_unassigned_students": True},
+    )
 
     assert retried.status_code == 409
     assert "roster changed" in retried.get_json()["error"].lower()
     state = _state_row(course_env)
     assert state["phase"] == "setup"
     assert state["roster_version"] == 1
+
+
+def test_ended_phase_exit_increments_session_only_after_confirmation(course_env):
+    _set_state(course_env, phase="ended")
+    before = _state_row(course_env)
+    payload = {
+        "phase": "discussion",
+        "expected_phase": "ended",
+        "expected_session_key": SESSION_KEY,
+        "expected_roster_version": 0,
+    }
+    instructor = _instructor_client(course_env)
+
+    blocked = instructor.post("/api/set_phase", json=payload)
+
+    assert blocked.status_code == 409
+    assert blocked.get_json()["requires_confirmation"] is True
+    assert _state_row(course_env) == before
+
+    confirmed = instructor.post(
+        "/api/set_phase",
+        json={**payload, "confirm_unassigned_students": True},
+    )
+
+    assert confirmed.status_code == 200
+    assert confirmed.get_json()["session_key"] == SESSION_KEY + 1
+    state = _state_row(course_env)
+    assert state["phase"] == "discussion"
+    assert state["session_key"] == SESSION_KEY + 1
+
+
+def test_random_assign_matches_student_management_online_window(
+    course_env, monkeypatch
+):
+    now = datetime(2026, 8, 25, 12, 0, 0)
+    assert app_module.STUDENT_ONLINE_WINDOW == timedelta(minutes=1)
+    cutoff = now - app_module.STUDENT_ONLINE_WINDOW
+    monkeypatch.setattr(app_module, "_utcnow", lambda: now)
+    with _connect(course_env) as db:
+        db.execute(
+            "UPDATE students SET last_active_at = ? WHERE student_id = 's3'",
+            ((cutoff + timedelta(seconds=1)).isoformat(),),
+        )
+        db.executemany(
+            """INSERT INTO students
+               (course_id, student_id, name, pin, team_id, last_active_at,
+                is_active)
+               VALUES (?, ?, ?, ?, NULL, ?, ?)""",
+            (
+                (
+                    course_env["course_id"],
+                    "s5",
+                    "Boundary",
+                    "5555",
+                    cutoff.isoformat(),
+                    1,
+                ),
+                (
+                    course_env["course_id"],
+                    "s6",
+                    "Never Online",
+                    "6666",
+                    None,
+                    1,
+                ),
+                (
+                    course_env["course_id"],
+                    "s7",
+                    "Inactive",
+                    "7777",
+                    now.isoformat(),
+                    0,
+                ),
+                (
+                    course_env["course_id"],
+                    "s8",
+                    "Future Activity",
+                    "8888",
+                    (now + timedelta(minutes=1)).isoformat(),
+                    1,
+                ),
+            ),
+        )
+        db.commit()
+
+    instructor = _instructor_client(course_env)
+    student_rows = instructor.get(
+        "/api/students", query_string={"per_page": 100}
+    ).get_json()["students"]
+    online_by_id = {
+        student["student_id"]: bool(student["is_online"])
+        for student in student_rows
+    }
+    assert online_by_id["s3"] is True
+    assert online_by_id["s5"] is False
+    assert online_by_id["s6"] is False
+    assert "s7" not in online_by_id
+    assert online_by_id["s8"] is False
+
+    response = instructor.post(
+        "/api/random_assign",
+        json=_setup_payload(),
+    )
+
+    assert response.status_code == 200
+    data = response.get_json()
+    assert data["assigned"] == 1
+    assert data["remaining"] == 0
+    assert data["skipped_offline"] == 3
+    assert data["roster_version"] == 1
+    with _connect(course_env) as db:
+        assignments = {
+            row["student_id"]: row["team_id"]
+            for row in db.execute(
+                """SELECT student_id, team_id FROM students
+                   WHERE student_id IN ('s3', 's5', 's6', 's7', 's8')"""
+            )
+        }
+    assert assignments["s3"] in {
+        course_env["teams"]["Team 3"],
+        course_env["teams"]["Team 4"],
+    }
+    assert assignments["s5"] is None
+    assert assignments["s6"] is None
+    assert assignments["s7"] is None
+    assert assignments["s8"] is None
+
+
+def test_random_assign_offline_only_is_noop_then_assigns_after_activity(
+    course_env, monkeypatch
+):
+    now = datetime(2026, 8, 25, 12, 0, 0)
+    monkeypatch.setattr(app_module, "_utcnow", lambda: now)
+    instructor = _instructor_client(course_env)
+
+    offline = instructor.post("/api/random_assign", json=_setup_payload())
+
+    assert offline.status_code == 200
+    assert offline.get_json() == {
+        "success": True,
+        "assigned": 0,
+        "remaining": 0,
+        "skipped_offline": 1,
+        "roster_version": 0,
+    }
+    with _connect(course_env) as db:
+        db.execute(
+            "UPDATE students SET last_active_at = ? WHERE student_id = 's3'",
+            (now.isoformat(),),
+        )
+        db.commit()
+
+    online = instructor.post("/api/random_assign", json=_setup_payload())
+
+    assert online.status_code == 200
+    assert online.get_json()["assigned"] == 1
+    assert online.get_json()["skipped_offline"] == 0
+    assert online.get_json()["roster_version"] == 1
+
+
+def test_random_assign_reports_online_student_blocked_by_capacity(
+    course_env, monkeypatch
+):
+    now = datetime(2026, 8, 25, 12, 0, 0)
+    monkeypatch.setattr(app_module, "_utcnow", lambda: now)
+    with _connect(course_env) as db:
+        db.execute(
+            "UPDATE students SET last_active_at = ? WHERE student_id = 's3'",
+            (now.isoformat(),),
+        )
+        db.execute(
+            """UPDATE course_state
+               SET max_teams = 1, max_members_per_team = 2"""
+        )
+        db.commit()
+
+    response = _instructor_client(course_env).post(
+        "/api/random_assign",
+        json=_setup_payload(),
+    )
+
+    assert response.status_code == 200
+    assert response.get_json() == {
+        "success": True,
+        "assigned": 0,
+        "remaining": 1,
+        "skipped_offline": 0,
+        "roster_version": 0,
+    }
+    with _connect(course_env) as db:
+        student = db.execute(
+            "SELECT team_id FROM students WHERE student_id = 's3'"
+        ).fetchone()
+    assert student["team_id"] is None
+
+
+def test_random_assign_partially_fills_capacity_and_separates_offline(
+    course_env, monkeypatch
+):
+    now = datetime(2026, 8, 25, 12, 0, 0)
+    monkeypatch.setattr(app_module, "_utcnow", lambda: now)
+    with _connect(course_env) as db:
+        db.execute(
+            "UPDATE students SET last_active_at = ? WHERE student_id = 's3'",
+            (now.isoformat(),),
+        )
+        db.executemany(
+            """INSERT INTO students
+               (course_id, student_id, name, pin, team_id, last_active_at,
+                is_active)
+               VALUES (?, ?, ?, ?, NULL, ?, 1)""",
+            (
+                (
+                    course_env["course_id"],
+                    "s5",
+                    "Online Candidate",
+                    "5555",
+                    now.isoformat(),
+                ),
+                (
+                    course_env["course_id"],
+                    "s6",
+                    "Offline Candidate",
+                    "6666",
+                    None,
+                ),
+            ),
+        )
+        db.execute(
+            """UPDATE course_state
+               SET max_teams = 2, max_members_per_team = 2"""
+        )
+        db.commit()
+
+    response = _instructor_client(course_env).post(
+        "/api/random_assign",
+        json=_setup_payload(),
+    )
+
+    assert response.status_code == 200
+    assert response.get_json() == {
+        "success": True,
+        "assigned": 1,
+        "remaining": 1,
+        "skipped_offline": 1,
+        "roster_version": 1,
+    }
+    with _connect(course_env) as db:
+        assignments = {
+            row["student_id"]: row["team_id"]
+            for row in db.execute(
+                """SELECT student_id, team_id FROM students
+                   WHERE student_id IN ('s3', 's5', 's6')"""
+            )
+        }
+        team_counts = {
+            row["team_id"]: row["member_count"]
+            for row in db.execute(
+                """SELECT team_id, COUNT(*) AS member_count FROM students
+                   WHERE course_id = ? AND is_active = 1
+                     AND team_id IN (?, ?)
+                   GROUP BY team_id""",
+                (
+                    course_env["course_id"],
+                    course_env["teams"]["Team 1"],
+                    course_env["teams"]["Team 2"],
+                ),
+            )
+        }
+    online_assignments = [assignments["s3"], assignments["s5"]]
+    assert online_assignments.count(course_env["teams"]["Team 2"]) == 1
+    assert online_assignments.count(None) == 1
+    assert assignments["s6"] is None
+    assert team_counts == {
+        course_env["teams"]["Team 1"]: 2,
+        course_env["teams"]["Team 2"]: 2,
+    }
+
+
+def test_random_assign_rejects_second_instructor_with_stale_roster(
+    course_env, monkeypatch
+):
+    now = datetime(2026, 8, 25, 12, 0, 0)
+    monkeypatch.setattr(app_module, "_utcnow", lambda: now)
+    with _connect(course_env) as db:
+        db.execute(
+            "UPDATE students SET last_active_at = ? WHERE student_id = 's3'",
+            (now.isoformat(),),
+        )
+        db.commit()
+    payload = _setup_payload()
+
+    first = _instructor_client(course_env).post(
+        "/api/random_assign", json=payload
+    )
+    stale = _instructor_client(course_env).post(
+        "/api/random_assign", json=payload
+    )
+
+    assert first.status_code == 200
+    assert first.get_json()["roster_version"] == 1
+    assert stale.status_code == 409
+    assert "roster changed" in stale.get_json()["error"].lower()
 
 
 def test_next_presentation_waits_for_open_poll(course_env, monkeypatch):
@@ -2473,6 +2810,8 @@ def test_setup_capacity_status_highlights_unassigned_students(course_env):
     html = client.get(f"/instructor/{course_env['slug']}").get_data(as_text=True)
     assert 'class="capacity-summary capacity-warning"' in html
     assert 'id="setup-capacity-warning" role="status"' in html
+    assert "Assign everyone attending today" in html
+    assert "absent students may remain unassigned" in html
 
     _assign_all_active_students(course_env)
     assigned_html = client.get(
@@ -5032,6 +5371,21 @@ def test_competition_selectors_show_prior_turns_and_completed_questions(
                 app_module.APP_VERSION,
             ),
         )
+        db.execute(
+            """INSERT INTO presentation_participants
+               (course_id, session_key, week_num, presentation_key,
+                student_id, student_identifier, student_name, team_id,
+                team_name, data_version)
+               VALUES (?, ?, 1, 'prior-team-turn-2', ?, 's1', 'Alice', ?,
+                       'Team 1', ?)""",
+            (
+                course_env["course_id"],
+                SESSION_KEY - 2,
+                course_env["students"]["s1"],
+                course_env["teams"]["Team 1"],
+                app_module.APP_VERSION,
+            ),
+        )
         db.commit()
 
     history = json.dumps([
@@ -5058,8 +5412,9 @@ def test_competition_selectors_show_prior_turns_and_completed_questions(
         f"/instructor/{course_env['slug']}"
     ).get_data(as_text=True)
 
-    assert "Team 1 · 1/2</option>" in html
-    assert "Team 2 · 0/1</option>" in html
+    assert 'data-total-turns="2"' in html
+    assert "Team 1 · 1/2 · 2 turns</option>" in html
+    assert "Team 2 · 0/1 · 0 turns</option>" in html
     assert 'data-completed="1">#1: Question One (completed)</option>' in html
     assert "previously presented" not in html
 
@@ -6238,6 +6593,13 @@ def test_saved_activity_freezes_every_roster_structure_route(course_env):
     )
     assert student_no_op.status_code == 200
     assert student_no_op.get_json()["roster_version"] == 0
+
+    with _connect(course_env) as db:
+        db.execute(
+            """UPDATE students SET last_active_at = CURRENT_TIMESTAMP
+               WHERE student_id = 's3'"""
+        )
+        db.commit()
 
     blocked = [
         instructor.post(

@@ -163,6 +163,7 @@ POLL_SUBMISSION_GRACE_SECONDS = 3
 POLL_SETTLING_MESSAGE = (
     'Final ratings are still being saved. Try again in a few seconds.'
 )
+STUDENT_ONLINE_WINDOW = timedelta(minutes=1)
 
 # mtime-keyed cache of per-course poll_duration, so the ~1s poll loop doesn't
 # re-parse course.yaml on every request.
@@ -294,6 +295,19 @@ def _utcnow():
     replacing the deprecated ``datetime.utcnow()``.
     """
     return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def _student_is_online(last_active_at, now=None):
+    """Return whether a saved activity time is inside the presence window."""
+    if not last_active_at:
+        return False
+    checked_at = now if now is not None else _utcnow()
+    try:
+        last_seen = _parse_db_datetime(last_active_at)
+        age = checked_at - last_seen
+        return timedelta(0) <= age < STUDENT_ONLINE_WINDOW
+    except (TypeError, ValueError):
+        return False
 
 
 def course_db_path(slug):
@@ -738,7 +752,7 @@ def _derive_timing_state(state, now=None, poll_duration=None):
 
 # Students poll about once a second (cheap state-version path). Refresh
 # presence at most this often so last_active_at stays truthful without a write
-# on every poll. The is_online cutoff used elsewhere is 3 minutes, so a 30s
+# on every poll. The is_online cutoff used elsewhere is 1 minute, so a 30s
 # cadence keeps that readout accurate.
 STUDENT_ACTIVITY_SYNC_INTERVAL = timedelta(seconds=30)
 STUDENT_ACTIVITY_FAILURE_RETRY_INTERVAL = timedelta(seconds=5)
@@ -2500,7 +2514,7 @@ def instructor_course(slug):
             if str(question['source_key'] or '').startswith('appendix:')
             or question['id'] == active_question_id
         ]
-    cutoff = (_utcnow() - timedelta(minutes=3)).strftime('%Y-%m-%d %H:%M:%S')
+    presence_checked_at = _utcnow()
     participation_counts = _participation_counts_by_student(
         get_db(slug), course['id'], [student['id'] for student in students]
     )
@@ -2508,7 +2522,10 @@ def instructor_course(slug):
     for s in students:
         d = dict(s)
         d['roster_name'] = s['name']
-        d['is_online'] = s['last_active_at'] and s['last_active_at'] > cutoff
+        d['is_online'] = _student_is_online(
+            s['last_active_at'],
+            now=presence_checked_at,
+        )
         counts = participation_counts.get(s['id'], {})
         d['presentation_count'] = counts.get('presentation_count', 0)
         d['challenger_count'] = counts.get('challenger_count', 0)
@@ -4132,15 +4149,18 @@ def set_phase():
                    WHERE course_id = ? AND is_active = 1 AND team_id IS NULL''',
                 [course['id']],
             ).fetchone()['c']
-            if unassigned_count > 0:
+            if (unassigned_count > 0 and
+                    data.get('confirm_unassigned_students') is not True):
                 db.rollback()
                 return jsonify({
                     'error': (
-                        f'{unassigned_count} active student'
+                        f'{unassigned_count} enrolled student'
                         f'{"s are" if unassigned_count != 1 else " is"} '
-                        'not assigned to a team. Assign every student before '
-                        'leaving Setup.'
+                        'not assigned to a team. Confirm before starting '
+                        f'{PHASE_LABELS[phase]}.'
                     ),
+                    'requires_confirmation': True,
+                    'confirmation_type': 'unassigned_students',
                     'unassigned_count': unassigned_count,
                 }), 409
         if (phase == 'ended' and old_phase != 'ended' and
@@ -4317,21 +4337,29 @@ def random_assign():
 
         team_ids = [team['id'] for team in teams]
         unassigned = db.execute(
-            '''SELECT id FROM students
+            '''SELECT id, last_active_at FROM students
                WHERE course_id = ? AND team_id IS NULL AND is_active = 1''',
             [course['id']]
         ).fetchall()
-        if not unassigned:
+        presence_checked_at = _utcnow()
+        student_ids = [
+            student['id'] for student in unassigned
+            if _student_is_online(
+                student['last_active_at'], now=presence_checked_at
+            )
+        ]
+        skipped_offline = len(unassigned) - len(student_ids)
+        if not student_ids:
             roster_version = _current_roster_version(db, course['id'])
             db.commit()
             return jsonify({
                 'success': True,
                 'assigned': 0,
                 'remaining': 0,
+                'skipped_offline': skipped_offline,
                 'roster_version': roster_version,
             })
 
-        student_ids = [student['id'] for student in unassigned]
         rnd.shuffle(student_ids)
         placeholders = ','.join('?' * len(team_ids))
         count_rows = db.execute(
@@ -4366,6 +4394,7 @@ def random_assign():
                 'success': True,
                 'assigned': 0,
                 'remaining': len(student_ids),
+                'skipped_offline': skipped_offline,
                 'roster_version': roster_version,
             })
         freeze_guard = _session_roster_mutation_guard(db, course['id'], state)
@@ -4390,6 +4419,7 @@ def random_assign():
             'success': True,
             'assigned': len(assignments),
             'remaining': len(student_ids) - len(assignments),
+            'skipped_offline': skipped_offline,
             'roster_version': roster_version,
         })
     except Exception:
@@ -7236,7 +7266,7 @@ def api_students():
     sort_sql = allowed_sorts[sort_col]
     order_sql = 'DESC' if order == 'desc' else 'ASC'
 
-    cutoff = (_utcnow() - timedelta(minutes=3)).strftime('%Y-%m-%d %H:%M:%S')
+    presence_checked_at = _utcnow()
 
     where_clause = ''
     params = [course['id']]
@@ -7317,7 +7347,10 @@ def api_students():
     students = []
     for r in rows:
         d = dict(r)
-        d['is_online'] = r['last_active_at'] and r['last_active_at'] > cutoff
+        d['is_online'] = _student_is_online(
+            r['last_active_at'],
+            now=presence_checked_at,
+        )
         d['roster_name'] = r['name']
         students.append(d)
 

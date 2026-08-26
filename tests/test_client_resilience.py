@@ -65,7 +65,7 @@ def test_instructor_vote_progress_uses_compact_counts():
     assert "thumb_online_eligible_count" not in source
     assert "challenge_rating_counts" not in source
     assert "online_eligible_count" not in source
-    assert "active in last 3 minutes" not in source
+    assert "active in last 1 minute" not in source
     assert "Still to rate:" not in source
     assert 'class="challenge-active-details"' in source
     challenge_renderer = source[
@@ -129,6 +129,8 @@ def test_instructor_setup_and_presentation_controls_are_contextual_and_compact()
     assert "setupRosterGrid, rosterData, null," in source
     assert "{ instructorSetup: true }" in source
     assert "applyCompetitionParticipationRoster(rosterData)" in source
+    assert "Assign everyone attending today" in source
+    assert "absent students may remain unassigned" in source
 
     assert 'id="reset-course-data-menu-item"' in base
     assert "state.phase in ['setup', 'ended']" in base
@@ -141,8 +143,11 @@ def test_instructor_setup_and_presentation_controls_are_contextual_and_compact()
     )
     assert "no prior turn" not in template
     assert (
-        "`${teamName} · ${priorCount}/${memberCount}${completed}`"
+        "`${teamName} · ${priorCount}/${memberCount}${turnSummary}`"
         in source
+    )
+    assert (
+        "` · ${totalTurns} ${turnWord}${completionLabel}`" in source
     )
     assert "previously presented" not in template
     assert "previously presented" not in source
