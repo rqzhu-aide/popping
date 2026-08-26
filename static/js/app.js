@@ -2699,6 +2699,140 @@ const isDemoInstructor = instructor?.dataset.demo === '1';
 let ratingsSettling = false;
 let ratingsSettlingStatusTimer = null;
 
+/* ===== INSTRUCTOR QUICK ROLL ===== */
+const QUICK_ROLL_MAXIMUM = 1000000;
+
+function parseQuickRollMaximum(rawValue) {
+    const normalized = String(rawValue ?? '').trim();
+    if (!/^[0-9]+$/.test(normalized)) return null;
+    const maximum = Number(normalized);
+    if (!Number.isSafeInteger(maximum) ||
+            maximum < 1 || maximum > QUICK_ROLL_MAXIMUM) return null;
+    return maximum;
+}
+
+function secureQuickRoll(maximum, cryptoApi) {
+    if (!Number.isSafeInteger(maximum) ||
+            maximum < 1 || maximum > QUICK_ROLL_MAXIMUM) {
+        throw new RangeError('Quick Roll maximum is out of range');
+    }
+    if (!cryptoApi || typeof cryptoApi.getRandomValues !== 'function') {
+        throw new Error('Secure random numbers are unavailable');
+    }
+
+    const range = 0x100000000;
+    const limit = range - (range % maximum);
+    const sample = new Uint32Array(1);
+    do {
+        cryptoApi.getRandomValues(sample);
+    } while (sample[0] >= limit);
+    return (sample[0] % maximum) + 1;
+}
+
+function initInstructorQuickRoll() {
+    const widget = document.getElementById('quick-roll-widget');
+    if (!widget) return;
+
+    const panel = document.getElementById('quick-roll-panel');
+    const trigger = document.getElementById('quick-roll-trigger');
+    const closeButton = document.getElementById('quick-roll-close');
+    const form = document.getElementById('quick-roll-form');
+    const input = document.getElementById('quick-roll-maximum');
+    const error = document.getElementById('quick-roll-error');
+    const result = document.getElementById('quick-roll-result');
+    const resultNumber = document.getElementById('quick-roll-result-number');
+    const resultRange = document.getElementById('quick-roll-result-range');
+    const announcement = document.getElementById('quick-roll-announcement');
+    if (!panel || !trigger || !closeButton || !form || !input || !error ||
+            !result || !resultNumber || !resultRange || !announcement) return;
+
+    function setError(message) {
+        const text = String(message || '');
+        error.textContent = text;
+        error.hidden = !text;
+        input.setAttribute('aria-invalid', text ? 'true' : 'false');
+    }
+
+    function resetResult() {
+        result.classList.remove('is-rolling');
+        resultNumber.textContent = '?';
+        resultRange.textContent = 'Choose N, then roll';
+        announcement.textContent = 'No roll yet.';
+    }
+
+    function closeQuickRoll(returnFocus) {
+        if (panel.hidden) return;
+        panel.hidden = true;
+        trigger.setAttribute('aria-expanded', 'false');
+        trigger.setAttribute('aria-label', 'Open Quick Roll');
+        if (returnFocus) trigger.focus({ preventScroll: true });
+    }
+
+    function openQuickRoll() {
+        panel.hidden = false;
+        trigger.setAttribute('aria-expanded', 'true');
+        trigger.setAttribute('aria-label', 'Close Quick Roll');
+        input.focus({ preventScroll: true });
+        input.select();
+    }
+
+    trigger.addEventListener('click', () => {
+        if (panel.hidden) openQuickRoll();
+        else closeQuickRoll(false);
+    });
+    closeButton.addEventListener('click', () => closeQuickRoll(true));
+
+    input.addEventListener('input', () => {
+        setError('');
+        resetResult();
+    });
+
+    form.addEventListener('submit', event => {
+        event.preventDefault();
+        const maximum = parseQuickRollMaximum(input.value);
+        if (maximum === null) {
+            setError(
+                `Enter a whole number from 1 to ${QUICK_ROLL_MAXIMUM}.`
+            );
+            resetResult();
+            input.focus({ preventScroll: true });
+            input.select();
+            return;
+        }
+
+        let rolled;
+        try {
+            rolled = secureQuickRoll(maximum, window.crypto);
+        } catch (rollError) {
+            setError('Secure random rolling is unavailable in this browser.');
+            resetResult();
+            return;
+        }
+
+        setError('');
+        resultNumber.textContent = String(rolled);
+        resultRange.textContent = `1 through ${maximum}`;
+        announcement.textContent = `Rolled ${rolled} out of ${maximum}.`;
+        result.classList.remove('is-rolling');
+        void result.offsetWidth;
+        result.classList.add('is-rolling');
+    });
+
+    document.addEventListener('click', event => {
+        if (!panel.hidden && !widget.contains(event.target)) {
+            closeQuickRoll(panel.contains(document.activeElement));
+        }
+    });
+    document.addEventListener('keydown', event => {
+        if (event.key !== 'Escape' || panel.hidden) return;
+        event.preventDefault();
+        closeQuickRoll(true);
+    });
+}
+
+initInstructorQuickRoll();
+/* ===== END INSTRUCTOR QUICK ROLL ===== */
+
 function applyRatingsSettlingState(source) {
     if (!source || !Object.prototype.hasOwnProperty.call(
             source, 'ratings_settling')) return;

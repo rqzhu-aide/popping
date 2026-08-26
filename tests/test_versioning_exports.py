@@ -46,12 +46,12 @@ FEEDBACK_TABLES = (*BASELINE_FEEDBACK_TABLES, "presentation_participants")
 
 
 def test_v1_versions_and_public_form_are_aligned():
-    assert APP_VERSION == "1.2.1"
+    assert APP_VERSION == "1.2.2"
     assert SCHEMA_VERSION == "1.2.0"
     assert EXPORT_FORMAT_VERSION == "1.2.0"
     assert BASELINE_SCHEMA_VERSION == "1.0.0"
     assert BASELINE_DATA_VERSION == "1.0.0"
-    assert public_version() == "v1.2.1"
+    assert public_version() == "v1.2.2"
     assert public_version(SCHEMA_VERSION) == "v1.2.0"
     assert parse_version(SCHEMA_VERSION)[2] == 0
 
@@ -665,7 +665,7 @@ def test_weekly_export_routes_only_compatible_known_week_rows_and_versions(
         for row in workbook["Summary"].iter_rows(values_only=True)
         if row[0]
     }
-    assert summary["Website Version"] == "v1.2.1"
+    assert summary["Website Version"] == "v1.2.2"
     assert summary["Database Schema Version"] == "v1.2.0"
     assert summary["Export Format Version"] == "v1.2.0"
     assert summary["Data Compatibility"] == "v1.2.x"
@@ -797,7 +797,7 @@ def test_v12_export_separates_names_and_routes_v11_rows_to_legacy(
             io.BytesIO(archive.read("course_data.xlsx")), read_only=True
         )
 
-    assert manifest["website_version"] == "v1.2.1"
+    assert manifest["website_version"] == "v1.2.2"
     assert manifest["database_schema_version"] == "v1.2.0"
     assert manifest["export_format_version"] == "v1.2.0"
     assert manifest["data_compatibility"] == "v1.2.x"
@@ -1013,7 +1013,7 @@ def test_legacy_export_routes_unknown_incompatible_and_malformed_four_types(
     by_label = {}
     for row in rows:
         by_label.setdefault(row_key(row), []).append(row)
-        assert row["exported_by_website_version"] == "v1.2.1"
+        assert row["exported_by_website_version"] == "v1.2.2"
         assert row["database_schema_version"] == "v1.2.0"
         assert row["export_format_version"] == "v1.2.0"
         _assert_utc_timestamp(row["exported_at_utc"])

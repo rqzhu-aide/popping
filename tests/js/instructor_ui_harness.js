@@ -216,6 +216,215 @@ async function testRandomAssignmentUsesAuthoritativeOnlineCounts() {
     assert.match(instructorTemplate, />Assign Online<\/button>/);
 }
 
+function testInstructorQuickRollIsLocalAccessibleAndUniform() {
+    let activeElement = null;
+
+    function makeClassList() {
+        const values = new Set();
+        return {
+            add(...names) { names.forEach(name => values.add(name)); },
+            remove(...names) { names.forEach(name => values.delete(name)); },
+            contains(name) { return values.has(name); },
+        };
+    }
+
+    function makeElement(id) {
+        const listeners = new Map();
+        const attributes = new Map();
+        return {
+            id,
+            hidden: false,
+            value: '',
+            textContent: '',
+            offsetWidth: 120,
+            classList: makeClassList(),
+            focusCount: 0,
+            selectCount: 0,
+            addEventListener(type, handler) {
+                if (!listeners.has(type)) listeners.set(type, []);
+                listeners.get(type).push(handler);
+            },
+            dispatch(type, event = {}) {
+                for (const handler of listeners.get(type) || []) handler(event);
+            },
+            setAttribute(name, value) {
+                attributes.set(name, String(value));
+            },
+            getAttribute(name) { return attributes.get(name); },
+            focus() {
+                this.focusCount += 1;
+                activeElement = this;
+            },
+            select() { this.selectCount += 1; },
+        };
+    }
+
+    const ids = [
+        'quick-roll-widget',
+        'quick-roll-panel',
+        'quick-roll-trigger',
+        'quick-roll-close',
+        'quick-roll-form',
+        'quick-roll-maximum',
+        'quick-roll-error',
+        'quick-roll-result',
+        'quick-roll-result-number',
+        'quick-roll-result-range',
+        'quick-roll-announcement',
+    ];
+    const elements = Object.fromEntries(ids.map(id => [id, makeElement(id)]));
+    const widgetElements = new Set(Object.values(elements));
+    const panelElements = new Set(Object.values(elements).filter(element =>
+        element !== elements['quick-roll-widget'] &&
+        element !== elements['quick-roll-trigger']
+    ));
+    elements['quick-roll-panel'].hidden = true;
+    elements['quick-roll-error'].hidden = true;
+    elements['quick-roll-maximum'].value = '6';
+    elements['quick-roll-widget'].contains = target => widgetElements.has(target);
+    elements['quick-roll-panel'].contains = target => panelElements.has(target);
+
+    const documentListeners = new Map();
+    const document = {
+        get activeElement() { return activeElement; },
+        getElementById(id) { return elements[id] || null; },
+        addEventListener(type, handler) {
+            if (!documentListeners.has(type)) documentListeners.set(type, []);
+            documentListeners.get(type).push(handler);
+        },
+    };
+    function dispatchDocument(type, event) {
+        for (const handler of documentListeners.get(type) || []) handler(event);
+    }
+
+    let draws = 0;
+    const samples = [];
+    const crypto = {
+        getRandomValues(array) {
+            draws += 1;
+            assert(samples.length > 0, 'unexpected random draw');
+            array[0] = samples.shift();
+            return array;
+        },
+    };
+    const window = { crypto };
+    for (const forbidden of ('localStorage sessionStorage').split(' ')) {
+        Object.defineProperty(window, forbidden, {
+            get() { throw new Error(`${forbidden} must not be accessed`); },
+        });
+    }
+    const sandbox = {
+        console,
+        document,
+        window,
+        fetch() { throw new Error('Quick Roll must not use fetch'); },
+        postJSON() { throw new Error('Quick Roll must not use postJSON'); },
+    };
+    vm.createContext(sandbox);
+    vm.runInContext(sourceSlice(
+        '/* ===== INSTRUCTOR QUICK ROLL ===== */',
+        '/* ===== END INSTRUCTOR QUICK ROLL ===== */'
+    ), sandbox, { filename: 'app-quick-roll.js' });
+
+    const panel = elements['quick-roll-panel'];
+    const trigger = elements['quick-roll-trigger'];
+    const close = elements['quick-roll-close'];
+    const form = elements['quick-roll-form'];
+    const input = elements['quick-roll-maximum'];
+    const error = elements['quick-roll-error'];
+    const result = elements['quick-roll-result'];
+    const resultNumber = elements['quick-roll-result-number'];
+    const resultRange = elements['quick-roll-result-range'];
+    const announcement = elements['quick-roll-announcement'];
+    const event = () => ({ prevented: false, preventDefault() { this.prevented = true; } });
+
+    trigger.dispatch('click');
+    assert.strictEqual(panel.hidden, false);
+    assert.strictEqual(trigger.getAttribute('aria-expanded'), 'true');
+    assert.strictEqual(trigger.getAttribute('aria-label'), 'Close Quick Roll');
+    assert.strictEqual(input.focusCount, 1);
+    assert.strictEqual(input.selectCount, 1);
+    dispatchDocument('click', { target: input });
+    assert.strictEqual(panel.hidden, false, 'inside clicks must keep the panel open');
+
+    trigger.dispatch('click');
+    assert.strictEqual(panel.hidden, true);
+    assert.strictEqual(trigger.getAttribute('aria-expanded'), 'false');
+    trigger.dispatch('click');
+    dispatchDocument('click', { target: {} });
+    assert.strictEqual(panel.hidden, true, 'outside click must close the panel');
+    assert.strictEqual(trigger.focusCount, 1,
+        'outside click must restore focus when the hidden panel retained it');
+
+    const outsideButton = makeElement('outside-button');
+    trigger.dispatch('click');
+    outsideButton.focus();
+    dispatchDocument('click', { target: outsideButton });
+    assert.strictEqual(panel.hidden, true);
+    assert.strictEqual(activeElement, outsideButton,
+        'a focusable outside target must retain focus');
+    assert.strictEqual(trigger.focusCount, 1);
+
+    trigger.dispatch('click');
+    const escapeEvent = { key: 'Escape', prevented: false,
+        preventDefault() { this.prevented = true; } };
+    dispatchDocument('keydown', escapeEvent);
+    assert.strictEqual(escapeEvent.prevented, true);
+    assert.strictEqual(panel.hidden, true);
+    assert.strictEqual(trigger.focusCount, 2);
+    trigger.dispatch('click');
+    close.dispatch('click');
+    assert.strictEqual(panel.hidden, true);
+    assert.strictEqual(trigger.focusCount, 3);
+
+    input.value = '6';
+    samples.push(0xffffffff, 5);
+    const submitSix = event();
+    form.dispatch('submit', submitSix);
+    assert.strictEqual(submitSix.prevented, true);
+    assert.strictEqual(draws, 2, 'rejected samples must be redrawn');
+    assert.strictEqual(resultNumber.textContent, '6');
+    assert.strictEqual(resultRange.textContent, '1 through 6');
+    assert.strictEqual(announcement.textContent, 'Rolled 6 out of 6.');
+    assert.strictEqual(result.classList.contains('is-rolling'), true);
+    assert.strictEqual(error.hidden, true);
+
+    input.dispatch('input');
+    assert.strictEqual(resultNumber.textContent, '?');
+    assert.strictEqual(announcement.textContent, 'No roll yet.');
+    assert.strictEqual(result.classList.contains('is-rolling'), false);
+
+    input.value = '6';
+    samples.push(0);
+    form.dispatch('submit', event());
+    assert.strictEqual(resultNumber.textContent, '1');
+
+    input.value = '1';
+    input.dispatch('input');
+    samples.push(0xffffffff);
+    form.dispatch('submit', event());
+    assert.strictEqual(resultNumber.textContent, '1');
+    assert.strictEqual(resultRange.textContent, '1 through 1');
+
+    for (const invalid of ['', '0', '-1', '2.5', '1000001', 'Infinity']) {
+        const drawsBefore = draws;
+        input.value = invalid;
+        input.dispatch('input');
+        form.dispatch('submit', event());
+        assert.strictEqual(draws, drawsBefore, `invalid limit drew: ${invalid}`);
+        assert.strictEqual(error.hidden, false);
+        assert.strictEqual(input.getAttribute('aria-invalid'), 'true');
+        assert.strictEqual(resultNumber.textContent, '?');
+    }
+
+    input.value = '4';
+    input.dispatch('input');
+    window.crypto = undefined;
+    form.dispatch('submit', event());
+    assert.match(error.textContent, /unavailable/i);
+    assert.strictEqual(resultNumber.textContent, '?');
+}
+
 async function testStudentTableKeepsCourseTotalSeparateFromFilterTotal() {
     const instructor = { dataset: { studentCount: '40' } };
     const tbody = { innerHTML: '', appendChild() {}, querySelector() { return null; } };
@@ -923,6 +1132,7 @@ function testContextualRosterBadgesAndTeamLabels() {
 (async () => {
     await testRosterMutationSerializationAndPickerScope();
     await testRandomAssignmentUsesAuthoritativeOnlineCounts();
+    testInstructorQuickRollIsLocalAccessibleAndUniform();
     await testStudentTableKeepsCourseTotalSeparateFromFilterTotal();
     await testStudentTableQueuesTrailingReload();
     await testQuestionLoaderRecoversInitialFailure();

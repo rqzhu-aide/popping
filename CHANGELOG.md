@@ -3,6 +3,14 @@
 All notable changes to Popping are recorded here. Releases use semantic
 versions as defined in `VERSIONING.md`.
 
+## [v1.2.2] - 2026-08-25
+
+### Added
+
+- Added an instructor-only floating Quick Roll tool that draws a uniformly
+  random number from 1 through an instructor-supplied limit. It runs entirely
+  in the browser and does not save or transmit the range or result.
+
 ## [v1.2.1] - 2026-08-25
 
 ### Added

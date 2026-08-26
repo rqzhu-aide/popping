@@ -2804,6 +2804,19 @@ def test_discussion_instructor_shows_timer_control_and_connection_status(course_
     assert 'id="instructor-connection-status"' in html
 
 
+def test_quick_roll_is_visible_only_to_instructors(course_env):
+    instructor_html = _instructor_client(course_env).get(
+        f"/instructor/{course_env['slug']}"
+    ).get_data(as_text=True)
+    student_html = _student_client(course_env).get(
+        "/dashboard"
+    ).get_data(as_text=True)
+
+    assert 'id="quick-roll-widget"' in instructor_html
+    assert 'id="quick-roll-panel"' in instructor_html
+    assert 'id="quick-roll-widget"' not in student_html
+
+
 def test_setup_capacity_status_highlights_unassigned_students(course_env):
     client = _instructor_client(course_env)
 

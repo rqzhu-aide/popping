@@ -513,5 +513,79 @@
 
     {% endif %}
 
+    {% if session.instructor_id and session.slug %}
+    <aside class="quick-roll-widget" id="quick-roll-widget"
+           aria-label="Quick Roll random number tool">
+        <section class="quick-roll-panel" id="quick-roll-panel"
+                 role="dialog" aria-modal="false"
+                 aria-labelledby="quick-roll-title"
+                 aria-describedby="quick-roll-description" hidden>
+            <div class="quick-roll-header">
+                <span class="quick-roll-mark" aria-hidden="true">
+                    <svg viewBox="0 0 24 24" focusable="false">
+                        <rect x="3" y="3" width="18" height="18" rx="4"></rect>
+                        <circle cx="8" cy="8" r="1.4"></circle>
+                        <circle cx="16" cy="8" r="1.4"></circle>
+                        <circle cx="12" cy="12" r="1.4"></circle>
+                        <circle cx="8" cy="16" r="1.4"></circle>
+                        <circle cx="16" cy="16" r="1.4"></circle>
+                    </svg>
+                </span>
+                <div class="quick-roll-heading">
+                    <h2 id="quick-roll-title">Quick Roll</h2>
+                    <p id="quick-roll-description">Roll a number from 1 to N.</p>
+                </div>
+                <button class="quick-roll-close" id="quick-roll-close"
+                        type="button" aria-label="Close Quick Roll">&times;</button>
+            </div>
+
+            <form class="quick-roll-form" id="quick-roll-form" novalidate
+                  onsubmit="return false">
+                <label for="quick-roll-maximum">Highest number (N)</label>
+                <div class="quick-roll-controls">
+                    <span class="quick-roll-prefix" aria-hidden="true">1 to</span>
+                    <input class="quick-roll-input" id="quick-roll-maximum"
+                           type="number" min="1" max="1000000" step="1"
+                           inputmode="numeric" autocomplete="off" value="6"
+                           aria-describedby="quick-roll-error">
+                    <button class="quick-roll-submit" id="quick-roll-submit"
+                            type="submit">Roll</button>
+                </div>
+                <p class="quick-roll-error" id="quick-roll-error"
+                   role="alert" hidden></p>
+            </form>
+
+            <div class="quick-roll-result" id="quick-roll-result"
+                 role="status" aria-live="polite" aria-atomic="true">
+                <div class="quick-roll-result-visual" aria-hidden="true">
+                    <span class="quick-roll-result-label">Result</span>
+                    <output class="quick-roll-result-number"
+                            id="quick-roll-result-number"
+                            for="quick-roll-maximum">?</output>
+                    <span class="quick-roll-result-range"
+                          id="quick-roll-result-range">Choose N, then roll</span>
+                </div>
+                <span class="visually-hidden" id="quick-roll-announcement">No roll yet.</span>
+            </div>
+
+            <p class="quick-roll-privacy">Local only <span aria-hidden="true">&middot;</span> nothing is saved</p>
+        </section>
+
+        <button class="quick-roll-trigger" id="quick-roll-trigger"
+                type="button" title="Quick Roll" aria-label="Open Quick Roll"
+                aria-haspopup="dialog" aria-expanded="false"
+                aria-controls="quick-roll-panel">
+            <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                <rect x="3" y="3" width="18" height="18" rx="4"></rect>
+                <circle cx="8" cy="8" r="1.4"></circle>
+                <circle cx="16" cy="8" r="1.4"></circle>
+                <circle cx="12" cy="12" r="1.4"></circle>
+                <circle cx="8" cy="16" r="1.4"></circle>
+                <circle cx="16" cy="16" r="1.4"></circle>
+            </svg>
+        </button>
+    </aside>
+    {% endif %}
+
 </div>
 {% endblock %}

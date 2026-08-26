@@ -157,11 +157,15 @@ class TestPrivateDemoEntry:
         student_one = app_module.app.test_client()
         student_two = app_module.app.test_client()
         _enter_instructor(instructor, slug)
+        assert b'id="quick-roll-widget"' in instructor.get(
+            f'/instructor/{slug}'
+        ).data
         role_page = instructor.get(f'/demo/{slug}')
         assert b'onsubmit="return confirmDemoReset(this)"' in role_page.data
 
         _enter_student(student_one, slug, 1)
         _enter_student(student_two, slug, 2)
+        assert b'id="quick-roll-widget"' not in student_one.get('/dashboard').data
 
         with instructor.session_transaction() as session_data:
             assert session_data['slug'] == slug
