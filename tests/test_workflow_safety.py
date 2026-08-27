@@ -2450,6 +2450,101 @@ def test_roster_merge_blank_name_preserves_name_and_noop_version(course_env):
     assert no_op.get_json()["roster_version"] == 1
 
 
+def test_student_roster_download_is_round_trip_safe_and_read_only(course_env):
+    roster_name = 'Alice, "Ace"\nÅngström'
+    with _connect(course_env) as db:
+        db.execute(
+            """UPDATE students SET name = ?, display_name = 'Kit'
+               WHERE student_id = 's1'""",
+            [roster_name],
+        )
+        db.execute(
+            """UPDATE students SET is_active = 0
+               WHERE student_id = 's2'"""
+        )
+        db.execute(
+            """UPDATE students SET name = NULL, pin = '0123'
+               WHERE student_id = 's3'"""
+        )
+        db.commit()
+        students_before = [
+            tuple(row) for row in db.execute(
+                """SELECT id, student_id, name, display_name, pin, team_id,
+                          is_active
+                   FROM students ORDER BY id"""
+            ).fetchall()
+        ]
+        roster_version_before = db.execute(
+            "SELECT roster_version FROM course_state"
+        ).fetchone()[0]
+
+    response = _instructor_client(course_env).get(
+        f"/export/{course_env['slug']}/active-roster.csv"
+    )
+
+    assert response.status_code == 200
+    assert response.mimetype == "text/csv"
+    assert response.data.startswith(b"\xef\xbb\xbf")
+    assert response.headers["Cache-Control"] == "no-store, private"
+    assert (
+        f"filename=popping_{course_env['slug']}_student_roster.csv"
+        in response.headers["Content-Disposition"]
+    )
+    reader = csv.DictReader(io.StringIO(
+        response.data.decode("utf-8-sig")
+    ))
+    assert reader.fieldnames == ["student_id", "name", "pin"]
+    assert list(reader) == [
+        {"student_id": "s1", "name": roster_name, "pin": "1111"},
+        {"student_id": "s3", "name": "", "pin": "0123"},
+        {"student_id": "s4", "name": "Dana", "pin": "4444"},
+    ]
+
+    with _connect(course_env) as db:
+        students_after = [
+            tuple(row) for row in db.execute(
+                """SELECT id, student_id, name, display_name, pin, team_id,
+                          is_active
+                   FROM students ORDER BY id"""
+            ).fetchall()
+        ]
+        roster_version_after = db.execute(
+            "SELECT roster_version FROM course_state"
+        ).fetchone()[0]
+    assert students_after == students_before
+    assert roster_version_after == roster_version_before
+
+
+def test_student_roster_download_is_instructor_only_and_all_phase(course_env):
+    route = f"/export/{course_env['slug']}/active-roster.csv"
+    assert app_module.app.test_client().get(route).status_code == 302
+    assert _student_client(course_env).get(route).status_code == 302
+
+    instructor = _instructor_client(course_env)
+    assert instructor.get(
+        '/export/another-course/active-roster.csv'
+    ).status_code == 302
+    _set_state(course_env, phase="competition")
+    assert instructor.get(route).status_code == 200
+
+
+def test_student_roster_download_allows_an_empty_active_roster(course_env):
+    with _connect(course_env) as db:
+        db.execute("UPDATE students SET is_active = 0")
+        db.commit()
+
+    response = _instructor_client(course_env).get(
+        f"/export/{course_env['slug']}/active-roster.csv"
+    )
+
+    reader = csv.DictReader(io.StringIO(
+        response.data.decode("utf-8-sig")
+    ))
+    assert response.status_code == 200
+    assert reader.fieldnames == ["student_id", "name", "pin"]
+    assert list(reader) == []
+
+
 def test_add_or_update_blank_name_preserves_existing_name(course_env):
     response = _instructor_client(course_env).post(
         "/api/add_student",
@@ -2926,9 +3021,14 @@ def test_export_unknown_weeks_param_keeps_current_week_scope(course_env):
 
 def test_tools_menu_marks_roster_upload_setup_only_outside_setup(course_env):
     client = _instructor_client(course_env)
+    roster_download = (
+        f"/export/{course_env['slug']}/active-roster.csv"
+    )
     page = client.get(
         f"/instructor/{course_env['slug']}"
     ).get_data(as_text=True)
+    assert roster_download in page
+    assert "Download Student Roster" in page
     assert "Upload Student Roster (setup only)" not in page
     assert 'onclick="uploadRoster(event)"' in page
     assert f"/export/{course_env['slug']}?weeks=all" not in page
@@ -2938,6 +3038,7 @@ def test_tools_menu_marks_roster_upload_setup_only_outside_setup(course_env):
     page = client.get(
         f"/instructor/{course_env['slug']}"
     ).get_data(as_text=True)
+    assert roster_download in page
     assert "Upload Student Roster (setup only)" in page
     assert 'onclick="uploadRoster(event)"' not in page
 

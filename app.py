@@ -5830,6 +5830,38 @@ def roster_template():
     )
 
 
+@app.route('/export/<slug>/active-roster.csv')
+@instructor_login_required
+def download_student_roster(slug):
+    """Download the active roster in the same format accepted on upload."""
+    if session.get('is_demo') or is_demo_instance_slug(slug):
+        return 'Student roster downloads are not available in the demo.', 403
+
+    roster_rows = query_db(
+        slug,
+        '''SELECT s.student_id, s.name, s.pin
+           FROM students s
+           JOIN courses c ON c.id = s.course_id
+           WHERE c.slug = ? AND s.is_active = 1
+           ORDER BY s.student_id COLLATE NOCASE, s.student_id, s.id''',
+        [slug],
+    )
+    output = io.StringIO(newline='')
+    writer = csv.writer(output, lineterminator='\n')
+    writer.writerow(['student_id', 'name', 'pin'])
+    writer.writerows(
+        (row['student_id'], row['name'] or '', row['pin'])
+        for row in roster_rows
+    )
+    content = io.BytesIO(output.getvalue().encode('utf-8-sig'))
+    return send_file(
+        content,
+        mimetype='text/csv; charset=utf-8',
+        as_attachment=True,
+        download_name=f'popping_{slug}_student_roster.csv',
+    )
+
+
 _ROSTER_CASE_COLLISION_MESSAGE = (
     'The existing roster contains student IDs that differ only by letter '
     'case. Resolve those duplicate IDs before uploading a roster.'

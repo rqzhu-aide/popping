@@ -451,6 +451,13 @@ stay disabled. The same close protects active challenger ratings.
 
 ### Managing Students
 
+Use **Tools → Download Student Roster** to download every active student's
+uploaded ID, uploaded name, and PIN in the same three-column CSV format used
+for roster uploads. Removed students are not included, and self-provided
+display names are kept separate from this administrative roster. The download
+contains plaintext PINs, so store and share it securely. You can edit this file
+and upload either the complete roster or only the rows that need changes.
+
 During **Setup**, use **Tools → Upload Student Roster** to merge a CSV into the
 course roster. The file may contain the complete roster or only students who
 need to be added or updated. It must use this header:

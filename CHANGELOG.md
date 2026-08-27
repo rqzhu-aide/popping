@@ -3,6 +3,13 @@
 All notable changes to Popping are recorded here. Releases use semantic
 versions as defined in `VERSIONING.md`.
 
+## [v1.2.4] - 2026-08-27
+
+### Added
+
+- Added an instructor-only Tools download for the complete active student
+  roster in the directly re-uploadable `student_id,name,pin` CSV format.
+
 ## [v1.2.3] - 2026-08-27
 
 ### Changed

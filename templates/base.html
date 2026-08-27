@@ -122,12 +122,16 @@
                         <a href="{{ url_for('export_legacy_feedback', slug=session.slug) }}" class="nav-dropdown-item" title="Older-version or unclassified records excluded from current-week results">⬇ Download Legacy Data</a>
                         {% endif %}
                         {% if not session.get('is_demo') %}
+                        <a href="{{ url_for('download_student_roster', slug=session.slug) }}"
+                           class="nav-dropdown-item"
+                           aria-label="Download Student Roster as CSV"
+                           title="Active students only. Contains plaintext PINs; store securely."><span aria-hidden="true">⬇</span> Download Student Roster</a>
                         {% if state is defined and state and state.phase != 'setup' %}
                         <span class="nav-dropdown-item disabled" title="The roster can only be updated during setup">📋 Upload Student Roster (setup only)</span>
                         {% else %}
                         <a href="#" class="nav-dropdown-item" onclick="uploadRoster(event)">📋 Upload Student Roster</a>
                         {% endif %}
-                        <a href="/roster_template.csv" class="nav-dropdown-item">📄 Download Roster Template</a>
+                        <a href="{{ url_for('roster_template') }}" class="nav-dropdown-item">📄 Download Roster Template</a>
                         <input type="file" id="roster-file-input" accept=".csv" style="display:none" onchange="handleRosterFile(event)">
                         <div class="nav-dropdown-separator" role="separator"></div>
                         {% if state is defined and state and state.phase in ['setup', 'ended'] %}

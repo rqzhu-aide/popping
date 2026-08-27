@@ -291,10 +291,14 @@ class TestPrivateDemoEntry:
         assert 'data-demo="1"' in page
         assert 'Student Management' in page
         assert 'Add Student' not in page
+        assert 'Download Student Roster' not in page
         assert 'Upload Student Roster' not in page
         assert 'Download Roster Template' not in page
         assert 'Reset Course Data' not in page
         assert '<th>Action</th>' not in page
+        assert instructor.get(
+            f'/export/{slug}/active-roster.csv'
+        ).status_code == 403
 
         state = _state(instructor)
         guard = {
@@ -325,6 +329,9 @@ class TestPrivateDemoEntry:
         # through the private demo role picker.
         with instructor.session_transaction() as session_data:
             session_data.pop('is_demo', None)
+        assert instructor.get(
+            f'/export/{slug}/active-roster.csv'
+        ).status_code == 403
         assert instructor.post('/api/add_student', json={
             **guard,
             'student_id': 'demo003',

@@ -164,3 +164,22 @@ def test_tools_menu_visually_and_semantically_separates_reset_action():
     assert ".nav-dropdown-danger:not(.disabled):hover" in css
     assert ".nav-dropdown-danger:focus-visible" in css
     assert "background: var(--error-soft);" in css
+
+
+def test_tools_menu_groups_the_roster_download_with_roster_actions():
+    template = _read("templates/base.html")
+    tools_menu = _between(
+        template,
+        '<div class="nav-dropdown-menu" id="tools-menu">',
+        '<form method="post" action="{{ url_for(\'logout\') }}"',
+    )
+
+    non_demo = tools_menu.index("{% if not session.get('is_demo') %}")
+    download = tools_menu.index("Download Student Roster")
+    upload = tools_menu.index("Upload Student Roster")
+    roster_template = tools_menu.index("Download Roster Template")
+    separator = tools_menu.index('class="nav-dropdown-separator"')
+    assert non_demo < download < upload < roster_template < separator
+    assert "url_for('download_student_roster', slug=session.slug)" in tools_menu
+    assert 'aria-label="Download Student Roster as CSV"' in tools_menu
+    assert '<span aria-hidden="true">⬇</span>' in tools_menu
