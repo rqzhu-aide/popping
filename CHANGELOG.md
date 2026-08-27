@@ -3,6 +3,22 @@
 All notable changes to Popping are recorded here. Releases use semantic
 versions as defined in `VERSIONING.md`.
 
+## [v1.2.3] - 2026-08-27
+
+### Changed
+
+- Student-roster CSV uploads now merge only the listed IDs. Existing students
+  keep their database identity, team, self-provided display name, and
+  participation history; new students are added unassigned; and students
+  omitted from the file remain unchanged.
+- The upload preview now distinguishes new, updated, restored, unchanged, and
+  omitted students and identifies PIN changes that require affected students
+  to sign in again.
+- Clarified the instructor controls for adding or updating one student and for
+  the exact four-digit student PIN policy.
+- Kept blank names non-destructive for existing students and hardened roster
+  confirmation against mixed-version servers and ambiguous legacy IDs.
+
 ## [v1.2.2] - 2026-08-25
 
 ### Added

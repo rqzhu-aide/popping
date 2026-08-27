@@ -2554,7 +2554,7 @@ html.light .student-timer {
     to   { opacity: 1; transform: translateX(0); }
 }
 
-/* ===== Roster replacement preview ===== */
+/* ===== Roster update preview ===== */
 .modal-backdrop {
     align-items: center;
     background: rgba(15, 23, 42, 0.72);
@@ -2572,7 +2572,11 @@ body.modal-open { overflow: hidden; }
     border: 1px solid var(--border);
     border-radius: var(--radius);
     box-shadow: var(--shadow-lg);
+    max-height: calc(100vh - 40px);
+    max-height: calc(100dvh - 40px);
     max-width: 520px;
+    overflow-y: auto;
+    overscroll-behavior: contain;
     padding: 24px;
     width: 100%;
 }
@@ -2584,11 +2588,10 @@ body.modal-open { overflow: hidden; }
     justify-content: flex-end;
     margin-top: 20px;
 }
-.roster-replace-warning,
 .capacity-danger,
 .text-danger { color: var(--error-text); }
 .text-warning { color: var(--warning-text); }
-.roster-replace-warning { font-weight: 600; }
+.roster-update-note { color: var(--text-muted); font-weight: 600; }
 .capacity-summary,
 .participation-count { margin: 12px 0 0; color: var(--text-muted); }
 

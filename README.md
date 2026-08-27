@@ -239,8 +239,8 @@ python3 scripts/check-student-pin.py 546fall2026 STUDENT_ID
 Replace the course slug and student ID as needed. Put quotation marks around a
 student ID containing spaces. ASCII letter case is ignored, matching website
 login behavior. The result shows the canonical student ID, whether the account
-is active or archived, and the PIN. An archived account cannot log in, but its
-PIN and participation history remain available.
+is active or removed, and the PIN. A removed account cannot log in, but its PIN
+and participation history remain available.
 
 The script is strictly read-only. It does not change the account, participation
 history, PIN, or active sessions, so the course can remain live and no restart
@@ -449,10 +449,36 @@ that already arrived to finish committing. During that short interval, the
 instructor sees **Saving final ratings...** and presentation-changing controls
 stay disabled. The same close protects active challenger ratings.
 
-### Adding Students
+### Managing Students
 
-Use **Upload Student Roster** or the student-management controls in the
-instructor panel. Do not add students with the `sqlite3` command-line tool.
+During **Setup**, use **Tools → Upload Student Roster** to merge a CSV into the
+course roster. The file may contain the complete roster or only students who
+need to be added or updated. It must use this header:
+
+```csv
+student_id,name,pin
+```
+
+Each listed row behaves as follows:
+
+- An existing student ID updates that student's PIN and any nonblank uploaded
+  roster name. A blank name leaves the current uploaded name unchanged. The
+  database identity, current team, self-provided display name, and all
+  participation history are preserved.
+- A new student ID creates an active student with no team assignment.
+- A student who is not listed is left completely unchanged. A partial file
+  therefore does not remove students and does not need to repeat the full
+  roster.
+- Each listed row must contain a student PIN of exactly four digits. Changing
+  a PIN signs that student out, and the student must sign in with the new PIN.
+
+Review the confirmation preview before selecting **Apply Updates**. To remove
+a student, use **Remove** in **Student Management** instead of omitting the
+student from a CSV. Removal prevents login and clears the current team while
+retaining participation history. The **Add or Update Student** controls in the
+same section are suitable for one student at a time.
+
+Do not add, update, or remove students with the `sqlite3` command-line tool.
 
 ### Safe Database Maintenance
 

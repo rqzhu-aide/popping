@@ -605,6 +605,7 @@ window.uploadRoster = function(e) {
 };
 
 let pendingRosterUpload = null;
+let rosterUploadApplying = false;
 
 function appendInstructorStateForm(formData) {
     const panel = document.querySelector('.instructor[data-slug]');
@@ -676,7 +677,8 @@ function handleModalKeydown(event, modal, closeModal) {
     }
 }
 
-function closeRosterPreview({ restoreFocus = true } = {}) {
+function closeRosterPreview({ restoreFocus = true, force = false } = {}) {
+    if (rosterUploadApplying && !force) return;
     const dialog = document.getElementById('roster-preview-dialog');
     if (dialog) dialog.hidden = true;
     document.body.classList.remove('modal-open');
@@ -689,25 +691,53 @@ function closeRosterPreview({ restoreFocus = true } = {}) {
 }
 
 function showRosterPreview(file, data) {
-    pendingRosterUpload = { file, token: data.preview_token };
     const dialog = document.getElementById('roster-preview-dialog');
     const summary = document.getElementById('roster-preview-summary');
-    if (!dialog || !summary) return;
+    if (!dialog || !summary) return false;
+    if (data.roster_upload_mode !== 'merge' ||
+            Math.max(0, Number(data.removed) || 0) > 0) {
+        showToast(
+            'Roster upload reached an older server response. Reload the page and try again before applying updates.',
+            'error'
+        );
+        return false;
+    }
+    pendingRosterUpload = { file, token: data.preview_token };
     if (!rosterPreviewReturnFocus) rosterPreviewReturnFocus = document.activeElement;
 
+    const restored = Math.max(
+        0, Number(data.restored ?? data.reactivated) || 0
+    );
+    const added = data.new == null
+        ? Math.max(0, (Number(data.added) || 0) - restored)
+        : Math.max(0, Number(data.new) || 0);
+    const updated = Math.max(0, Number(data.updated) || 0);
+    const unchanged = Math.max(0, Number(data.unchanged) || 0);
+    const omitted = Math.max(0, Number(data.omitted_unchanged) || 0);
+    const pinChanged = Math.max(0, Number(data.pin_changed) || 0);
+    const restoredLine = restored
+        ? `<li>${restored} previously removed student${restored === 1 ? '' : 's'} restored</li>`
+        : '';
+    const pinLine = pinChanged
+        ? `<li>${pinChanged} PIN${pinChanged === 1 ? '' : 's'} changed; affected students must sign in again</li>`
+        : '';
+
     summary.innerHTML = `
-        <p><strong>${escapeHtmlValue(file.name)}</strong> contains ${Number(data.total) || 0} students.</p>
+        <p><strong>${escapeHtmlValue(file.name)}</strong> contains ${Number(data.total) || 0} student rows.</p>
         <ul>
-            <li>${Math.max(0, (Number(data.added) || 0) - (Number(data.reactivated) || 0))} new students</li>
-            <li>${Number(data.reactivated) || 0} archived students reactivated</li>
-            <li>${Number(data.updated) || 0} existing students updated</li>
-            <li class="${data.removed ? 'text-danger' : ''}">${Number(data.removed) || 0} students archived</li>
+            <li>${added} new student${added === 1 ? '' : 's'} to add</li>
+            <li>${updated} existing student${updated === 1 ? '' : 's'} to update</li>
+            ${restoredLine}
+            <li>${unchanged} listed student${unchanged === 1 ? '' : 's'} already current</li>
+            <li>${omitted} active student${omitted === 1 ? '' : 's'} not listed and left unchanged</li>
+            ${pinLine}
         </ul>
-        <p class="roster-replace-warning">This replaces the active roster. Archived students cannot log in, but their response history is retained and re-adding the same ID reactivates it.</p>
+        <p class="roster-update-note">Only listed IDs will be added or updated. Existing team assignments, self-provided display names, and participation history are preserved. To remove a student, use Remove in Student Management.</p>
     `;
     dialog.hidden = false;
     document.body.classList.add('modal-open');
     document.getElementById('btn-confirm-roster-upload')?.focus();
+    return true;
 }
 
 document.getElementById('roster-preview-dialog')?.addEventListener(
@@ -732,7 +762,7 @@ window.handleRosterFile = async function(e) {
             return;
         }
         if (res.ok && data.requires_confirmation && data.preview_token) {
-            showRosterPreview(file, data);
+            if (!showRosterPreview(file, data)) e.target.value = '';
         } else {
             data._status = res.status;
             showInstructorMutationError(
@@ -750,11 +780,17 @@ window.handleRosterFile = async function(e) {
 window.cancelRosterUpload = closeRosterPreview;
 
 window.confirmRosterUpload = async function() {
-    if (!pendingRosterUpload) return;
+    if (!pendingRosterUpload || rosterUploadApplying) return;
     const btn = document.getElementById('btn-confirm-roster-upload');
+    const cancelBtn = document.getElementById('btn-cancel-roster-upload');
+    const dialog = document.getElementById('roster-preview-dialog');
     const trackInstructorSave = beginInstructorSave();
     let confirmedSuccess = false;
-    if (btn) { btn.disabled = true; btn.textContent = 'Replacing...'; }
+    rosterUploadApplying = true;
+    if (btn) { btn.disabled = true; btn.textContent = 'Applying...'; }
+    if (cancelBtn) cancelBtn.disabled = true;
+    dialog?.setAttribute('aria-busy', 'true');
+    dialog?.focus();
     try {
         const formData = new FormData();
         formData.append('file', pendingRosterUpload.file);
@@ -774,19 +810,39 @@ window.confirmRosterUpload = async function() {
             data._status = res.status;
             showInstructorMutationError(
                 data,
-                rosterErrorMessage(data, 'Roster replacement failed')
+                rosterErrorMessage(data, 'Roster update failed')
             );
             return;
         }
-        showToast(`Roster replaced: ${data.added} added, ${data.updated} updated, ${data.removed || 0} removed.`, 'success');
+        const restored = Math.max(
+            0, Number(data.restored ?? data.reactivated) || 0
+        );
+        const added = data.new == null
+            ? Math.max(0, (Number(data.added) || 0) - restored)
+            : Math.max(0, Number(data.new) || 0);
+        const updated = Math.max(0, Number(data.updated) || 0);
+        const changes = [];
+        if (added) changes.push(`${added} added`);
+        if (updated) changes.push(`${updated} updated`);
+        if (restored) changes.push(`${restored} restored`);
+        showToast(
+            changes.length
+                ? `Roster updated: ${changes.join(', ')}.`
+                : 'Roster already up to date.',
+            'success'
+        );
         confirmedSuccess = true;
-        closeRosterPreview({ restoreFocus: false });
+        closeRosterPreview({ restoreFocus: false, force: true });
         window.location.reload();
     } catch (error) {
-        showToast('Network error while replacing the roster', 'error');
+        showToast('Network error while updating the roster', 'error');
     } finally {
+        rosterUploadApplying = false;
         finishInstructorSave(trackInstructorSave, confirmedSuccess);
-        if (btn) { btn.disabled = false; btn.textContent = 'Replace Roster'; }
+        if (btn) { btn.disabled = false; btn.textContent = 'Apply Updates'; }
+        if (cancelBtn) cancelBtn.disabled = false;
+        dialog?.removeAttribute('aria-busy');
+        if (!confirmedSuccess && btn && !dialog?.hidden) btn.focus();
     }
 };
 
@@ -5243,8 +5299,14 @@ window.pickTeam = async function(studentId, teamId) {
 window.addStudent = async function(btn) {
     const id = document.getElementById('new-student-id').value.trim();
     const name = document.getElementById('new-name').value.trim();
-    const pin = document.getElementById('new-pin').value.trim();
+    const pinInput = document.getElementById('new-pin');
+    const pin = pinInput.value.trim();
     if (!id || !pin) { showToast('Student ID and PIN are required', 'warning'); return; }
+    if (!/^[0-9]{4}$/.test(pin)) {
+        showToast('Student PIN must be exactly 4 digits', 'warning');
+        pinInput.focus();
+        return;
+    }
     if (!beginRosterMutation()) return;
     if (btn) btn.disabled = true;
     try {
@@ -5255,12 +5317,23 @@ window.addStudent = async function(btn) {
         }));
         if (data.success) {
             applyRosterMutationVersion(data);
-            showToast(data.updated ? 'Student info updated' : 'Student added', 'success');
+            let message = 'Student info updated';
+            if (data.reactivated) {
+                message = 'Student restored';
+            } else if (data.added) {
+                message = 'Student added';
+            } else if (data.changed === false) {
+                message = 'Student already up to date';
+            }
+            if (data.pin_changed) {
+                message += '; the student must sign in again';
+            }
+            showToast(message, 'success');
             document.getElementById('new-student-id').value = '';
             document.getElementById('new-name').value = '';
             document.getElementById('new-pin').value = '';
             if (!data.updated) {
-                // New or reactivated student: keep the capacity summary's
+                // New or restored student: keep the capacity summary's
                 // total (read from this dataset key) correct until the next
                 // full page load.
                 instructor.dataset.studentCount =
@@ -5268,7 +5341,7 @@ window.addStudent = async function(btn) {
             }
             refreshRosterInPlace();
         } else {
-            showInstructorMutationError(data, 'Failed to add student');
+            showInstructorMutationError(data, 'Failed to add or update student');
         }
     } finally {
         endRosterMutation();
@@ -6596,7 +6669,9 @@ window.deleteAppendixQuestion = async function(button) {
 };
 
 window.removeStudent = async function(studentDbId, btn) {
-    if (!confirm('Remove this student?')) return;
+    if (!confirm(
+        'Remove this student from the course? They will immediately lose access and be removed from their team. Their participation history will be retained.'
+    )) return;
     if (!beginRosterMutation()) return;
     if (btn) btn.disabled = true;
     try {

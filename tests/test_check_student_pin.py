@@ -91,7 +91,7 @@ def test_lookup_is_case_insensitive_and_read_only(
     assert database_path.read_bytes() == original_database
 
 
-def test_lookup_reports_archived_student(
+def test_lookup_reports_removed_student(
         lookup_module, tmp_path, monkeypatch, capsys):
     data_dir, database_path, course_id = _course_database(tmp_path)
     _add_student(
@@ -103,7 +103,7 @@ def test_lookup_reports_archived_student(
 
     output = capsys.readouterr().out
     assert result == 0
-    assert "Status: archived (cannot log in)" in output
+    assert "Status: removed (cannot log in)" in output
     assert "PIN: 1357" in output
 
 

@@ -1068,12 +1068,20 @@ def test_leaving_ended_starts_exactly_one_new_session(course_env):
     assert _state_row(course_env)["session_key"] == SESSION_KEY + 1
 
 
-def test_archiving_preserves_history_and_reactivation_reuses_identity(course_env):
+def test_removed_student_included_in_roster_merge_restores_same_identity_and_history(
+        course_env):
     # Historical responses from an earlier session must not prevent roster
     # maintenance, and their student foreign keys must remain stable.
     _seed_response_history(course_env, session_key=SESSION_KEY - 1)
     original_student_db_id = course_env["students"]["s1"]
     history_before = _history_counts(course_env)
+    with _connect(course_env) as db:
+        db.execute(
+            """UPDATE students SET last_active_at = '2026-08-01 12:01:00'
+               WHERE id = ?""",
+            (original_student_db_id,),
+        )
+        db.commit()
     client = _instructor_client(course_env)
 
     archived = client.delete(
@@ -1083,29 +1091,50 @@ def test_archiving_preserves_history_and_reactivation_reuses_identity(course_env
     assert archived.status_code == 200
     with _connect(course_env) as db:
         student = db.execute(
-            """SELECT id, is_active, team_id, last_team_id
+            """SELECT id, is_active, team_id, last_team_id, last_active_at
                FROM students WHERE student_id = 's1'"""
         ).fetchone()
     assert student["id"] == original_student_db_id
     assert student["is_active"] == 0
     assert student["team_id"] is None
     assert student["last_team_id"] == course_env["teams"]["Team 1"]
+    assert student["last_active_at"] == "2026-08-01 12:01:00"
     assert _history_counts(course_env) == history_before
 
+    roster = (
+        "student_id,name,pin\n"
+        "S1,Alice Restored,5555\n"
+    ).encode("utf-8")
+    guard = {
+        "expected_phase": "setup",
+        "expected_session_key": str(SESSION_KEY),
+        "expected_roster_version": "1",
+    }
+    preview = client.post(
+        "/api/upload_roster",
+        data={**guard, "file": (io.BytesIO(roster), "roster.csv")},
+        content_type="multipart/form-data",
+    )
+    assert preview.status_code == 200
+    preview_data = preview.get_json()
+    assert preview_data["restored"] == 1
+    assert preview_data["removed"] == 0
     restored = client.post(
-        "/api/add_student",
-        json=_setup_payload(
-            roster_version=1,
-            student_id="S1",
-            name="Alice Restored",
-            pin="5555",
-        ),
+        "/api/upload_roster",
+        data={
+            **guard,
+            "confirm": "true",
+            "preview_token": preview_data["preview_token"],
+            "file": (io.BytesIO(roster), "roster.csv"),
+        },
+        content_type="multipart/form-data",
     )
     assert restored.status_code == 200
-    assert restored.get_json()["reactivated"] is True
+    assert restored.get_json()["restored"] == 1
     with _connect(course_env) as db:
         student = db.execute(
-            """SELECT id, student_id, name, pin, is_active
+            """SELECT id, student_id, name, pin, is_active, team_id,
+                      last_team_id, last_active_at
                FROM students WHERE student_id = 's1'"""
         ).fetchone()
     assert student["id"] == original_student_db_id
@@ -1113,6 +1142,9 @@ def test_archiving_preserves_history_and_reactivation_reuses_identity(course_env
     assert student["name"] == "Alice Restored"
     assert student["pin"] == "5555"
     assert student["is_active"] == 1
+    assert student["team_id"] is None
+    assert student["last_team_id"] == course_env["teams"]["Team 1"]
+    assert student["last_active_at"] is None
     assert _history_counts(course_env) == history_before
 
 
@@ -2187,7 +2219,28 @@ def test_global_request_limit_rejects_oversized_upload_without_mutation(course_e
     assert _active_student_count(course_env) == count_before
 
 
-def test_roster_preview_and_confirmation_are_bound_to_setup_state(course_env):
+def test_partial_roster_merge_updates_adds_and_preserves_omitted_students(
+        course_env):
+    _seed_response_history(course_env, session_key=SESSION_KEY - 1)
+    with _connect(course_env) as db:
+        db.execute(
+            """UPDATE students
+               SET display_name = 'Kit',
+                   last_login_at = '2026-08-01 12:00:00',
+                   last_active_at = '2026-08-01 12:01:00'
+               WHERE student_id = 's1'"""
+        )
+        db.commit()
+        omitted_before = [
+            dict(row) for row in db.execute(
+                """SELECT id, student_id, name, display_name, pin, team_id,
+                          last_login_at, last_active_at, is_active
+                   FROM students
+                   WHERE student_id IN ('s2', 's3', 's4')
+                   ORDER BY student_id"""
+            ).fetchall()
+        ]
+    history_before = _history_counts(course_env)
     payload = (
         "student_id,name,pin\n"
         "s1,Alice Updated,5555\n"
@@ -2211,6 +2264,22 @@ def test_roster_preview_and_confirmation_are_bound_to_setup_state(course_env):
     assert preview.status_code == 200
     preview_data = preview.get_json()
     assert preview_data["requires_confirmation"] is True
+    assert preview_data["roster_upload_mode"] == "merge"
+    assert {
+        key: preview_data[key]
+        for key in (
+            "new", "restored", "updated", "unchanged", "pin_changed",
+            "omitted_unchanged", "removed",
+        )
+    } == {
+        "new": 1,
+        "restored": 0,
+        "updated": 1,
+        "unchanged": 0,
+        "pin_changed": 1,
+        "omitted_unchanged": 3,
+        "removed": 0,
+    }
 
     confirmed = client.post(
         "/api/upload_roster",
@@ -2223,13 +2292,230 @@ def test_roster_preview_and_confirmation_are_bound_to_setup_state(course_env):
         content_type="multipart/form-data",
     )
     assert confirmed.status_code == 200
-    assert confirmed.get_json()["requires_confirmation"] is False
-    assert _active_student_count(course_env) == 2
+    confirmed_data = confirmed.get_json()
+    assert confirmed_data["requires_confirmation"] is False
+    assert confirmed_data["roster_upload_mode"] == "merge"
+    assert confirmed_data["new"] == 1
+    assert confirmed_data["updated"] == 1
+    assert confirmed_data["omitted_unchanged"] == 3
+    assert confirmed_data["removed"] == 0
+    assert _active_student_count(course_env) == 5
     with _connect(course_env) as db:
+        updated = db.execute(
+            """SELECT id, student_id, name, display_name, pin, team_id,
+                      last_login_at, last_active_at, is_active
+               FROM students WHERE student_id = 's1'"""
+        ).fetchone()
+        omitted_after = [
+            dict(row) for row in db.execute(
+                """SELECT id, student_id, name, display_name, pin, team_id,
+                          last_login_at, last_active_at, is_active
+                   FROM students
+                   WHERE student_id IN ('s2', 's3', 's4')
+                   ORDER BY student_id"""
+            ).fetchall()
+        ]
+        added = db.execute(
+            """SELECT student_id, name, display_name, pin, team_id, is_active
+               FROM students WHERE student_id = 'new-student'"""
+        ).fetchone()
         roster_version = db.execute(
             "SELECT roster_version FROM course_state"
         ).fetchone()[0]
+    assert dict(updated) == {
+        "id": course_env["students"]["s1"],
+        "student_id": "s1",
+        "name": "Alice Updated",
+        "display_name": "Kit",
+        "pin": "5555",
+        "team_id": course_env["teams"]["Team 1"],
+        "last_login_at": "2026-08-01 12:00:00",
+        "last_active_at": "2026-08-01 12:01:00",
+        "is_active": 1,
+    }
+    assert omitted_after == omitted_before
+    assert dict(added) == {
+        "student_id": "new-student",
+        "name": "New Student",
+        "display_name": None,
+        "pin": "6666",
+        "team_id": None,
+        "is_active": 1,
+    }
+    assert _history_counts(course_env) == history_before
     assert roster_version == 1
+
+
+def test_partial_roster_merge_rejects_missing_pin_without_mutation(course_env):
+    payload = (
+        "student_id,name,pin\n"
+        "s1,Alice Updated\n"
+    ).encode("utf-8")
+    with _connect(course_env) as db:
+        students_before = [
+            tuple(row) for row in db.execute(
+                """SELECT id, student_id, name, display_name, pin, team_id,
+                          is_active
+                   FROM students ORDER BY id"""
+            ).fetchall()
+        ]
+        roster_version_before = db.execute(
+            "SELECT roster_version FROM course_state"
+        ).fetchone()[0]
+
+    response = _instructor_client(course_env).post(
+        "/api/upload_roster",
+        data={"file": (io.BytesIO(payload), "roster.csv")},
+        content_type="multipart/form-data",
+    )
+
+    assert response.status_code == 400
+    data = response.get_json()
+    assert data["error"] == "Validation failed"
+    assert any("PIN must be exactly 4 digits" in detail for detail in data["details"])
+    with _connect(course_env) as db:
+        students_after = [
+            tuple(row) for row in db.execute(
+                """SELECT id, student_id, name, display_name, pin, team_id,
+                          is_active
+                   FROM students ORDER BY id"""
+            ).fetchall()
+        ]
+        roster_version_after = db.execute(
+            "SELECT roster_version FROM course_state"
+        ).fetchone()[0]
+    assert students_after == students_before
+    assert roster_version_after == roster_version_before
+
+
+def test_roster_merge_blank_name_preserves_name_and_noop_version(course_env):
+    payload = (
+        "student_id,name,pin\n"
+        "s1,,5555\n"
+    ).encode("utf-8")
+    client = _instructor_client(course_env)
+    state = {
+        "expected_phase": "setup",
+        "expected_session_key": str(SESSION_KEY),
+        "expected_roster_version": "0",
+    }
+    preview = client.post(
+        "/api/upload_roster",
+        data={**state, "file": (io.BytesIO(payload), "roster.csv")},
+        content_type="multipart/form-data",
+    ).get_json()
+    assert preview["updated"] == 1
+    assert preview["pin_changed"] == 1
+    confirmed = client.post(
+        "/api/upload_roster",
+        data={
+            **state,
+            "confirm": "true",
+            "preview_token": preview["preview_token"],
+            "file": (io.BytesIO(payload), "roster.csv"),
+        },
+        content_type="multipart/form-data",
+    )
+    assert confirmed.status_code == 200
+    assert confirmed.get_json()["roster_version"] == 1
+    with _connect(course_env) as db:
+        student = db.execute(
+            """SELECT name, pin FROM students WHERE student_id = 's1'"""
+        ).fetchone()
+    assert dict(student) == {"name": "Alice", "pin": "5555"}
+
+    no_op_state = {**state, "expected_roster_version": "1"}
+    no_op_preview = client.post(
+        "/api/upload_roster",
+        data={
+            **no_op_state,
+            "file": (io.BytesIO(payload), "roster.csv"),
+        },
+        content_type="multipart/form-data",
+    ).get_json()
+    assert no_op_preview["updated"] == 0
+    assert no_op_preview["unchanged"] == 1
+    assert no_op_preview["pin_changed"] == 0
+    no_op = client.post(
+        "/api/upload_roster",
+        data={
+            **no_op_state,
+            "confirm": "true",
+            "preview_token": no_op_preview["preview_token"],
+            "file": (io.BytesIO(payload), "roster.csv"),
+        },
+        content_type="multipart/form-data",
+    )
+    assert no_op.status_code == 200
+    assert no_op.get_json()["roster_version"] == 1
+
+
+def test_add_or_update_blank_name_preserves_existing_name(course_env):
+    response = _instructor_client(course_env).post(
+        "/api/add_student",
+        json=_setup_payload(
+            student_id="s1", name="", pin="5555"
+        ),
+    )
+
+    assert response.status_code == 200
+    data = response.get_json()
+    assert data["updated"] is True
+    assert data["changed"] is True
+    assert data["pin_changed"] is True
+    assert data["roster_version"] == 1
+    with _connect(course_env) as db:
+        student = db.execute(
+            """SELECT name, pin FROM students WHERE student_id = 's1'"""
+        ).fetchone()
+    assert dict(student) == {"name": "Alice", "pin": "5555"}
+
+
+def test_roster_merge_rejects_legacy_replacement_preview_token(course_env):
+    payload = (
+        "student_id,name,pin\n"
+        "s1,Alice Updated,5555\n"
+    ).encode("utf-8")
+    state = {
+        "expected_phase": "setup",
+        "expected_session_key": str(SESSION_KEY),
+        "expected_roster_version": "0",
+    }
+    client = _instructor_client(course_env)
+    preview = client.post(
+        "/api/upload_roster",
+        data={**state, "file": (io.BytesIO(payload), "roster.csv")},
+        content_type="multipart/form-data",
+    )
+    assert preview.status_code == 200
+    preview_token = preview.get_json()["preview_token"]
+    legacy_token = hashlib.sha256(
+        payload + f"\0{course_env['slug']}:{SESSION_KEY}:0".encode("utf-8")
+    ).hexdigest()
+    assert preview_token != legacy_token
+
+    confirmed = client.post(
+        "/api/upload_roster",
+        data={
+            **state,
+            "confirm": "true",
+            "preview_token": legacy_token,
+            "file": (io.BytesIO(payload), "roster.csv"),
+        },
+        content_type="multipart/form-data",
+    )
+
+    assert confirmed.status_code == 409
+    assert "preview it again" in confirmed.get_json()["error"]
+    with _connect(course_env) as db:
+        student = db.execute(
+            """SELECT name, pin FROM students WHERE student_id = 's1'"""
+        ).fetchone()
+        roster_version = db.execute(
+            "SELECT roster_version FROM course_state"
+        ).fetchone()[0]
+    assert dict(student) == {"name": "Alice", "pin": "1111"}
+    assert roster_version == 0
 
 
 def test_export_returns_a_valid_streamed_zip(course_env):
@@ -5219,7 +5505,7 @@ def test_student_management_searches_roster_and_display_names(course_env):
     } == {"roster_name": "Bob", "display_name": None}
 
 
-def test_roster_update_and_csv_replace_preserve_display_name(course_env):
+def test_roster_update_and_csv_merge_preserve_display_name(course_env):
     with _connect(course_env) as db:
         db.execute(
             "UPDATE students SET display_name = 'Kit' WHERE student_id = 's1'"
@@ -5248,9 +5534,6 @@ def test_roster_update_and_csv_replace_preserve_display_name(course_env):
     roster = (
         "student_id,name,pin\n"
         "s1,CSV Alice,1111\n"
-        "s2,Bob,2222\n"
-        "s3,Unassigned,3333\n"
-        "s4,Dana,4444\n"
     ).encode("utf-8")
     guard = {
         "expected_phase": "setup",
@@ -5660,13 +5943,147 @@ def test_roster_rejects_ids_that_differ_only_by_case(course_env):
     assert _active_student_count(course_env) == count_before
 
 
+def test_roster_merge_fails_closed_for_existing_case_collisions(course_env):
+    with _connect(course_env) as db:
+        db.execute(
+            """INSERT INTO students (course_id, student_id, name, pin)
+               VALUES (?, 'S1', 'Ambiguous Duplicate', '7777')""",
+            (course_env["course_id"],),
+        )
+        db.commit()
+    payload = (
+        "student_id,name,pin\n"
+        "s1,Alice Updated,5555\n"
+    ).encode("utf-8")
+
+    response = _instructor_client(course_env).post(
+        "/api/upload_roster",
+        data={
+            "expected_phase": "setup",
+            "expected_session_key": str(SESSION_KEY),
+            "expected_roster_version": "0",
+            "file": (io.BytesIO(payload), "roster.csv"),
+        },
+        content_type="multipart/form-data",
+    )
+
+    assert response.status_code == 409, response.get_json()
+    assert "differ only by letter case" in response.get_json()["error"]
+    with _connect(course_env) as db:
+        rows = db.execute(
+            """SELECT student_id, name, pin FROM students
+               WHERE LOWER(student_id) = 's1' ORDER BY id"""
+        ).fetchall()
+        roster_version = db.execute(
+            "SELECT roster_version FROM course_state"
+        ).fetchone()[0]
+    assert [dict(row) for row in rows] == [
+        {"student_id": "s1", "name": "Alice", "pin": "1111"},
+        {
+            "student_id": "S1",
+            "name": "Ambiguous Duplicate",
+            "pin": "7777",
+        },
+    ]
+    assert roster_version == 0
+
+
+def test_roster_confirmation_rechecks_existing_case_collisions(course_env):
+    payload = (
+        "student_id,name,pin\n"
+        "s1,Alice Updated,5555\n"
+    ).encode("utf-8")
+    expected_state = {
+        "expected_phase": "setup",
+        "expected_session_key": str(SESSION_KEY),
+        "expected_roster_version": "0",
+    }
+    client = _instructor_client(course_env)
+    preview = client.post(
+        "/api/upload_roster",
+        data={
+            **expected_state,
+            "file": (io.BytesIO(payload), "roster.csv"),
+        },
+        content_type="multipart/form-data",
+    )
+    assert preview.status_code == 200
+    preview_data = preview.get_json()
+
+    with _connect(course_env) as db:
+        db.execute(
+            """INSERT INTO students (course_id, student_id, name, pin)
+               VALUES (?, 'S1', 'Concurrent Duplicate', '7777')""",
+            (course_env["course_id"],),
+        )
+        db.commit()
+
+    confirmed = client.post(
+        "/api/upload_roster",
+        data={
+            **expected_state,
+            "confirm": "true",
+            "preview_token": preview_data["preview_token"],
+            "file": (io.BytesIO(payload), "roster.csv"),
+        },
+        content_type="multipart/form-data",
+    )
+
+    assert confirmed.status_code == 409
+    assert "differ only by letter case" in confirmed.get_json()["error"]
+    with _connect(course_env) as db:
+        original = db.execute(
+            """SELECT name, pin FROM students
+               WHERE student_id = 's1'"""
+        ).fetchone()
+        roster_version = db.execute(
+            "SELECT roster_version FROM course_state"
+        ).fetchone()[0]
+    assert dict(original) == {"name": "Alice", "pin": "1111"}
+    assert roster_version == 0
+
+
+def test_add_or_update_fails_closed_for_existing_case_collisions(course_env):
+    with _connect(course_env) as db:
+        db.execute(
+            """INSERT INTO students (course_id, student_id, name, pin)
+               VALUES (?, 'S1', 'Ambiguous Duplicate', '7777')""",
+            (course_env["course_id"],),
+        )
+        db.commit()
+
+    response = _instructor_client(course_env).post(
+        "/api/add_student",
+        json=_setup_payload(
+            student_id="s1", name="Should Not Apply", pin="5555"
+        ),
+    )
+
+    assert response.status_code == 409
+    assert "differ only by letter case" in response.get_json()["error"]
+    with _connect(course_env) as db:
+        rows = db.execute(
+            """SELECT student_id, name, pin FROM students
+               WHERE LOWER(student_id) = 's1' ORDER BY id"""
+        ).fetchall()
+        roster_version = db.execute(
+            "SELECT roster_version FROM course_state"
+        ).fetchone()[0]
+    assert [dict(row) for row in rows] == [
+        {"student_id": "s1", "name": "Alice", "pin": "1111"},
+        {
+            "student_id": "S1",
+            "name": "Ambiguous Duplicate",
+            "pin": "7777",
+        },
+    ]
+    assert roster_version == 0
+
+
 def test_roster_case_change_updates_existing_identity(course_env):
     payload = (
         "student_id,name,pin\n"
         "S1,Alice Updated,5555\n"
-        "s2,Bob,2222\n"
-        "s3,Unassigned,3333\n"
-        "s4,Dana,4444\n"
     ).encode("utf-8")
     expected_state = {
         "expected_phase": "setup",
@@ -5688,11 +6105,14 @@ def test_roster_case_change_updates_existing_identity(course_env):
     preview_data = preview.get_json()
     assert {
         key: preview_data[key]
-        for key in ("added", "reactivated", "updated", "removed")
+        for key in (
+            "added", "reactivated", "updated", "omitted_unchanged", "removed"
+        )
     } == {
         "added": 0,
         "reactivated": 0,
         "updated": 1,
+        "omitted_unchanged": 3,
         "removed": 0,
     }
 
@@ -6586,6 +7006,52 @@ def _seed_current_session_thumb(env):
         db.commit()
 
 
+def test_saved_activity_allows_identity_preserving_roster_detail_update(
+        course_env):
+    _seed_current_session_thumb(course_env)
+    history_before = _history_counts(course_env)
+    payload = (
+        "student_id,name,pin\n"
+        "s1,Alice Updated,5555\n"
+    ).encode("utf-8")
+    state = {
+        "expected_phase": "setup",
+        "expected_session_key": str(SESSION_KEY),
+        "expected_roster_version": "0",
+    }
+    client = _instructor_client(course_env)
+    preview = client.post(
+        "/api/upload_roster",
+        data={**state, "file": (io.BytesIO(payload), "roster.csv")},
+        content_type="multipart/form-data",
+    ).get_json()
+    confirmed = client.post(
+        "/api/upload_roster",
+        data={
+            **state,
+            "confirm": "true",
+            "preview_token": preview["preview_token"],
+            "file": (io.BytesIO(payload), "roster.csv"),
+        },
+        content_type="multipart/form-data",
+    )
+
+    assert confirmed.status_code == 200
+    with _connect(course_env) as db:
+        student = db.execute(
+            """SELECT id, name, pin, team_id, display_name
+               FROM students WHERE student_id = 's1'"""
+        ).fetchone()
+    assert dict(student) == {
+        "id": course_env["students"]["s1"],
+        "name": "Alice Updated",
+        "pin": "5555",
+        "team_id": course_env["teams"]["Team 1"],
+        "display_name": None,
+    }
+    assert _history_counts(course_env) == history_before
+
+
 def test_saved_activity_freezes_every_roster_structure_route(course_env):
     _seed_current_session_thumb(course_env)
     instructor = _instructor_client(course_env)
@@ -7395,7 +7861,7 @@ def test_select_challenger_rejects_stale_hand_for_active_student(course_env):
     )
 
 
-def test_participation_counts_survive_new_session_archive_and_reactivation(
+def test_participation_counts_survive_new_session_remove_and_restore(
         course_env):
     _activate_current_schema_presentation(course_env)
     instructor = _instructor_client(course_env)
@@ -7536,13 +8002,11 @@ def test_individual_pin_change_revokes_existing_student_session(course_env):
 
 
 def test_roster_pin_change_revokes_existing_student_session(course_env):
-    student = _student_client(course_env, "s1")
+    changed_student = _student_client(course_env, "s1")
+    omitted_student = _student_client(course_env, "s2")
     payload = (
         "student_id,name,pin\n"
         "s1,Alice,5555\n"
-        "s2,Bob,2222\n"
-        "s3,Unassigned,3333\n"
-        "s4,Dana,4444\n"
     ).encode("utf-8")
     guard = {
         "expected_phase": "setup",
@@ -7550,11 +8014,16 @@ def test_roster_pin_change_revokes_existing_student_session(course_env):
         "expected_roster_version": "0",
     }
     instructor = _instructor_client(course_env)
-    preview = instructor.post(
+    preview_response = instructor.post(
         "/api/upload_roster",
         data={**guard, "file": (io.BytesIO(payload), "roster.csv")},
         content_type="multipart/form-data",
-    ).get_json()
+    )
+    assert preview_response.status_code == 200
+    preview = preview_response.get_json()
+    assert preview["pin_changed"] == 1
+    assert preview["omitted_unchanged"] == 3
+    assert preview["removed"] == 0
 
     confirmed = instructor.post(
         "/api/upload_roster",
@@ -7568,9 +8037,12 @@ def test_roster_pin_change_revokes_existing_student_session(course_env):
     )
 
     assert confirmed.status_code == 200
-    assert student.get("/api/poll").status_code == 401
-    with student.session_transaction() as flask_session:
+    assert changed_student.get("/api/poll").status_code == 401
+    with changed_student.session_transaction() as flask_session:
         assert not flask_session
+    assert omitted_student.get("/api/poll").status_code == 200
+    with omitted_student.session_transaction() as flask_session:
+        assert flask_session["student_id"] == "s2"
 
 
 def test_student_pin_mutations_reject_unicode_digits(course_env):

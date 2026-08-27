@@ -638,6 +638,61 @@ def test_frontend_dialogs_restore_focus_and_close_with_escape():
     assert "data.questions || [], previewButton" in source
 
 
+def test_roster_merge_ui_explains_partial_updates_and_student_pin_policy():
+    """Roster controls describe merge behavior without replacement language."""
+    source = (PROJECT_ROOT / "static" / "js" / "app.js").read_text(
+        encoding="utf-8"
+    )
+    base = (PROJECT_ROOT / "templates" / "base.html").read_text(
+        encoding="utf-8"
+    )
+    instructor = (PROJECT_ROOT / "templates" / "instructor.html").read_text(
+        encoding="utf-8"
+    )
+    styles = (PROJECT_ROOT / "static" / "css" / "style.css").read_text(
+        encoding="utf-8"
+    )
+
+    preview_start = source.index("function showRosterPreview(file, data)")
+    preview_end = source.index(
+        "document.getElementById('roster-preview-dialog')?.addEventListener",
+        preview_start,
+    )
+    preview = source[preview_start:preview_end]
+
+    assert "not listed and left unchanged" in preview
+    assert "Only listed IDs will be added or updated." in preview
+    assert "participation history are preserved" in preview
+    assert "students archived" not in preview
+    assert "Number(data.removed)" in preview
+    assert "data.roster_upload_mode !== 'merge'" in preview
+    assert "older server response" in preview
+    assert "Confirm Roster Updates" in base
+    assert 'id="btn-cancel-roster-upload"' in base
+    assert 'tabindex="-1"' in base
+    assert 'class="btn btn-primary" id="btn-confirm-roster-upload"' in base
+    assert ">Apply Updates</button>" in base
+    assert "btn.textContent = 'Apply Updates'" in source
+    assert "rosterUploadApplying && !force" in source
+    assert "cancelBtn.disabled = true" in source
+    assert "dialog?.setAttribute('aria-busy', 'true')" in source
+    assert "restoreFocus: false, force: true" in source
+    assert "Student PIN, exactly 4 digits" in instructor
+    assert 'placeholder="PIN (4 digits)"' in instructor
+    assert 'maxlength="4" pattern="[0-9]{4}"' in instructor
+    assert "if (!/^[0-9]{4}$/.test(pin))" in source
+    assert (
+        "Student name (optional; leave blank to keep an existing uploaded name)"
+        in instructor
+    )
+    assert 'placeholder="Name (optional)"' in instructor
+    assert ">Add or Update Student</button>" in instructor
+    assert "Student already up to date" in source
+    assert "the student must sign in again" in source
+    assert "max-height: calc(100dvh - 40px)" in styles
+    assert "overflow-y: auto" in styles
+
+
 def test_appendix_add_uses_retry_safe_request_identity():
     """The same unsaved add payload keeps one key across an uncertain retry."""
     source = (PROJECT_ROOT / "static" / "js" / "app.js").read_text(

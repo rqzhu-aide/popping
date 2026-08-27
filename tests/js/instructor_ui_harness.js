@@ -21,6 +21,140 @@ function sourceSlice(startMarker, endMarker) {
     return source.slice(start, end);
 }
 
+function testRosterMergeModalRejectsLegacyAndLocksDuringApply() {
+    const toasts = [];
+    const classes = new Set();
+    const activeElement = {
+        isConnected: true,
+        focused: 0,
+        focus() { this.focused += 1; },
+    };
+    const dialog = {
+        hidden: true,
+    };
+    const summary = { innerHTML: '' };
+    const input = { value: 'selected' };
+    const applyButton = {
+        focused: 0,
+        focus() { this.focused += 1; },
+    };
+    const elements = {
+        'roster-preview-dialog': dialog,
+        'roster-preview-summary': summary,
+        'roster-file-input': input,
+        'btn-confirm-roster-upload': applyButton,
+    };
+    const sandbox = {
+        console,
+        window: {},
+        document: {
+            activeElement,
+            body: {
+                classList: {
+                    add(name) { classes.add(name); },
+                    remove(name) { classes.delete(name); },
+                },
+            },
+            getElementById(id) { return elements[id] || null; },
+        },
+        showToast(message, type) {
+            toasts.push({ message: String(message), type });
+        },
+        escapeHtmlValue(value) {
+            return String(value)
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;');
+        },
+    };
+    vm.createContext(sandbox);
+    vm.runInContext(
+        'let rosterPreviewReturnFocus = null; ' +
+        'let pendingRosterUpload = null; ' +
+        'let rosterUploadApplying = false;',
+        sandbox
+    );
+    vm.runInContext(sourceSlice(
+        'function closeRosterPreview({ restoreFocus = true, force = false } = {}) {',
+        "document.getElementById('roster-preview-dialog')?.addEventListener"
+    ), sandbox, { filename: 'app-roster-modal.js' });
+
+    sandbox.file = { name: 'partial.csv' };
+    sandbox.legacyData = {
+        preview_token: 'legacy-token',
+        total: 2,
+        added: 1,
+        updated: 1,
+        removed: 0,
+    };
+    assert.strictEqual(
+        vm.runInContext('showRosterPreview(file, legacyData)', sandbox),
+        false
+    );
+    assert.strictEqual(dialog.hidden, true);
+    assert.strictEqual(
+        vm.runInContext('pendingRosterUpload', sandbox),
+        null
+    );
+    assert(toasts.some(item => /older server response/i.test(item.message)));
+
+    sandbox.unsafeMergeData = {
+        roster_upload_mode: 'merge',
+        preview_token: 'unsafe-merge-token',
+        total: 2,
+        new: 1,
+        updated: 1,
+        removed: 1,
+    };
+    assert.strictEqual(
+        vm.runInContext('showRosterPreview(file, unsafeMergeData)', sandbox),
+        false
+    );
+    assert.strictEqual(dialog.hidden, true);
+    assert.strictEqual(
+        vm.runInContext('pendingRosterUpload', sandbox),
+        null
+    );
+
+    sandbox.mergeData = {
+        roster_upload_mode: 'merge',
+        preview_token: 'merge-token',
+        total: 2,
+        new: 1,
+        restored: 0,
+        updated: 1,
+        unchanged: 0,
+        pin_changed: 1,
+        omitted_unchanged: 6,
+        removed: 0,
+    };
+    assert.strictEqual(
+        vm.runInContext('showRosterPreview(file, mergeData)', sandbox),
+        true
+    );
+    assert.strictEqual(dialog.hidden, false);
+    assert(classes.has('modal-open'));
+    assert.match(summary.innerHTML, /6 active students not listed and left unchanged/);
+
+    vm.runInContext(
+        'rosterUploadApplying = true; closeRosterPreview();',
+        sandbox
+    );
+    assert.strictEqual(dialog.hidden, false);
+    assert.strictEqual(
+        vm.runInContext('pendingRosterUpload.token', sandbox),
+        'merge-token'
+    );
+
+    vm.runInContext('closeRosterPreview({ force: true });', sandbox);
+    assert.strictEqual(dialog.hidden, true);
+    assert.strictEqual(
+        vm.runInContext('pendingRosterUpload', sandbox),
+        null
+    );
+    assert(!classes.has('modal-open'));
+}
+
 async function testRosterMutationSerializationAndPickerScope() {
     let resolvePost;
     let postCalls = 0;
@@ -1130,6 +1264,7 @@ function testContextualRosterBadgesAndTeamLabels() {
 }
 
 (async () => {
+    testRosterMergeModalRejectsLegacyAndLocksDuringApply();
     await testRosterMutationSerializationAndPickerScope();
     await testRandomAssignmentUsesAuthoritativeOnlineCounts();
     testInstructorQuickRollIsLocalAccessibleAndUniform();

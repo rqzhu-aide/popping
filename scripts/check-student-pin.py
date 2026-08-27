@@ -101,7 +101,7 @@ def main(argv=None):
         print(f'Error: {_terminal_safe(exc)}')
         return 1
 
-    status = 'active' if student['is_active'] else 'archived (cannot log in)'
+    status = 'active' if student['is_active'] else 'removed (cannot log in)'
     print('=== Student PIN ===')
     print(f"Course: {_terminal_safe(slug.strip())}")
     print(f"Student ID: {_terminal_safe(student['student_id'])}")

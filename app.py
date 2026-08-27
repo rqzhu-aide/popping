@@ -5830,10 +5830,38 @@ def roster_template():
     )
 
 
+_ROSTER_CASE_COLLISION_MESSAGE = (
+    'The existing roster contains student IDs that differ only by letter '
+    'case. Resolve those duplicate IDs before uploading a roster.'
+)
+_ROSTER_MERGE_TOKEN_DOMAIN = b'popping-roster-merge-v1\0'
+
+
+def _roster_rows_by_casefolded_id(rows):
+    """Index roster rows without silently choosing between ambiguous IDs."""
+    indexed = {}
+    for row in rows:
+        student_id_key = row['student_id'].casefold()
+        if student_id_key in indexed:
+            return None
+        indexed[student_id_key] = row
+    return indexed
+
+
+def _roster_merge_preview_token(raw_content, slug, session_key, roster_version):
+    """Bind confirmation to this merge protocol, file, and roster state."""
+    state_context = (
+        f"{slug}:{session_key or 0}:{roster_version or 0}"
+    ).encode('utf-8')
+    return hashlib.sha256(
+        _ROSTER_MERGE_TOKEN_DOMAIN + raw_content + b'\0' + state_context
+    ).hexdigest()
+
+
 @app.route('/api/upload_roster', methods=['POST'])
 @instructor_login_required
 def upload_roster():
-    """Replace-mode CSV roster upload with validation."""
+    """Merge a validated CSV into the roster without changing omitted IDs."""
     slug = session['slug']
     if is_demo_instance_slug(slug):
         return jsonify({'error': 'The demo roster is fixed at two students'}), 403
@@ -5880,7 +5908,7 @@ def upload_roster():
             continue
         sid = row[sid_col].strip()
         name = row[name_col].strip() if len(row) > name_col else ''
-        pin = row[pin_col].strip() if len(row) > pin_col else sid[-4:]
+        pin = row[pin_col].strip() if len(row) > pin_col else ''
         if len(sid) > 100:
             errors.append(f'Line {i}: student ID must be 100 characters or fewer')
             continue
@@ -5921,39 +5949,43 @@ def upload_roster():
     if guard:
         return jsonify({'error': guard[0]}), guard[1]
     if not state or state['phase'] != 'setup':
-        return jsonify({'error': 'The roster can only be replaced during setup'}), 409
-    preview_token = hashlib.sha256(
-        raw_content + (
-            f"\0{slug}:{state['session_key'] or 0}:{state['roster_version'] or 0}"
-        ).encode('utf-8')
-    ).hexdigest()
+        return jsonify({'error': 'The roster can only be updated during setup'}), 409
+    preview_token = _roster_merge_preview_token(
+        raw_content, slug, state['session_key'], state['roster_version']
+    )
     existing_rows = query_db(slug,
         '''SELECT id, student_id, name, pin, is_active FROM students
            WHERE course_id = ?''',
         [course['id']])
-    existing_by_sid = {r['student_id'].casefold(): r for r in existing_rows}
-    active_by_sid = {
-        sid: row for sid, row in existing_by_sid.items() if row['is_active']
-    }
+    existing_by_sid = _roster_rows_by_casefolded_id(existing_rows)
+    if existing_by_sid is None:
+        return jsonify({'error': _ROSTER_CASE_COLLISION_MESSAGE}), 409
     csv_sids = {p['student_id'].casefold() for p in parsed}
-    preview_reactivated = sum(
-        1 for person in parsed
-        if (person['student_id'].casefold() in existing_by_sid and
-            not existing_by_sid[person['student_id'].casefold()]['is_active'])
-    )
-    preview_added = sum(
-        1 for p in parsed if p['student_id'].casefold() not in active_by_sid
-    )
-    preview_updated = sum(
-        1 for p in parsed
-        if p['student_id'].casefold() in active_by_sid and (
-            (active_by_sid[p['student_id'].casefold()]['name'] or None)
-            != (p['name'] or None)
-            or active_by_sid[p['student_id'].casefold()]['pin'] != p['pin']
+    preview_new = 0
+    preview_restored = 0
+    preview_updated = 0
+    preview_unchanged = 0
+    preview_pin_changed = 0
+    for person in parsed:
+        existing = existing_by_sid.get(person['student_id'].casefold())
+        if not existing:
+            preview_new += 1
+            continue
+        if existing['pin'] != person['pin']:
+            preview_pin_changed += 1
+        merged_name = (
+            existing['name'] if person['name'] is None else person['name']
         )
-    )
-    preview_removed = sum(
-        1 for sid in active_by_sid if sid not in csv_sids
+        if not existing['is_active']:
+            preview_restored += 1
+        elif ((existing['name'] or None) != (merged_name or None)
+                or existing['pin'] != person['pin']):
+            preview_updated += 1
+        else:
+            preview_unchanged += 1
+    preview_omitted_unchanged = sum(
+        1 for sid, row in existing_by_sid.items()
+        if row['is_active'] and sid not in csv_sids
     )
 
     confirmed = str(request.form.get('confirm', '')).lower() in ('1', 'true', 'yes')
@@ -5961,11 +5993,18 @@ def upload_roster():
         return jsonify({
             'success': True,
             'requires_confirmation': True,
+            'roster_upload_mode': 'merge',
             'preview_token': preview_token,
-            'added': preview_added,
-            'reactivated': preview_reactivated,
+            'new': preview_new,
+            # Preserve the old inclusive key for cached clients.
+            'added': preview_new + preview_restored,
+            'restored': preview_restored,
+            'reactivated': preview_restored,
             'updated': preview_updated,
-            'removed': preview_removed,
+            'unchanged': preview_unchanged,
+            'pin_changed': preview_pin_changed,
+            'omitted_unchanged': preview_omitted_unchanged,
+            'removed': 0,
             'total': len(parsed),
         })
     db = get_db(slug)
@@ -5982,13 +6021,13 @@ def upload_roster():
             return jsonify({'error': guard[0]}), guard[1]
         if not locked_state or locked_state['phase'] != 'setup':
             db.rollback()
-            return jsonify({'error': 'The roster can only be replaced during setup'}), 409
-        expected_token = hashlib.sha256(
-            raw_content + (
-                f"\0{slug}:{locked_state['session_key'] or 0}:"
-                f"{locked_state['roster_version'] or 0}"
-            ).encode('utf-8')
-        ).hexdigest()
+            return jsonify({'error': 'The roster can only be updated during setup'}), 409
+        expected_token = _roster_merge_preview_token(
+            raw_content,
+            slug,
+            locked_state['session_key'],
+            locked_state['roster_version'],
+        )
         if request.form.get('preview_token') != expected_token:
             db.rollback()
             return jsonify({'error': 'Roster changed after preview; preview it again'}), 409
@@ -5997,56 +6036,72 @@ def upload_roster():
                WHERE course_id = ?''',
             [course['id']]
         ).fetchall()
-        existing_by_sid = {
-            row['student_id'].casefold(): row for row in existing_rows
-        }
-        to_remove = [
-            row['id'] for sid, row in existing_by_sid.items()
-            if row['is_active'] and sid not in csv_sids
-        ]
+        existing_by_sid = _roster_rows_by_casefolded_id(existing_rows)
+        if existing_by_sid is None:
+            db.rollback()
+            return jsonify({'error': _ROSTER_CASE_COLLISION_MESSAGE}), 409
 
         to_update = []
+        to_restore = []
         to_insert = []
-        reactivated = 0
+        unchanged = 0
+        pin_changed = 0
         for person in parsed:
             existing = existing_by_sid.get(person['student_id'].casefold())
             if existing:
+                merged_name = (
+                    existing['name']
+                    if person['name'] is None else person['name']
+                )
+                if existing['pin'] != person['pin']:
+                    pin_changed += 1
                 if not existing['is_active']:
-                    reactivated += 1
-                if (not existing['is_active'] or
-                        (existing['name'] or None) != (person['name'] or None) or
-                        existing['pin'] != person['pin']):
-                    to_update.append((
-                        person['name'] or None, person['pin'], existing['id']
+                    to_restore.append((
+                        merged_name or None, person['pin'], existing['id']
                     ))
+                elif ((existing['name'] or None) != (merged_name or None)
+                        or existing['pin'] != person['pin']):
+                    to_update.append((
+                        merged_name or None, person['pin'], existing['id']
+                    ))
+                else:
+                    unchanged += 1
             else:
                 to_insert.append((
                     course['id'], person['student_id'], person['name'] or None,
                     person['pin'],
                 ))
 
-        if to_remove or to_insert or reactivated:
+        if to_insert or to_restore:
             freeze_guard = _session_roster_mutation_guard(
                 db, course['id'], locked_state
             )
             if freeze_guard:
                 db.rollback()
                 return jsonify({'error': freeze_guard[0]}), freeze_guard[1]
-        if to_remove:
-            _archive_students(
-                slug, to_remove, bump_roster=False, db=db, commit=False
-            )
         if to_update:
             db.executemany(
-                'UPDATE students SET name = ?, pin = ?, is_active = 1 WHERE id = ?',
+                'UPDATE students SET name = ?, pin = ? WHERE id = ?',
                 to_update
+            )
+        if to_restore:
+            db.executemany(
+                '''UPDATE students
+                   SET name = ?,
+                       pin = ?,
+                       is_active = 1,
+                       last_team_id = COALESCE(last_team_id, team_id),
+                       team_id = NULL,
+                       last_active_at = NULL
+                   WHERE id = ?''',
+                to_restore
             )
         if to_insert:
             db.executemany(
                 'INSERT INTO students (course_id, student_id, name, pin) VALUES (?, ?, ?, ?)',
                 to_insert
             )
-        if to_remove or to_update or to_insert:
+        if to_update or to_restore or to_insert:
             roster_version = _bump_roster_version(
                 slug, course['id'], db=db
             )
@@ -6060,10 +6115,20 @@ def upload_roster():
     return jsonify({
         'success': True,
         'requires_confirmation': False,
-        'added': len(to_insert) + reactivated,
-        'reactivated': reactivated,
-        'updated': len(to_update) - reactivated,
-        'removed': len(to_remove),
+        'roster_upload_mode': 'merge',
+        'new': len(to_insert),
+        # Preserve the old inclusive key for cached clients.
+        'added': len(to_insert) + len(to_restore),
+        'restored': len(to_restore),
+        'reactivated': len(to_restore),
+        'updated': len(to_update),
+        'unchanged': unchanged,
+        'pin_changed': pin_changed,
+        'omitted_unchanged': sum(
+            1 for sid, row in existing_by_sid.items()
+            if row['is_active'] and sid not in csv_sids
+        ),
+        'removed': 0,
         'total': len(parsed),
         'roster_version': roster_version,
     })
@@ -7411,12 +7476,12 @@ def add_student():
                ORDER BY is_active DESC, id''',
             [course['id']]
         ).fetchall()
+        existing_by_sid = _roster_rows_by_casefolded_id(existing_rows)
+        if existing_by_sid is None:
+            db.rollback()
+            return jsonify({'error': _ROSTER_CASE_COLLISION_MESSAGE}), 409
         student_id_key = student_id.casefold()
-        existing = next(
-            (row for row in existing_rows
-             if row['student_id'].casefold() == student_id_key),
-            None,
-        )
+        existing = existing_by_sid.get(student_id_key)
         structural_change = not existing or not existing['is_active']
         if structural_change:
             freeze_guard = _session_roster_mutation_guard(
@@ -7426,16 +7491,32 @@ def add_student():
                 db.rollback()
                 return jsonify({'error': freeze_guard[0]}), freeze_guard[1]
 
-        normalized_name = name or None
+        normalized_name = (
+            existing['name'] if existing and not name else (name or None)
+        )
+        pin_changed = bool(existing and existing['pin'] != pin)
         changed = structural_change or (
             (existing['name'] or None) != normalized_name
             or existing['pin'] != pin
         )
         if existing and changed:
-            db.execute(
-                'UPDATE students SET name = ?, pin = ?, is_active = 1 WHERE id = ?',
-                [normalized_name, pin, existing['id']]
-            )
+            if existing['is_active']:
+                db.execute(
+                    'UPDATE students SET name = ?, pin = ? WHERE id = ?',
+                    [normalized_name, pin, existing['id']]
+                )
+            else:
+                db.execute(
+                    '''UPDATE students
+                       SET name = ?,
+                           pin = ?,
+                           is_active = 1,
+                           last_team_id = COALESCE(last_team_id, team_id),
+                           team_id = NULL,
+                           last_active_at = NULL
+                       WHERE id = ?''',
+                    [normalized_name, pin, existing['id']]
+                )
             result = {
                 'success': True,
                 'updated': bool(existing['is_active']),
@@ -7450,6 +7531,8 @@ def add_student():
                 [course['id'], student_id, normalized_name, pin]
             )
             result = {'success': True, 'added': True}
+        result['changed'] = changed
+        result['pin_changed'] = pin_changed
         if changed:
             roster_version = _bump_roster_version(
                 slug, course['id'], db=db

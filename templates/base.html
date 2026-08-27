@@ -123,7 +123,7 @@
                         {% endif %}
                         {% if not session.get('is_demo') %}
                         {% if state is defined and state and state.phase != 'setup' %}
-                        <span class="nav-dropdown-item disabled" title="The roster can only be replaced during setup">📋 Upload Student Roster (setup only)</span>
+                        <span class="nav-dropdown-item disabled" title="The roster can only be updated during setup">📋 Upload Student Roster (setup only)</span>
                         {% else %}
                         <a href="#" class="nav-dropdown-item" onclick="uploadRoster(event)">📋 Upload Student Roster</a>
                         {% endif %}
@@ -168,13 +168,14 @@
 
     {% if session.instructor_id and not session.get('is_demo') %}
     <div class="modal-backdrop" id="roster-preview-dialog" role="dialog" aria-modal="true"
+         tabindex="-1"
          aria-labelledby="roster-preview-title" hidden>
         <div class="modal-card">
-            <h2 id="roster-preview-title">Confirm Roster Replacement</h2>
+            <h2 id="roster-preview-title">Confirm Roster Updates</h2>
             <div id="roster-preview-summary"></div>
             <div class="modal-actions">
-                <button type="button" class="btn btn-secondary" onclick="cancelRosterUpload()">Cancel</button>
-                <button type="button" class="btn btn-danger" id="btn-confirm-roster-upload" onclick="confirmRosterUpload()">Replace Roster</button>
+                <button type="button" class="btn btn-secondary" id="btn-cancel-roster-upload" onclick="cancelRosterUpload()">Cancel</button>
+                <button type="button" class="btn btn-primary" id="btn-confirm-roster-upload" onclick="confirmRosterUpload()">Apply Updates</button>
             </div>
         </div>
     </div>

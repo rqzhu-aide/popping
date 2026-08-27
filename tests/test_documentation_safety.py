@@ -64,4 +64,4 @@ def test_readme_documents_safe_server_terminal_operations():
     assert "Omitting the course slug changes every course database" in readme
     assert "must contain 4 to 32 ASCII digits (`0-9`)" in readme
     assert "The script is strictly read-only" in readme
-    assert "An archived account cannot log in" in readme
+    assert "A removed account cannot log in" in readme
