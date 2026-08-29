@@ -3204,21 +3204,80 @@ def test_quick_roll_is_visible_only_to_instructors(course_env):
     assert 'id="quick-roll-widget"' not in student_html
 
 
-def test_setup_capacity_status_highlights_unassigned_students(course_env):
+def test_setup_capacity_status_uses_online_students(course_env, monkeypatch):
+    now = datetime(2026, 8, 29, 12, 0, 0)
+    monkeypatch.setattr(app_module, "_utcnow", lambda: now)
     client = _instructor_client(course_env)
 
-    html = client.get(f"/instructor/{course_env['slug']}").get_data(as_text=True)
-    assert 'class="capacity-summary capacity-warning"' in html
-    assert 'id="setup-capacity-warning" role="status"' in html
-    assert "Assign everyone attending today" in html
-    assert "absent students may remain unassigned" in html
+    with _connect(course_env) as db:
+        db.execute(
+            "UPDATE course_state SET max_teams = 1, max_members_per_team = 3"
+        )
+        db.commit()
 
-    _assign_all_active_students(course_env)
-    assigned_html = client.get(
+    html = client.get(f"/instructor/{course_env['slug']}").get_data(as_text=True)
+    assert 'class="capacity-summary capacity-success"' in html
+    assert 'id="setup-capacity-warning" role="status"' in html
+    assert "No students are currently online" in html
+    assert "4 enrolled students" not in html
+
+    with _connect(course_env) as db:
+        db.execute(
+            """UPDATE students SET last_active_at = ?
+               WHERE student_id IN ('s1', 's3')""",
+            (now.isoformat(),),
+        )
+        db.commit()
+
+    online_unassigned_html = client.get(
         f"/instructor/{course_env['slug']}"
     ).get_data(as_text=True)
-    assert 'class="capacity-summary capacity-success"' in assigned_html
-    assert 'class="capacity-summary capacity-warning"' not in assigned_html
+    assert 'class="capacity-summary capacity-warning"' in online_unassigned_html
+    assert "1 online student is not assigned" in online_unassigned_html
+    assert "Assign everyone attending today" in online_unassigned_html
+    assert "offline students may remain unassigned" in online_unassigned_html
+
+    with _connect(course_env) as db:
+        db.execute(
+            "UPDATE students SET last_active_at = ?",
+            (now.isoformat(),),
+        )
+        db.commit()
+
+    over_capacity_html = client.get(
+        f"/instructor/{course_env['slug']}"
+    ).get_data(as_text=True)
+    assert 'class="capacity-summary capacity-danger"' in over_capacity_html
+    assert "4 students are online, but only 3 team places" in over_capacity_html
+    assert "At least 1 online student must remain unassigned" in over_capacity_html
+
+
+def test_instructor_poll_reports_live_online_capacity_counts(
+    course_env, monkeypatch
+):
+    clock = {"now": datetime(2026, 8, 29, 12, 0, 0)}
+    monkeypatch.setattr(app_module, "_utcnow", lambda: clock["now"])
+    with _connect(course_env) as db:
+        db.execute(
+            """UPDATE students SET last_active_at = ?
+               WHERE student_id IN ('s1', 's3')""",
+            (clock["now"].isoformat(),),
+        )
+        db.commit()
+
+    client = _instructor_client(course_env)
+    state = client.get("/api/poll").get_json()["state"]
+
+    assert state["unassigned_count"] == 1
+    assert state["online_student_count"] == 2
+    assert state["online_unassigned_count"] == 1
+
+    clock["now"] += app_module.STUDENT_ONLINE_WINDOW
+    expired_state = client.get("/api/poll").get_json()["state"]
+
+    assert expired_state["unassigned_count"] == 1
+    assert expired_state["online_student_count"] == 0
+    assert expired_state["online_unassigned_count"] == 0
 
 
 def test_empty_team_cannot_start_presentation(course_env):
@@ -5432,7 +5491,8 @@ def test_instructor_sees_per_challenge_submission_and_eligibility_counts(
     ]
 
     instructor_only_fields = {
-        "unassigned_count", "poll_count", "poll_eligible_count",
+        "unassigned_count", "online_student_count",
+        "online_unassigned_count", "poll_count", "poll_eligible_count",
         "thumb_participant_count", "thumb_eligible_count",
         "thumb_team_progress", "challenge_hands",
         "challenge_rating_summaries", "completed_presentation_count",
@@ -5462,6 +5522,10 @@ def test_presentation_monitor_uses_counts_without_rater_identities(
     state = _instructor_client(course_env).get("/api/poll").get_json()["state"]
     assert state["poll_count"] == 0
     assert state["poll_eligible_count"] == 1
+    assert not any(
+        "select team_id, last_active_at from students" in query
+        for query in queries
+    )
     assert "poll_non_raters" not in state
     assert "poll_online_eligible_count" not in state
     assert "Dana" not in json.dumps(state)

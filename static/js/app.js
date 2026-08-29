@@ -4268,23 +4268,31 @@ if (instructor) {
     function updateCapacityStatus(state) {
         const el = document.getElementById('setup-capacity-warning');
         if (!el) return;
-        const total = Number(instructor.dataset.studentCount) || 0;
         const maxTeams = Number(state.max_teams) || Number(instructor.dataset.maxTeams) || 0;
         const maxMembers = Number(state.max_members) || Number(instructor.dataset.maxMembers) || 0;
         const capacity = maxTeams * maxMembers;
-        const unassigned = Number(state.unassigned_count) || 0;
-        const overCapacity = total > capacity;
-        const hasUnassigned = unassigned > 0;
+        const onlineTotal = Math.max(
+            0, Number(state.online_student_count) || 0
+        );
+        const onlineUnassigned = Math.min(
+            onlineTotal,
+            Math.max(0, Number(state.online_unassigned_count) || 0)
+        );
+        const capacityShortfall = Math.max(0, onlineTotal - capacity);
+        const overCapacity = capacityShortfall > 0;
+        const hasUnassigned = onlineUnassigned > 0;
         el.classList.toggle('capacity-danger', overCapacity);
         el.classList.toggle('capacity-warning', !overCapacity && hasUnassigned);
         el.classList.toggle('capacity-success', !overCapacity && !hasUnassigned);
         let message;
         if (overCapacity) {
-            message = `\u26A0 Capacity warning: ${total} enrolled students, but only ${capacity} team places. At least ${total - capacity} must remain unassigned.`;
-        } else if (unassigned > 0) {
-            message = `\u26A0 ${unassigned} student${unassigned === 1 ? ' is' : 's are'} not assigned. Assign everyone attending today; absent students may remain unassigned.`;
+            message = `\u26A0 Capacity warning: ${onlineTotal} students are online, but only ${capacity} team places. At least ${capacityShortfall} online student${capacityShortfall === 1 ? '' : 's'} must remain unassigned.`;
+        } else if (onlineUnassigned > 0) {
+            message = `\u26A0 ${onlineUnassigned} online student${onlineUnassigned === 1 ? ' is' : 's are'} not assigned. Assign everyone attending today; offline students may remain unassigned.`;
+        } else if (onlineTotal === 0) {
+            message = `\u2713 No students are currently online. Capacity: ${capacity}.`;
         } else {
-            message = `\u2713 All ${total} students are assigned. Capacity: ${capacity}.`;
+            message = `\u2713 All ${onlineTotal} online student${onlineTotal === 1 ? ' is' : 's are'} assigned. Capacity: ${capacity}.`;
         }
         if (el.textContent.trim() !== message) el.textContent = message;
     }

@@ -2530,6 +2530,13 @@ def instructor_course(slug):
         d['presentation_count'] = counts.get('presentation_count', 0)
         d['challenger_count'] = counts.get('challenger_count', 0)
         students_enhanced.append(d)
+    online_student_count = sum(
+        1 for student in students_enhanced if student['is_online']
+    )
+    online_unassigned_count = sum(
+        1 for student in students_enhanced
+        if student['is_online'] and student['team_id'] is None
+    )
 
     # End session stats
     end_stats = None
@@ -2591,6 +2598,8 @@ def instructor_course(slug):
         state=state, phases=PHASES, questions=questions,
         max_teams=max_teams,
         max_members=get_max_members_per_team(slug, course['id']),
+        online_student_count=online_student_count,
+        online_unassigned_count=online_unassigned_count,
         teams_locked=teams_locked,
         session_started_at=state['session_started_at'] if state and 'session_started_at' in state.keys() else None,
         end_stats=end_stats,
@@ -3117,13 +3126,39 @@ def _compute_state(slug, include_poll_count=True, known_question_id=None,
         result['poll_count'] = poll_count or 0
         cid = state['course_id'] if state else None
         if cid:
-            unassigned = query_db(
-                slug,
-                '''SELECT COUNT(*) AS c FROM students
-                   WHERE course_id = ? AND team_id IS NULL AND is_active = 1''',
-                [cid], one=True
-            )
-            result['unassigned_count'] = unassigned['c'] if unassigned else 0
+            if state.get('phase') == 'setup':
+                presence_rows = query_db(
+                    slug,
+                    '''SELECT team_id, last_active_at FROM students
+                       WHERE course_id = ? AND is_active = 1''',
+                    [cid]
+                )
+                result['unassigned_count'] = sum(
+                    1 for student in presence_rows
+                    if student['team_id'] is None
+                )
+                online_rows = [
+                    student for student in presence_rows
+                    if _student_is_online(student['last_active_at'], now=now)
+                ]
+                result['online_student_count'] = len(online_rows)
+                result['online_unassigned_count'] = sum(
+                    1 for student in online_rows
+                    if student['team_id'] is None
+                )
+            else:
+                unassigned = query_db(
+                    slug,
+                    '''SELECT COUNT(*) AS c FROM students
+                       WHERE course_id = ? AND team_id IS NULL
+                         AND is_active = 1''',
+                    [cid], one=True
+                )
+                result['unassigned_count'] = (
+                    unassigned['c'] if unassigned else 0
+                )
+                result['online_student_count'] = 0
+                result['online_unassigned_count'] = 0
 
             poll_eligible = 0
             if state.get('active_team_id'):
@@ -3354,7 +3389,10 @@ def _compute_state(slug, include_poll_count=True, known_question_id=None,
                 result['challenge_rating_summaries'] = {}
         else:
             result.update({
-                'unassigned_count': 0, 'poll_eligible_count': 0,
+                'unassigned_count': 0,
+                'online_student_count': 0,
+                'online_unassigned_count': 0,
+                'poll_eligible_count': 0,
                 'thumb_participant_count': 0, 'thumb_eligible_count': 0,
                 'thumb_team_progress': [],
                 'challenge_hands': [],

@@ -130,7 +130,7 @@ def test_instructor_setup_and_presentation_controls_are_contextual_and_compact()
     assert "{ instructorSetup: true }" in source
     assert "applyCompetitionParticipationRoster(rosterData)" in source
     assert "Assign everyone attending today" in source
-    assert "absent students may remain unassigned" in source
+    assert "offline students may remain unassigned" in source
 
     assert 'id="reset-course-data-menu-item"' in base
     assert "state.phase in ['setup', 'ended']" in base

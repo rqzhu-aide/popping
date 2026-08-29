@@ -3,6 +3,14 @@
 All notable changes to Popping are recorded here. Releases use semantic
 versions as defined in `VERSIONING.md`.
 
+## [v1.2.5] - 2026-08-29
+
+### Fixed
+
+- Setup capacity warnings now count only students active within the previous
+  minute, including the online students who remain unassigned, while keeping
+  offline roster members out of the warning.
+
 ## [v1.2.4] - 2026-08-27
 
 ### Added

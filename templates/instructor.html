@@ -181,16 +181,18 @@
             </div>
             {% endfor %}
         </div>
-        {% set unassigned = students | selectattr('team_id', 'none') | list %}
         {% set team_capacity = max_teams * max_members %}
-        <p class="capacity-summary{% if students|length > team_capacity %} capacity-danger{% elif unassigned %} capacity-warning{% else %} capacity-success{% endif %}"
+        {% set capacity_shortfall = online_student_count - team_capacity %}
+        <p class="capacity-summary{% if capacity_shortfall > 0 %} capacity-danger{% elif online_unassigned_count > 0 %} capacity-warning{% else %} capacity-success{% endif %}"
            id="setup-capacity-warning" role="status" aria-live="polite">
-            {% if students|length > team_capacity %}
-            &#9888; Capacity warning: {{ students|length }} enrolled students, but only {{ team_capacity }} team places. At least {{ students|length - team_capacity }} must remain unassigned.
-            {% elif unassigned %}
-            &#9888; {{ unassigned|length }} student{{ ' is' if unassigned|length == 1 else 's are' }} not assigned. Assign everyone attending today; absent students may remain unassigned.
+            {% if capacity_shortfall > 0 %}
+            &#9888; Capacity warning: {{ online_student_count }} students are online, but only {{ team_capacity }} team places. At least {{ capacity_shortfall }} online student{{ '' if capacity_shortfall == 1 else 's' }} must remain unassigned.
+            {% elif online_unassigned_count > 0 %}
+            &#9888; {{ online_unassigned_count }} online student{{ ' is' if online_unassigned_count == 1 else 's are' }} not assigned. Assign everyone attending today; offline students may remain unassigned.
+            {% elif online_student_count == 0 %}
+            &#10003; No students are currently online. Capacity: {{ team_capacity }}.
             {% else %}
-            &#10003; All {{ students|length }} students are assigned. Capacity: {{ team_capacity }}.
+            &#10003; All {{ online_student_count }} online student{{ ' is' if online_student_count == 1 else 's are' }} assigned. Capacity: {{ team_capacity }}.
             {% endif %}
         </p>
     </section>

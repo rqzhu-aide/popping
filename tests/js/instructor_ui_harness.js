@@ -645,6 +645,70 @@ function testPermanentTeamFilterAccessibility() {
     assert(source.includes("teamFilterVal = String(select?.value ?? '')"));
 }
 
+function testCapacityStatusUsesOnlineCounts() {
+    const classes = new Set();
+    const status = {
+        textContent: '',
+        classList: {
+            toggle(name, enabled) {
+                if (enabled) classes.add(name);
+                else classes.delete(name);
+            },
+        },
+    };
+    const sandbox = {
+        console,
+        instructor: {
+            dataset: {
+                studentCount: '82',
+                maxTeams: '9',
+                maxMembers: '9',
+            },
+        },
+        document: {
+            getElementById(id) {
+                return id === 'setup-capacity-warning' ? status : null;
+            },
+        },
+    };
+    vm.createContext(sandbox);
+    vm.runInContext(sourceSlice(
+        'function updateCapacityStatus(state) {',
+        'async function instructorPollOnce() {'
+    ), sandbox, { filename: 'app-capacity-status.js' });
+
+    sandbox.state = {
+        max_teams: 9,
+        max_members: 9,
+        unassigned_count: 12,
+        online_student_count: 70,
+        online_unassigned_count: 0,
+    };
+    vm.runInContext('updateCapacityStatus(state)', sandbox);
+    assert(classes.has('capacity-success'));
+    assert(!classes.has('capacity-danger'));
+    assert.match(status.textContent, /All 70 online students are assigned/);
+    assert.doesNotMatch(status.textContent, /82 enrolled/);
+
+    sandbox.state.online_unassigned_count = 2;
+    vm.runInContext('updateCapacityStatus(state)', sandbox);
+    assert(classes.has('capacity-warning'));
+    assert.match(status.textContent, /2 online students are not assigned/);
+
+    sandbox.state.online_student_count = 82;
+    sandbox.state.online_unassigned_count = 1;
+    vm.runInContext('updateCapacityStatus(state)', sandbox);
+    assert(classes.has('capacity-danger'));
+    assert.match(status.textContent, /82 students are online/);
+    assert.match(status.textContent, /At least 1 online student must remain/);
+
+    sandbox.state.online_student_count = 0;
+    sandbox.state.online_unassigned_count = 0;
+    vm.runInContext('updateCapacityStatus(state)', sandbox);
+    assert(classes.has('capacity-success'));
+    assert.match(status.textContent, /No students are currently online/);
+}
+
 function testPresentationTransitionsReconcileInPlace() {
     const instructor = {
         dataset: {
@@ -1272,6 +1336,7 @@ function testContextualRosterBadgesAndTeamLabels() {
     await testStudentTableQueuesTrailingReload();
     await testQuestionLoaderRecoversInitialFailure();
     testPermanentTeamFilterAccessibility();
+    testCapacityStatusUsesOnlineCounts();
     testPresentationTransitionsReconcileInPlace();
     testInstructorVisibilityRecovery();
     testMarkdownPreservesMultilineDisplayMath();
