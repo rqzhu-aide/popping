@@ -16,6 +16,28 @@ def test_readme_requires_offline_database_maintenance():
     assert "INSERT INTO students" not in readme
 
 
+def test_readme_documents_safe_v13_upgrade_and_weekly_hero_backfill():
+    readme = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
+
+    assert "`v1.3.x` require database schema `v1.3.0`" in readme
+    assert "confirm that its session is in **Ended**" in readme
+    assert "**Reset Course Data** or `init-db.sh`" in readme
+    assert "python3 scripts/migrate-course-db.py 432fall2026" in readme
+    assert "python3 scripts/backfill-weekly-heroes.py 432fall2026 1" in readme
+    assert "participant coverage is complete" in readme
+    assert "Stop without applying, reinitializing, or resetting" in readme
+
+
+def test_recovery_guide_uses_the_target_release_migration_script():
+    guide = (PROJECT_ROOT / "BACKUP_AND_RECOVERY.md").read_text(
+        encoding="utf-8"
+    )
+
+    assert "repository root of the release you" in guide
+    assert "are upgrading to" in guide
+    assert "`v1.1.0` repository root" not in guide
+
+
 def test_new_course_stays_inactive_until_its_database_exists():
     readme = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
     create_script = (PROJECT_ROOT / "scripts" / "create-course.sh").read_text(

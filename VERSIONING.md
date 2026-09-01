@@ -83,6 +83,41 @@ the compatibility rule, activity written by `v1.0.x` or `v1.1.x` remains in
 the database but moves to Download Legacy Data after the `v1.2.0` upgrade.
 Resetting a course instead creates an empty current-version database.
 
+## v1.3.0 Weekly Hero history
+
+`v1.3.0` adds durable weekly achievements without changing the source events:
+
+- Weekly summaries store the calculation version, accepted source
+  compatibility series, exact source-row counts, and a SHA-256 source
+  fingerprint.
+- Ranked results store exact score numerators and denominators. Presentation
+  teams use competition ranks 1 through 3, including ties. Every rank-1
+  challenger receives a Best Challenger bolt.
+- Recipient rows snapshot the students who belonged to an awarded team when
+  each rated presentation was finalized. Saving is refused if an awarded
+  rated presentation has no matching participant snapshot.
+- Future sessions aggregate prior-week gold, silver, bronze, and bolt counts
+  by the stable student database identity.
+
+Ending a `v1.3.x` week calculates and saves its summary transactionally. A
+completed `v1.2.x` week can be reconstructed after migration with:
+
+```bash
+python scripts/backfill-weekly-heroes.py <course_slug> <week>
+python scripts/backfill-weekly-heroes.py <course_slug> <week> --apply
+```
+
+The first command is a read-only preview. The apply command requires course
+identity and offline-maintenance confirmation, saves an empty finalized
+summary when the week has no eligible results, and is idempotent for an
+unchanged fingerprint. `--apply --replace` is required to replace a different
+saved summary. Source ratings, challenges, participants, teams, and students
+are never rewritten by this backfill.
+
+The new summary rows use `v1.3.x` provenance. Preserved `v1.2.x` source rows
+remain legacy after the schema transition and retain their original data
+versions.
+
 ## Version bump rules
 
 - A website-only change increments PATCH, such as `v1.0.0` to `v1.0.1`.
@@ -110,7 +145,7 @@ If a schema-line release is accidentally deployed during a session, roll the
 application back to the previous compatible release, end or reset the session,
 then deploy the new release again. Do not bypass the migration-window check.
 
-For any schema transition, including `v1.1.x` to `v1.2.0`, make each
+For any schema transition, including `v1.2.x` to `v1.3.0`, make each
 affected course unreachable before running this command once per course:
 
 ```bash

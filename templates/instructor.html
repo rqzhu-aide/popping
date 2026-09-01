@@ -1,5 +1,37 @@
 {% extends "base.html" %}
 
+{% macro weekly_hero_badges(person) -%}
+    {%- set badges = person.hero_badges or {} -%}
+    {%- set gold = badges.gold or 0 -%}
+    {%- set silver = badges.silver or 0 -%}
+    {%- set bronze = badges.bronze or 0 -%}
+    {%- set bolt = badges.bolt or 0 -%}
+    <span class="weekly-hero-badges" data-role="weekly-hero-badges"
+          {% if not (gold or silver or bronze or bolt) %}hidden{% endif %}>
+        <span class="visually-hidden">Weekly Hero achievements:</span>
+        {%- if gold %}
+        <span class="weekly-hero-badge weekly-hero-badge-gold" role="img"
+              aria-label="Gold team award, {{ gold }} week{{ '' if gold == 1 else 's' }}"
+              title="Gold team award: {{ gold }} week{{ '' if gold == 1 else 's' }}">🥇 <strong>×{{ gold }}</strong></span>
+        {%- endif %}
+        {%- if silver %}
+        <span class="weekly-hero-badge weekly-hero-badge-silver" role="img"
+              aria-label="Silver team award, {{ silver }} week{{ '' if silver == 1 else 's' }}"
+              title="Silver team award: {{ silver }} week{{ '' if silver == 1 else 's' }}">🥈 <strong>×{{ silver }}</strong></span>
+        {%- endif %}
+        {%- if bronze %}
+        <span class="weekly-hero-badge weekly-hero-badge-bronze" role="img"
+              aria-label="Bronze team award, {{ bronze }} week{{ '' if bronze == 1 else 's' }}"
+              title="Bronze team award: {{ bronze }} week{{ '' if bronze == 1 else 's' }}">🥉 <strong>×{{ bronze }}</strong></span>
+        {%- endif %}
+        {%- if bolt %}
+        <span class="weekly-hero-badge weekly-hero-badge-bolt" role="img"
+              aria-label="Best Challenger award, {{ bolt }} week{{ '' if bolt == 1 else 's' }}"
+              title="Best Challenger award: {{ bolt }} week{{ '' if bolt == 1 else 's' }}">⚡ <strong>×{{ bolt }}</strong></span>
+        {%- endif %}
+    </span>
+{%- endmacro %}
+
 {% block title %}Instructor - {{ course.name }}{% endblock %}
 
 {% block content %}
@@ -91,13 +123,18 @@
                         id="btn-apply-week" onclick="setDiscussionWeek()">Apply Week</button>
             </div>
         </div>
-            <div class="phase-settings phase-settings-secondary">
-                <button class="btn btn-sm {% if teams_locked %}btn-danger{% else %}btn-primary{% endif %}"
-                        id="btn-toggle-lock" onclick="toggleLock(this)">
-                    {% if teams_locked %}Unlock Teams{% else %}Lock Teams{% endif %}
-                </button>
-                <button class="btn btn-sm btn-secondary" onclick="unassignAll(this)">Clear All Teams</button>
-            </div>
+        {% endif %}
+        {% if state.phase in ['setup', 'discussion', 'competition'] %}
+        <div class="phase-settings phase-settings-secondary">
+            <button class="btn btn-sm {% if teams_locked %}btn-danger{% else %}btn-primary{% endif %}"
+                    id="btn-toggle-lock" onclick="toggleLock(this)"
+                    title="{% if state.phase == 'setup' %}Control student team joining and changes{% else %}Control whether unassigned students may rejoin this session's team{% endif %}">
+                {% if teams_locked %}Unlock Teams{% else %}Lock Teams{% endif %}
+            </button>
+            {% if state.phase == 'setup' %}
+            <button class="btn btn-sm btn-secondary" onclick="unassignAll(this)">Clear All Teams</button>
+            {% endif %}
+        </div>
         {% endif %}
     </section>
 
@@ -438,7 +475,6 @@
                             {% if participation_members %}{{ participation.never }} of {{ participation_members | length }} members have no completed team turns.{% else %}No members.{% endif %}
                         </span>
                     </div>
-                    {% if participation_members %}
                     <ul class="team-participation-members">
                         {% for member in participation_members %}
                         <li class="team-participation-member"
@@ -446,6 +482,7 @@
                             data-presentation-count="{{ member.presentation_count or 0 }}"
                             data-challenger-count="{{ member.challenger_count or 0 }}">
                             <span class="team-participation-member-name">{{ member | instructor_display_name }}</span>
+                            {{ weekly_hero_badges(member) }}
                             <span class="participation-badges" aria-label="Participation history">
                                 <span class="participation-badge{% if (member.presentation_count or 0) == 0 %} is-zero{% endif %}">Team turns: <strong class="team-turn-count">{{ member.presentation_count or 0 }}</strong></span>
                                 <span class="participation-badge{% if (member.challenger_count or 0) == 0 %} is-zero{% endif %}">Challenge turns: <strong class="challenge-turn-count">{{ member.challenger_count or 0 }}</strong></span>
@@ -453,7 +490,6 @@
                         </li>
                         {% endfor %}
                     </ul>
-                    {% endif %}
                 </section>
                 {% endfor %}
             </div>

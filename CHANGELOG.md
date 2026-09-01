@@ -3,6 +3,35 @@
 All notable changes to Popping are recorded here. Releases use semantic
 versions as defined in `VERSIONING.md`.
 
+## [v1.3.0] - 2026-09-01
+
+### Added
+
+- Added durable Weekly Hero summaries with exact tied team ranks, Best
+  Challenger results, historical award recipients, calculation provenance,
+  and source fingerprints.
+- Added cumulative gold, silver, bronze, and Best Challenger badges beside
+  selected team members and challengers in Present and Challenge.
+- Added a Weekly Hero worksheet to result downloads.
+- Added a preview-first `backfill-weekly-heroes.py` command for completed older
+  weeks. It can read one explicitly selected legacy compatibility series and
+  saves only derived summary rows.
+
+### Changed
+
+- Advanced the website, database schema, and export format to `v1.3.0`.
+- Ending a session now refreshes that week's saved achievement summary. A full
+  course-data reset removes these derived summaries with the source activity.
+
+### Safety
+
+- Weekly result saving refuses awarded presentations without historical
+  participant coverage, rechecks the source fingerprint inside the write
+  transaction, and requires explicit replacement for a changed summary.
+- The backfill apply path requires course identity and offline-maintenance
+  confirmation and does not rewrite ratings, challenges, participants,
+  students, or teams.
+
 ## [v1.2.5] - 2026-08-29
 
 ### Fixed

@@ -42,6 +42,7 @@ VERSIONED_DATA_TABLES = (
     "challenge_rounds",
     "challenge_ratings",
     "presentation_participants",
+    "weekly_hero_summaries",
 )
 _SCHEMA_LEDGER_COLUMNS = {
     "id", "schema_version", "applied_by_app_version", "applied_at",

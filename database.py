@@ -1,9 +1,11 @@
+import hashlib
 import json
 import os
 import re
 import sqlite3
 import tempfile
 import threading
+from fractions import Fraction
 from flask import g
 import config
 from versioning import (
@@ -40,15 +42,19 @@ _VERSIONED_DATA_TABLES = (
     'challenge_rounds',
     'challenge_ratings',
     'presentation_participants',
+    'weekly_hero_summaries',
 )
 _PARTICIPATION_SCHEMA_VERSION = '1.1.0'
 _STUDENT_PROFILE_SCHEMA_VERSION = '1.2.0'
+_WEEKLY_HERO_SCHEMA_VERSION = '1.3.0'
+WEEKLY_HERO_CALCULATION_VERSION = '1.0.0'
 _VERSIONED_DATA_TABLE_INTRODUCED = {
     'teammate_thumbs': BASELINE_SCHEMA_VERSION,
     'presentation_ratings': BASELINE_SCHEMA_VERSION,
     'challenge_rounds': BASELINE_SCHEMA_VERSION,
     'challenge_ratings': BASELINE_SCHEMA_VERSION,
     'presentation_participants': _PARTICIPATION_SCHEMA_VERSION,
+    'weekly_hero_summaries': _WEEKLY_HERO_SCHEMA_VERSION,
 }
 _SCHEMA_LEDGER_COLUMNS = {
     'id', 'schema_version', 'applied_by_app_version', 'applied_at'
@@ -196,6 +202,57 @@ _PARTICIPATION_REQUIRED_INDEXES = {
     ),
     'idx_presentation_participants_export_week': (
         'presentation_participants', ('course_id', 'week_num')
+    ),
+}
+
+_WEEKLY_HERO_REQUIRED_COLUMNS = {
+    'weekly_hero_summaries': {
+        'id', 'course_id', 'week_num', 'calculation_version',
+        'source_schema_version', 'source_data_versions',
+        'source_fingerprint', 'source_presentation_rating_count',
+        'source_challenge_rating_count', 'source_participant_count',
+        'source_history_item_count', 'data_version', 'calculated_at',
+    },
+    'weekly_hero_results': {
+        'id', 'summary_id', 'result_key', 'category', 'award_type', 'rank',
+        'score_sum', 'score_count', 'rating_count',
+        'developed_score_sum', 'developed_score_count', 'easy_score_sum',
+        'easy_score_count', 'team_id', 'team_name', 'challenger_id',
+        'challenger_identifier', 'challenger_name', 'created_at',
+    },
+    'weekly_hero_recipients': {
+        'id', 'result_id', 'recipient_key', 'student_id',
+        'student_identifier', 'student_name', 'team_id', 'team_name',
+        'created_at',
+    },
+}
+
+_WEEKLY_HERO_REQUIRED_UNIQUE_KEYS = {
+    'weekly_hero_summaries': {('course_id', 'week_num')},
+    'weekly_hero_results': {('summary_id', 'result_key')},
+    'weekly_hero_recipients': {('result_id', 'recipient_key')},
+}
+
+_WEEKLY_HERO_REQUIRED_FOREIGN_KEYS = {
+    'weekly_hero_summaries': {('course_id', 'courses', 'id')},
+    'weekly_hero_results': {
+        ('summary_id', 'weekly_hero_summaries', 'id'),
+        ('team_id', 'teams', 'id'),
+        ('challenger_id', 'students', 'id'),
+    },
+    'weekly_hero_recipients': {
+        ('result_id', 'weekly_hero_results', 'id'),
+        ('student_id', 'students', 'id'),
+        ('team_id', 'teams', 'id'),
+    },
+}
+
+_WEEKLY_HERO_REQUIRED_INDEXES = {
+    'idx_weekly_hero_results_summary_rank': (
+        'weekly_hero_results', ('summary_id', 'category', 'rank')
+    ),
+    'idx_weekly_hero_recipients_student': (
+        'weekly_hero_recipients', ('student_id', 'result_id')
     ),
 }
 
@@ -804,6 +861,85 @@ def _validate_participation_schema(db, repair_indexes=False):
     _ensure_participation_indexes(db, repair_indexes)
 
 
+def _ensure_weekly_hero_indexes(db, repair_indexes):
+    for index_name, (table, expected_columns) in (
+            _WEEKLY_HERO_REQUIRED_INDEXES.items()):
+        index_row = db.execute(
+            """SELECT tbl_name FROM sqlite_master
+               WHERE type = 'index' AND name = ?""",
+            [index_name],
+        ).fetchone()
+        if index_row is None:
+            if not repair_indexes:
+                raise RuntimeError(
+                    f'Database is missing required index {index_name}'
+                )
+            columns_sql = ', '.join(
+                _quote_identifier(column) for column in expected_columns
+            )
+            db.execute(
+                f'CREATE INDEX {_quote_identifier(index_name)} '
+                f'ON {_quote_identifier(table)} ({columns_sql})'
+            )
+            index_row = db.execute(
+                """SELECT tbl_name FROM sqlite_master
+                   WHERE type = 'index' AND name = ?""",
+                [index_name],
+            ).fetchone()
+
+        actual_table = _row_value(index_row, 'tbl_name', 0)
+        actual_columns = tuple(
+            _row_value(row, 'name', 2)
+            for row in db.execute(
+                f'PRAGMA index_info({_quote_identifier(index_name)})'
+            ).fetchall()
+        )
+        index_list = {
+            _row_value(row, 'name', 1): row
+            for row in db.execute(
+                f'PRAGMA index_list({_quote_identifier(table)})'
+            ).fetchall()
+        }
+        metadata = index_list.get(index_name)
+        if (actual_table != table or actual_columns != expected_columns
+                or metadata is None
+                or bool(_row_value(metadata, 'unique', 2))
+                or bool(_row_value(metadata, 'partial', 4))):
+            raise RuntimeError(
+                f'Database index {index_name} has an invalid definition'
+            )
+
+
+def _validate_weekly_hero_schema(db, repair_indexes=False):
+    for table, required_columns in _WEEKLY_HERO_REQUIRED_COLUMNS.items():
+        columns = set(_pragma_columns(db, table))
+        missing_columns = sorted(required_columns - columns)
+        if missing_columns:
+            raise RuntimeError(
+                f'Database table {table} is missing required column(s): '
+                + ', '.join(missing_columns)
+            )
+
+        index_signatures = _table_index_signatures(db, table)
+        for unique_key in _WEEKLY_HERO_REQUIRED_UNIQUE_KEYS[table]:
+            if (unique_key, True) not in index_signatures:
+                raise RuntimeError(
+                    f'Database table {table} is missing required unique key '
+                    f"({', '.join(unique_key)})"
+                )
+
+        foreign_keys = _table_foreign_key_signatures(db, table)
+        missing_foreign_keys = (
+            _WEEKLY_HERO_REQUIRED_FOREIGN_KEYS[table] - foreign_keys
+        )
+        if missing_foreign_keys:
+            raise RuntimeError(
+                f'Database table {table} is missing required foreign key(s)'
+            )
+
+    _ensure_weekly_hero_indexes(db, repair_indexes)
+
+
 def _validate_student_profile_schema(db):
     columns = _pragma_columns(db, 'students')
     display_name = columns.get('display_name')
@@ -835,6 +971,11 @@ def validate_current_schema(db, repair_indexes=False):
     if parse_version(recorded) >= parse_version(
             _STUDENT_PROFILE_SCHEMA_VERSION):
         _validate_student_profile_schema(db)
+    if parse_version(recorded) >= parse_version(
+            _WEEKLY_HERO_SCHEMA_VERSION):
+        _validate_weekly_hero_schema(
+            db, repair_indexes=repair_indexes
+        )
     validate_data_version_schema(db)
     return recorded
 
@@ -970,6 +1111,110 @@ def _migrate_1_1_0_to_1_2_0(db):
 _SCHEMA_MIGRATIONS[(
     _PARTICIPATION_SCHEMA_VERSION, _STUDENT_PROFILE_SCHEMA_VERSION
 )] = _migrate_1_1_0_to_1_2_0
+
+
+def _migrate_1_2_0_to_1_3_0(db):
+    """Add immutable weekly result snapshots and their award recipients."""
+    db.execute('''CREATE TABLE weekly_hero_summaries (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        course_id INTEGER NOT NULL,
+        week_num INTEGER NOT NULL CHECK(week_num > 0),
+        calculation_version TEXT NOT NULL,
+        source_schema_version TEXT NOT NULL,
+        source_data_versions TEXT NOT NULL,
+        source_fingerprint TEXT NOT NULL
+            CHECK(length(source_fingerprint) = 64
+                  AND source_fingerprint NOT GLOB '*[^0-9a-f]*'),
+        source_presentation_rating_count INTEGER NOT NULL
+            CHECK(source_presentation_rating_count >= 0),
+        source_challenge_rating_count INTEGER NOT NULL
+            CHECK(source_challenge_rating_count >= 0),
+        source_participant_count INTEGER NOT NULL
+            CHECK(source_participant_count >= 0),
+        source_history_item_count INTEGER NOT NULL
+            CHECK(source_history_item_count >= 0),
+        data_version TEXT NOT NULL,
+        calculated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (course_id) REFERENCES courses (id) ON DELETE CASCADE,
+        UNIQUE(course_id, week_num)
+    )''')
+    db.execute('''CREATE TABLE weekly_hero_results (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        summary_id INTEGER NOT NULL,
+        result_key TEXT NOT NULL,
+        category TEXT NOT NULL CHECK(category IN ('team', 'challenger')),
+        award_type TEXT NOT NULL
+            CHECK(award_type IN ('gold', 'silver', 'bronze', 'bolt')),
+        rank INTEGER NOT NULL CHECK(rank >= 1 AND rank <= 3),
+        score_sum INTEGER NOT NULL CHECK(score_sum >= 0),
+        score_count INTEGER NOT NULL CHECK(score_count > 0),
+        rating_count INTEGER NOT NULL CHECK(rating_count > 0),
+        developed_score_sum INTEGER,
+        developed_score_count INTEGER,
+        easy_score_sum INTEGER,
+        easy_score_count INTEGER,
+        team_id INTEGER,
+        team_name TEXT,
+        challenger_id INTEGER,
+        challenger_identifier TEXT,
+        challenger_name TEXT,
+        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (summary_id) REFERENCES weekly_hero_summaries (id)
+            ON DELETE CASCADE,
+        FOREIGN KEY (team_id) REFERENCES teams (id) ON DELETE SET NULL,
+        FOREIGN KEY (challenger_id) REFERENCES students (id)
+            ON DELETE SET NULL,
+        UNIQUE(summary_id, result_key),
+        CHECK(
+            (category = 'team' AND award_type IN ('gold', 'silver', 'bronze')
+             AND rank BETWEEN 1 AND 3 AND team_name IS NOT NULL
+             AND challenger_id IS NULL AND challenger_identifier IS NULL
+             AND challenger_name IS NULL
+             AND developed_score_sum IS NOT NULL
+             AND developed_score_count > 0
+             AND easy_score_sum IS NOT NULL AND easy_score_count > 0)
+            OR
+            (category = 'challenger' AND award_type = 'bolt' AND rank = 1
+             AND team_id IS NULL AND team_name IS NULL
+             AND challenger_name IS NOT NULL
+             AND developed_score_sum IS NULL
+             AND developed_score_count IS NULL
+             AND easy_score_sum IS NULL AND easy_score_count IS NULL)
+        )
+    )''')
+    db.execute('''CREATE TABLE weekly_hero_recipients (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        result_id INTEGER NOT NULL,
+        recipient_key TEXT NOT NULL,
+        student_id INTEGER,
+        student_identifier TEXT,
+        student_name TEXT,
+        team_id INTEGER,
+        team_name TEXT,
+        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (result_id) REFERENCES weekly_hero_results (id)
+            ON DELETE CASCADE,
+        FOREIGN KEY (student_id) REFERENCES students (id) ON DELETE SET NULL,
+        FOREIGN KEY (team_id) REFERENCES teams (id) ON DELETE SET NULL,
+        UNIQUE(result_id, recipient_key)
+    )''')
+    db.execute(
+        '''CREATE INDEX idx_weekly_hero_results_summary_rank
+           ON weekly_hero_results(summary_id, category, rank)'''
+    )
+    db.execute(
+        '''CREATE INDEX idx_weekly_hero_recipients_student
+           ON weekly_hero_recipients(student_id, result_id)'''
+    )
+    if db.execute('PRAGMA foreign_key_check').fetchone():
+        raise RuntimeError(
+            'Database foreign keys are invalid after schema migration'
+        )
+
+
+_SCHEMA_MIGRATIONS[(
+    _STUDENT_PROFILE_SCHEMA_VERSION, _WEEKLY_HERO_SCHEMA_VERSION
+)] = _migrate_1_2_0_to_1_3_0
 
 
 def _apply_schema_migration_plan(db, migration_plan):
@@ -1520,6 +1765,887 @@ def _ensure_schema_locked(db):
 def migrate_schema_connection(db):
     """Adopt or migrate an existing DB within the caller's transaction."""
     _ensure_schema_locked(db)
+
+
+def _weekly_hero_week(value):
+    if type(value) is not int or value <= 0:
+        raise ValueError('Lecture week must be a positive integer')
+    return value
+
+
+def _weekly_hero_source_schema_version(value):
+    parsed = parse_version(value)
+    if parsed[2] != 0:
+        raise ValueError(
+            'Source schema version must have a zero patch number'
+        )
+    return value
+
+
+def _weekly_hero_text(value):
+    if value is None:
+        return None
+    normalized = str(value).strip()
+    return normalized or None
+
+
+def _weekly_hero_query_dicts(db, sql, params=()):
+    cursor = db.execute(sql, params)
+    columns = tuple(description[0] for description in cursor.description)
+    return [
+        {
+            column: _row_value(row, column, index)
+            for index, column in enumerate(columns)
+        }
+        for row in cursor.fetchall()
+    ]
+
+
+def _weekly_hero_history_key(item):
+    return (
+        item.get('presentation_key')
+        or f"pres-{item.get('started_at', '')}"
+    )
+
+
+def _weekly_hero_history_version(item):
+    value = item.get('data_version')
+    return BASELINE_DATA_VERSION if value is None else value
+
+
+def _weekly_hero_version_sort_key(value):
+    try:
+        return parse_version(value)
+    except (TypeError, ValueError):
+        return (float('inf'), float('inf'), float('inf'))
+
+
+def detect_weekly_hero_source_schema_version(db, course_id, week_num):
+    """Detect one data compatibility series for a week's source rows.
+
+    Patch releases in one major/minor series are intentionally combined.  A
+    week containing more than one series is ambiguous and requires the CLI's
+    explicit ``--source-schema-version`` option.
+    """
+    week_num = _weekly_hero_week(week_num)
+    series = set()
+    malformed = set()
+    for table in (
+            'presentation_ratings', 'challenge_ratings',
+            'presentation_participants'):
+        rows = db.execute(
+            f'''SELECT DISTINCT data_version FROM {table}
+                WHERE course_id = ? AND week_num = ?''',
+            [course_id, week_num],
+        ).fetchall()
+        for row in rows:
+            value = _row_value(row, 'data_version', 0)
+            try:
+                major, minor, _patch = parse_version(value)
+            except (TypeError, ValueError):
+                malformed.add(repr(value))
+                continue
+            series.add((major, minor))
+
+    if malformed:
+        raise RuntimeError(
+            'Cannot auto-detect weekly result source version because the '
+            'week contains malformed data_version value(s): '
+            + ', '.join(sorted(malformed))
+        )
+    if len(series) > 1:
+        labels = ', '.join(
+            f'v{major}.{minor}.x' for major, minor in sorted(series)
+        )
+        raise RuntimeError(
+            'Week data spans multiple compatibility series '
+            f'({labels}); provide --source-schema-version explicitly'
+        )
+    if not series:
+        return SCHEMA_VERSION
+    major, minor = next(iter(series))
+    return f'{major}.{minor}.0'
+
+
+def _weekly_hero_source_rows(
+        db, course_id, week_num, source_schema_version):
+    _register_version_functions(db)
+    params = [course_id, week_num, source_schema_version]
+    presentation_ratings = _weekly_hero_query_dicts(
+        db,
+        '''SELECT id, session_key, week_num, question_key,
+                  presenting_team_id, presenting_team_name, question_id,
+                  question_title, q1_developed, q2_easy, data_version,
+                  created_at
+           FROM presentation_ratings
+           WHERE course_id = ? AND week_num = ?
+             AND popping_version_compatible(data_version, ?) = 1
+           ORDER BY id''',
+        params,
+    )
+    challenge_ratings = _weekly_hero_query_dicts(
+        db,
+        '''SELECT id, session_key, week_num, challenge_key,
+                  presentation_key, challenger_id, challenger_name,
+                  challenger_team_id, challenger_team_name, score,
+                  data_version, created_at
+           FROM challenge_ratings
+           WHERE course_id = ? AND week_num = ?
+             AND popping_version_compatible(data_version, ?) = 1
+           ORDER BY id''',
+        params,
+    )
+    participants = _weekly_hero_query_dicts(
+        db,
+        '''SELECT id, session_key, week_num, presentation_key, student_id,
+                  student_identifier, student_name, team_id, team_name,
+                  data_version, created_at
+           FROM presentation_participants
+           WHERE course_id = ? AND week_num = ?
+             AND popping_version_compatible(data_version, ?) = 1
+           ORDER BY id''',
+        params,
+    )
+
+    challenger_ids = sorted({
+        row['challenger_id'] for row in challenge_ratings
+        if row['challenger_id'] is not None
+    })
+    student_profiles = []
+    if challenger_ids:
+        placeholders = ','.join('?' * len(challenger_ids))
+        student_profiles = _weekly_hero_query_dicts(
+            db,
+            f'''SELECT id, student_id, name, display_name
+                FROM students
+                WHERE course_id = ? AND id IN ({placeholders})
+                ORDER BY id''',
+            [course_id] + challenger_ids,
+        )
+
+    rating_keys = {
+        row['question_key'] for row in presentation_ratings
+        if _weekly_hero_text(row['question_key'])
+    }
+    state = db.execute(
+        '''SELECT presentation_history FROM course_state
+           WHERE course_id = ?''',
+        [course_id],
+    ).fetchone()
+    raw_history = _row_value(state, 'presentation_history', 0) if state else None
+    if raw_history is None or not str(raw_history).strip():
+        parsed_history = []
+    else:
+        try:
+            parsed_history = json.loads(raw_history)
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError(
+                'Cannot calculate weekly results from malformed '
+                'presentation history'
+            ) from exc
+        if (not isinstance(parsed_history, list)
+                or any(not isinstance(item, dict)
+                       for item in parsed_history)):
+            raise RuntimeError(
+                'Cannot calculate weekly results from malformed '
+                'presentation history'
+            )
+
+    history = []
+    for item in parsed_history:
+        key = _weekly_hero_history_key(item)
+        if key not in rating_keys:
+            continue
+        try:
+            compatible = versions_compatible(
+                _weekly_hero_history_version(item), source_schema_version
+            )
+        except (TypeError, ValueError):
+            compatible = False
+        if compatible:
+            history.append(item)
+    history.sort(key=lambda item: (
+        _weekly_hero_history_key(item),
+        str(item.get('started_at') or ''),
+    ))
+
+    return {
+        'presentation_ratings': presentation_ratings,
+        'challenge_ratings': challenge_ratings,
+        'participants': participants,
+        'student_profiles': student_profiles,
+        'history': history,
+    }
+
+
+def _weekly_hero_score(value, label):
+    if type(value) is not int or not 1 <= value <= 5:
+        raise RuntimeError(
+            f'Cannot calculate weekly results: invalid {label} score'
+        )
+    return value
+
+
+def _weekly_hero_team_matches(participant, team_id, team_name):
+    participant_team_id = participant.get('team_id')
+    participant_team_name = _weekly_hero_text(participant.get('team_name'))
+    if team_id is not None:
+        if participant_team_id == team_id:
+            return True
+        return (
+            participant_team_id is None
+            and participant_team_name is not None
+            and participant_team_name.casefold() == team_name.casefold()
+        )
+    return (
+        participant_team_name is not None
+        and participant_team_name.casefold() == team_name.casefold()
+    )
+
+
+def _weekly_hero_competition_ranks(rows, name_field, id_field):
+    for row in rows:
+        row['_fraction'] = Fraction(row['score_sum'], row['score_count'])
+    rows.sort(key=lambda row: (
+        -row['_fraction'],
+        (row.get(name_field) or '').casefold(),
+        row.get(id_field) or 0,
+    ))
+    prior_fraction = None
+    rank = None
+    for position, row in enumerate(rows, 1):
+        if prior_fraction is None or row['_fraction'] != prior_fraction:
+            rank = position
+        row['rank'] = rank
+        row['average_score'] = round(float(row['_fraction']), 2)
+        prior_fraction = row['_fraction']
+        row.pop('_fraction')
+    return rows
+
+
+def _weekly_hero_team_results(source):
+    participant_identity = {}
+    for participant in source['participants']:
+        key = _weekly_hero_text(participant['presentation_key'])
+        if key is None or key in participant_identity:
+            continue
+        name = _weekly_hero_text(participant['team_name'])
+        if name is not None:
+            participant_identity[key] = {
+                'id': participant['team_id'], 'name': name,
+            }
+
+    history_identity = {}
+    for item in source['history']:
+        key = _weekly_hero_history_key(item)
+        name = _weekly_hero_text(item.get('team'))
+        if key and name is not None and key not in history_identity:
+            history_identity[key] = {
+                'id': item.get('team_id'), 'name': name,
+            }
+
+    grouped = {}
+    for rating in source['presentation_ratings']:
+        q1 = rating['q1_developed']
+        q2 = rating['q2_easy']
+        if q1 is None or q2 is None:
+            continue
+        q1 = _weekly_hero_score(q1, 'presentation-developed')
+        q2 = _weekly_hero_score(q2, 'presentation-easy')
+        presentation_key = _weekly_hero_text(rating['question_key'])
+        if presentation_key is None:
+            continue
+        fallback = (
+            participant_identity.get(presentation_key)
+            or history_identity.get(presentation_key)
+            or {}
+        )
+        team_id = (
+            rating['presenting_team_id']
+            if rating['presenting_team_id'] is not None
+            else fallback.get('id')
+        )
+        team_name = (
+            _weekly_hero_text(rating['presenting_team_name'])
+            or fallback.get('name')
+        )
+        if team_name is None:
+            continue
+        identity = (
+            f'team-id:{team_id}' if team_id is not None
+            else f'team-name:{team_name.casefold()}'
+        )
+        result = grouped.setdefault(identity, {
+            'result_key': identity,
+            'category': 'team',
+            'team_id': team_id,
+            'team_name': team_name,
+            'challenger_id': None,
+            'challenger_identifier': None,
+            'challenger_name': None,
+            'score_sum': 0,
+            'score_count': 0,
+            'rating_count': 0,
+            'developed_score_sum': 0,
+            'developed_score_count': 0,
+            'easy_score_sum': 0,
+            'easy_score_count': 0,
+            'presentation_keys': set(),
+        })
+        result['score_sum'] += q1 + q2
+        result['score_count'] += 2
+        result['rating_count'] += 1
+        result['developed_score_sum'] += q1
+        result['developed_score_count'] += 1
+        result['easy_score_sum'] += q2
+        result['easy_score_count'] += 1
+        result['presentation_keys'].add(presentation_key)
+
+    ranked = _weekly_hero_competition_ranks(
+        list(grouped.values()), 'team_name', 'team_id'
+    )
+    awards = []
+    missing_coverage = []
+    medal_by_rank = {1: 'gold', 2: 'silver', 3: 'bronze'}
+    participants_by_presentation = {}
+    for participant in source['participants']:
+        participants_by_presentation.setdefault(
+            participant['presentation_key'], []
+        ).append(participant)
+
+    for result in ranked:
+        if result['rank'] > 3:
+            continue
+        result['award_type'] = medal_by_rank[result['rank']]
+        recipients = {}
+        for presentation_key in sorted(result['presentation_keys']):
+            matching = [
+                participant
+                for participant in participants_by_presentation.get(
+                    presentation_key, []
+                )
+                if _weekly_hero_team_matches(
+                    participant, result['team_id'], result['team_name']
+                )
+            ]
+            if not matching:
+                missing_coverage.append({
+                    'result_key': result['result_key'],
+                    'team_id': result['team_id'],
+                    'team_name': result['team_name'],
+                    'presentation_key': presentation_key,
+                })
+                continue
+            for participant in matching:
+                student_identifier = _weekly_hero_text(
+                    participant['student_identifier']
+                )
+                recipient_key = (
+                    f'student-identifier:{student_identifier}'
+                    if student_identifier is not None
+                    else f"student-db:{participant['student_id']}"
+                )
+                recipients.setdefault(recipient_key, {
+                    'recipient_key': recipient_key,
+                    'student_id': participant['student_id'],
+                    'student_identifier': student_identifier,
+                    'student_name': (
+                        _weekly_hero_text(participant['student_name'])
+                        or student_identifier
+                    ),
+                    'team_id': participant['team_id'],
+                    'team_name': (
+                        _weekly_hero_text(participant['team_name'])
+                        or result['team_name']
+                    ),
+                })
+        result['recipients'] = sorted(
+            recipients.values(),
+            key=lambda recipient: (
+                recipient['student_identifier'] or '',
+                recipient['student_id'] or 0,
+            ),
+        )
+        result['presentation_keys'] = sorted(result['presentation_keys'])
+        awards.append(result)
+    return awards, missing_coverage
+
+
+def _weekly_hero_challenger_identity(rating, profiles):
+    challenger_id = rating['challenger_id']
+    profile = profiles.get(challenger_id) or {}
+    student_identifier = _weekly_hero_text(profile.get('student_id'))
+    challenger_name = (
+        _weekly_hero_text(rating['challenger_name'])
+        or _weekly_hero_text(profile.get('display_name'))
+        or _weekly_hero_text(profile.get('name'))
+        or student_identifier
+    )
+    return challenger_id, student_identifier, challenger_name
+
+
+def _weekly_hero_challenger_results(source):
+    profiles = {row['id']: row for row in source['student_profiles']}
+    grouped = {}
+    for rating in source['challenge_ratings']:
+        if rating['score'] is None:
+            continue
+        score_value = _weekly_hero_score(
+            rating['score'], 'challenger'
+        )
+        (
+            challenger_id,
+            student_identifier,
+            challenger_name,
+        ) = _weekly_hero_challenger_identity(
+            rating, profiles
+        )
+        if challenger_id is None or challenger_name is None:
+            continue
+        result_key = f'challenger-id:{challenger_id}'
+        result = grouped.setdefault(result_key, {
+            'result_key': result_key,
+            'category': 'challenger',
+            'team_id': None,
+            'team_name': None,
+            'challenger_id': challenger_id,
+            'challenger_identifier': student_identifier,
+            'challenger_name': challenger_name,
+            'score_sum': 0,
+            'score_count': 0,
+            'rating_count': 0,
+            'developed_score_sum': None,
+            'developed_score_count': None,
+            'easy_score_sum': None,
+            'easy_score_count': None,
+        })
+        result['score_sum'] += score_value
+        result['score_count'] += 1
+        result['rating_count'] += 1
+
+    ranked = _weekly_hero_competition_ranks(
+        list(grouped.values()), 'challenger_name', 'challenger_id'
+    )
+    awards = []
+    for result in ranked:
+        if result['rank'] != 1:
+            continue
+        result['award_type'] = 'bolt'
+        recipient_key = (
+            f"student-identifier:{result['challenger_identifier']}"
+            if result['challenger_identifier'] is not None
+            else f"student-db:{result['challenger_id']}"
+        )
+        result['recipients'] = [{
+            'recipient_key': recipient_key,
+            'student_id': result['challenger_id'],
+            'student_identifier': result['challenger_identifier'],
+            'student_name': result['challenger_name'],
+            'team_id': None,
+            'team_name': None,
+        }]
+        awards.append(result)
+    return awards
+
+
+def _weekly_hero_fingerprint_source(source, challenger_results):
+    """Return only source evidence that can affect a weekly summary.
+
+    Database row IDs, timestamps, and current profile names that are shadowed
+    by a recorded challenger name are storage details, not calculation
+    inputs. Query order is retained because it determines the historical
+    fallback selected when malformed legacy rows disagree on an identity.
+    """
+    return {
+        'presentation_ratings': [
+            {
+                'question_key': rating['question_key'],
+                'presenting_team_id': rating['presenting_team_id'],
+                'presenting_team_name': _weekly_hero_text(
+                    rating['presenting_team_name']
+                ),
+                'q1_developed': rating['q1_developed'],
+                'q2_easy': rating['q2_easy'],
+                'data_version': rating['data_version'],
+            }
+            for rating in source['presentation_ratings']
+        ],
+        'challenge_ratings': [
+            {
+                'challenge_key': rating['challenge_key'],
+                'presentation_key': rating['presentation_key'],
+                'challenger_id': rating['challenger_id'],
+                'challenger_name': _weekly_hero_text(
+                    rating['challenger_name']
+                ),
+                'score': rating['score'],
+                'data_version': rating['data_version'],
+            }
+            for rating in source['challenge_ratings']
+        ],
+        'awarded_challenger_identities': [
+            {
+                'challenger_id': result['challenger_id'],
+                'challenger_identifier': result['challenger_identifier'],
+                'challenger_name': result['challenger_name'],
+            }
+            for result in challenger_results
+        ],
+        'participants': [
+            {
+                'presentation_key': participant['presentation_key'],
+                'student_id': participant['student_id'],
+                'student_identifier': _weekly_hero_text(
+                    participant['student_identifier']
+                ),
+                'student_name': _weekly_hero_text(
+                    participant['student_name']
+                ),
+                'team_id': participant['team_id'],
+                'team_name': _weekly_hero_text(participant['team_name']),
+                'data_version': participant['data_version'],
+            }
+            for participant in source['participants']
+        ],
+        'history': [
+            {
+                'presentation_key': _weekly_hero_history_key(item),
+                'team_id': item.get('team_id'),
+                'team_name': _weekly_hero_text(item.get('team')),
+                'data_version': _weekly_hero_history_version(item),
+            }
+            for item in source['history']
+        ],
+    }
+
+
+def calculate_weekly_hero_preview(
+        db, course_id, week_num, source_schema_version=SCHEMA_VERSION):
+    """Calculate one read-only, deterministic weekly award preview."""
+    week_num = _weekly_hero_week(week_num)
+    source_schema_version = _weekly_hero_source_schema_version(
+        source_schema_version
+    )
+    source = _weekly_hero_source_rows(
+        db, course_id, week_num, source_schema_version
+    )
+    team_results, missing_coverage = _weekly_hero_team_results(source)
+    challenger_results = _weekly_hero_challenger_results(source)
+    fingerprint_payload = {
+        'calculation_version': WEEKLY_HERO_CALCULATION_VERSION,
+        'course_id': course_id,
+        'week_num': week_num,
+        'source_schema_version': source_schema_version,
+        'source': _weekly_hero_fingerprint_source(
+            source, challenger_results
+        ),
+    }
+    fingerprint_json = json.dumps(
+        fingerprint_payload,
+        ensure_ascii=False,
+        separators=(',', ':'),
+        sort_keys=True,
+        default=str,
+    )
+    source_fingerprint = hashlib.sha256(
+        fingerprint_json.encode('utf-8')
+    ).hexdigest()
+
+    source_versions = {
+        row['data_version']
+        for group in (
+            source['presentation_ratings'], source['challenge_ratings'],
+            source['participants']
+        )
+        for row in group
+    }
+    source_versions.update(
+        _weekly_hero_history_version(item) for item in source['history']
+    )
+    source_versions = sorted(
+        source_versions, key=_weekly_hero_version_sort_key
+    )
+    return {
+        'course_id': course_id,
+        'week_num': week_num,
+        'calculation_version': WEEKLY_HERO_CALCULATION_VERSION,
+        'source_schema_version': source_schema_version,
+        'source_data_versions': source_versions,
+        'source_fingerprint': source_fingerprint,
+        'source_presentation_rating_count': len(
+            source['presentation_ratings']
+        ),
+        'source_challenge_rating_count': len(source['challenge_ratings']),
+        'source_participant_count': len(source['participants']),
+        'source_history_item_count': len(source['history']),
+        'results': team_results + challenger_results,
+        'missing_participant_presentations': missing_coverage,
+        'recipient_coverage_complete': not missing_coverage,
+    }
+
+
+def save_weekly_hero_summary(db, preview, replace=False):
+    """Persist a verified preview without changing any source activity rows.
+
+    The caller owns the transaction.  Source rows are recalculated inside
+    that transaction, making the preview fingerprint a stale-write guard.
+    Existing identical summaries are an idempotent no-op.
+    """
+    if not isinstance(preview, dict):
+        raise ValueError('Weekly result preview must be a mapping')
+    course_id = preview.get('course_id')
+    week_num = _weekly_hero_week(preview.get('week_num'))
+    source_schema_version = _weekly_hero_source_schema_version(
+        preview.get('source_schema_version')
+    )
+    expected_fingerprint = preview.get('source_fingerprint')
+    if (not isinstance(expected_fingerprint, str)
+            or not re.fullmatch(r'[0-9a-f]{64}', expected_fingerprint)):
+        raise ValueError('Weekly result preview has an invalid fingerprint')
+    if inspect_schema_version(db, allow_unversioned=False) != SCHEMA_VERSION:
+        raise RuntimeError(SCHEMA_MIGRATION_REQUIRED_ERROR)
+    foreign_keys = db.execute('PRAGMA foreign_keys').fetchone()
+    if not foreign_keys or not _row_value(foreign_keys, 'foreign_keys', 0):
+        raise RuntimeError(
+            'Weekly result persistence requires SQLite foreign keys'
+        )
+
+    current = calculate_weekly_hero_preview(
+        db,
+        course_id,
+        week_num,
+        source_schema_version=source_schema_version,
+    )
+    if current['source_fingerprint'] != expected_fingerprint:
+        raise RuntimeError(
+            'Weekly result source data changed after preview; preview again'
+        )
+    if not current['recipient_coverage_complete']:
+        missing = ', '.join(
+            item['presentation_key']
+            for item in current['missing_participant_presentations']
+        )
+        raise RuntimeError(
+            'Cannot save weekly results because awarded presentation(s) '
+            f'lack participant snapshots: {missing}'
+        )
+
+    existing = db.execute(
+        '''SELECT id, calculation_version, source_fingerprint
+           FROM weekly_hero_summaries
+           WHERE course_id = ? AND week_num = ?''',
+        [course_id, week_num],
+    ).fetchone()
+    if existing:
+        existing_id = _row_value(existing, 'id', 0)
+        existing_calculation = _row_value(
+            existing, 'calculation_version', 1
+        )
+        existing_fingerprint = _row_value(
+            existing, 'source_fingerprint', 2
+        )
+        if (existing_calculation == current['calculation_version']
+                and existing_fingerprint == current['source_fingerprint']):
+            return {
+                'status': 'unchanged',
+                'summary_id': existing_id,
+                'preview': current,
+            }
+        if not replace:
+            raise RuntimeError(
+                'A different weekly result summary already exists; preview '
+                'the new calculation and explicitly allow replacement'
+            )
+        db.execute(
+            'DELETE FROM weekly_hero_summaries WHERE id = ?', [existing_id]
+        )
+        status = 'replaced'
+    else:
+        status = 'created'
+
+    summary_id = db.execute(
+        '''INSERT INTO weekly_hero_summaries
+           (course_id, week_num, calculation_version,
+            source_schema_version, source_data_versions,
+            source_fingerprint, source_presentation_rating_count,
+            source_challenge_rating_count, source_participant_count,
+            source_history_item_count, data_version)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+        [
+            course_id,
+            week_num,
+            current['calculation_version'],
+            current['source_schema_version'],
+            json.dumps(
+                current['source_data_versions'],
+                ensure_ascii=False,
+                separators=(',', ':'),
+            ),
+            current['source_fingerprint'],
+            current['source_presentation_rating_count'],
+            current['source_challenge_rating_count'],
+            current['source_participant_count'],
+            current['source_history_item_count'],
+            APP_VERSION,
+        ],
+    ).lastrowid
+
+    for result in current['results']:
+        result_id = db.execute(
+            '''INSERT INTO weekly_hero_results
+               (summary_id, result_key, category, award_type, rank,
+                score_sum, score_count, rating_count,
+                developed_score_sum, developed_score_count,
+                easy_score_sum, easy_score_count, team_id, team_name,
+                challenger_id, challenger_identifier, challenger_name)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+            [
+                summary_id,
+                result['result_key'],
+                result['category'],
+                result['award_type'],
+                result['rank'],
+                result['score_sum'],
+                result['score_count'],
+                result['rating_count'],
+                result['developed_score_sum'],
+                result['developed_score_count'],
+                result['easy_score_sum'],
+                result['easy_score_count'],
+                result['team_id'],
+                result['team_name'],
+                result['challenger_id'],
+                result['challenger_identifier'],
+                result['challenger_name'],
+            ],
+        ).lastrowid
+        for recipient in result['recipients']:
+            db.execute(
+                '''INSERT INTO weekly_hero_recipients
+                   (result_id, recipient_key, student_id,
+                    student_identifier, student_name, team_id, team_name)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)''',
+                [
+                    result_id,
+                    recipient['recipient_key'],
+                    recipient['student_id'],
+                    recipient['student_identifier'],
+                    recipient['student_name'],
+                    recipient['team_id'],
+                    recipient['team_name'],
+                ],
+            )
+
+    return {
+        'status': status,
+        'summary_id': summary_id,
+        'preview': current,
+    }
+
+
+def get_weekly_hero_badge_counts(
+        db, course_id, before_week=None, student_ids=None):
+    """Return owned badge counts keyed by current internal student ID."""
+    target_ids = []
+    if student_ids is not None:
+        for student_id in student_ids:
+            if student_id is None:
+                continue
+            try:
+                target_ids.append(int(student_id))
+            except (TypeError, ValueError):
+                continue
+        target_ids = list(dict.fromkeys(target_ids))
+        if not target_ids:
+            return {}
+
+    _register_version_functions(db)
+    where = [
+        'summary.course_id = ?',
+        'recipient.student_id IS NOT NULL',
+        'popping_version_compatible(summary.data_version, ?) = 1',
+    ]
+    params = [course_id, SCHEMA_VERSION]
+    if before_week is not None:
+        before_week = _weekly_hero_week(before_week)
+        where.append('summary.week_num < ?')
+        params.append(before_week)
+    if target_ids:
+        placeholders = ','.join('?' * len(target_ids))
+        where.append(f'recipient.student_id IN ({placeholders})')
+        params.extend(target_ids)
+
+    rows = _weekly_hero_query_dicts(
+        db,
+        f'''SELECT recipient.student_id, result.award_type,
+                   COUNT(*) AS badge_count
+            FROM weekly_hero_summaries summary
+            JOIN weekly_hero_results result
+              ON result.summary_id = summary.id
+            JOIN weekly_hero_recipients recipient
+              ON recipient.result_id = result.id
+            WHERE {' AND '.join(where)}
+            GROUP BY recipient.student_id, result.award_type
+            ORDER BY recipient.student_id, result.award_type''',
+        params,
+    )
+    badges = {}
+    for row in rows:
+        count = int(row['badge_count'] or 0)
+        award_type = row['award_type']
+        if count > 0 and award_type in ('gold', 'silver', 'bronze', 'bolt'):
+            badges.setdefault(row['student_id'], {})[award_type] = count
+    return badges
+
+
+def get_weekly_hero_rows(db, course_id, week_num):
+    """Return one flat export row per saved weekly award recipient."""
+    week_num = _weekly_hero_week(week_num)
+    _register_version_functions(db)
+    rows = _weekly_hero_query_dicts(
+        db,
+        '''SELECT summary.week_num, summary.calculation_version,
+                  summary.source_schema_version,
+                  summary.source_data_versions,
+                  summary.source_fingerprint, summary.data_version,
+                  summary.calculated_at, result.category,
+                  result.award_type, result.rank, result.score_sum,
+                  result.score_count, result.rating_count,
+                  result.developed_score_sum,
+                  result.developed_score_count, result.easy_score_sum,
+                  result.easy_score_count, result.team_id,
+                  result.team_name, result.challenger_id,
+                  result.challenger_identifier, result.challenger_name,
+                  recipient.student_id, recipient.student_identifier,
+                  recipient.student_name, recipient.team_id
+                      AS recipient_team_id,
+                  recipient.team_name AS recipient_team_name
+           FROM weekly_hero_summaries summary
+           JOIN weekly_hero_results result ON result.summary_id = summary.id
+           JOIN weekly_hero_recipients recipient
+             ON recipient.result_id = result.id
+           WHERE summary.course_id = ? AND summary.week_num = ?
+             AND popping_version_compatible(summary.data_version, ?) = 1
+           ORDER BY CASE result.category WHEN 'team' THEN 0 ELSE 1 END,
+                    result.rank, COALESCE(result.team_name,
+                                          result.challenger_name),
+                    COALESCE(recipient.student_identifier, ''),
+                    recipient.student_id''',
+        [course_id, week_num, SCHEMA_VERSION],
+    )
+    for row in rows:
+        row['average_score'] = round(
+            row['score_sum'] / row['score_count'], 2
+        )
+        try:
+            row['source_data_versions'] = json.loads(
+                row['source_data_versions']
+            )
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError(
+                'Saved weekly result has malformed source-version metadata'
+            ) from exc
+    return rows
 
 
 def get_max_teams(slug, course_id):

@@ -37,11 +37,12 @@ older compatibility lines remain available through **Download Legacy Data**.
 See [VERSIONING.md](VERSIONING.md) for the policy and [CHANGELOG.md](CHANGELOG.md)
 for the release history.
 
-`v1.1.0` added durable participation events. `v1.2.0` adds a separate student
-display name while preserving the instructor-uploaded roster name. Each schema
-update requires an explicit offline migration or a course reset. Do not start
-`v1.2.x` web workers against a course database older than `v1.2.0` until that
-operation has succeeded.
+`v1.1.0` added durable participation events. `v1.2.0` added a separate student
+display name while preserving the instructor-uploaded roster name. `v1.3.0`
+adds normalized Weekly Hero summaries and award recipients. Each schema update
+requires an explicit offline migration or a course reset. Website releases
+`v1.3.x` require database schema `v1.3.0`; do not start those web workers against
+an older course database until its migration has succeeded.
 
 ## Quick Start (Local)
 
@@ -279,41 +280,75 @@ The reset will:
 - Atomically replace `popping.db` only after the candidate and backup pass validation
 - Keep the same course name, code, semester, and team structure from `course.yaml`
 
-### Upgrade an Existing Course Database to v1.2.0
+### Upgrade an Existing Course Database to v1.3.0
 
 This is an offline operation for each affected course. Complete it between
-classes.
+classes. If the database contains a completed Week 1 that must be preserved,
+confirm that its session is in **Ended** before taking the course offline. Do
+not use **Reset Course Data** or `init-db.sh` for this upgrade because a reset
+removes the Week 1 source records needed for the Weekly Hero backfill.
 
 For a local deployment, end any active session, stop every Flask or Gunicorn
 worker, run the command below, and type `SERVICE STOPPED`.
 
 For Render:
 
-1. In the old code, change every course that needs migration to `active: false`
-   and deploy. Confirm those courses disappear from the landing page.
-2. Deploy the new code while those courses remain inactive. This keeps the
+1. While the old code is live, verify that each completed session to preserve
+   is in **Ended**. If the application instead shows Setup with saved activity,
+   stop and investigate rather than resetting or forcing the migration.
+2. Change every course that needs migration to `active: false` and deploy.
+   Confirm those courses disappear from the landing page.
+3. Deploy the new code while those courses remain inactive. This keeps the
    schema health check from blocking the deployment before migration.
-3. Open Render Shell and run, for each course:
+4. Open Render Shell and run, for each course:
 
    ```bash
    python3 scripts/migrate-course-db.py 432fall2026
    ```
 
-4. Type the course slug, then type `COURSE OFFLINE`. The script verifies that
+5. Type the course slug, then type `COURSE OFFLINE`. The script verifies that
    the deployed course configuration is inactive.
-5. After every required migration succeeds, reactivate the courses in GitHub
-   and deploy again.
+6. Preview and apply the Weekly Hero backfill as described below.
+7. After every required migration and backfill succeeds, reactivate the courses
+   in GitHub and deploy again.
 
 The command validates the course database, creates a verified snapshot under
 `data/{slug}/migration-backups/`, and applies every required schema change in
-one transaction. A `v1.0.x` database is upgraded through both migration steps.
+one transaction. A `v1.0.x` database is upgraded through all migration steps.
 The `v1.1.0` migration deliberately does not infer participation from older
 ratings. The `v1.2.0` migration adds a nullable `students.display_name` column.
+The `v1.3.0` migration adds normalized weekly result summaries and award
+recipients without rewriting ratings or participation records.
 
-Website releases `v1.2.x` use database schema and export format `v1.2.0`.
-Records written by `v1.0.x` or `v1.1.x` remain available through
+Website releases `v1.3.x` use database schema and export format `v1.3.0`.
+Records written by an older compatibility line remain available through
 **Download Legacy Data** after the upgrade. A full course reset starts with an
 empty current-version database instead.
+
+After migration, preview and save a Weekly Hero summary for each completed
+older week. For example, these commands reconstruct Week 1 from its preserved
+source rows, then save only the derived summary:
+
+```bash
+python3 scripts/backfill-weekly-heroes.py 432fall2026 1
+python3 scripts/backfill-weekly-heroes.py 432fall2026 1 --apply
+```
+
+The first command is read-only. Review its exact scores, recipients, source
+versions, fingerprint, and participant-coverage result before running
+`--apply`. Apply only when participant coverage is complete and the calculated
+team rankings and challenger recipients are plausible for that week. Apply
+requires the course slug and the same `COURSE OFFLINE` or `SERVICE STOPPED`
+confirmation used by other database maintenance commands. It is idempotent
+when the saved fingerprint already matches. Use `--apply --replace` only after
+reviewing a changed preview. The command never updates or deletes the source
+ratings, challenges, participants, roster, or teams. It writes the weekly
+summary and increments the roster refresh version.
+
+Stop without applying, reinitializing, or resetting if migration or preview
+reports a schema or activity-state error, mixed source versions, incomplete
+participant coverage, an integrity failure, or results you cannot reconcile.
+Resolve the cause first so the preserved Week 1 records remain available.
 
 Normal web traffic and `/healthz` only validate an exact current schema. They
 never migrate or repair a persistent course database.
@@ -507,6 +542,8 @@ to that running instance. Instead:
    ```bash
    python scripts/restore-course-db.py 432fall2026 /path/to/backup.db
    python scripts/migrate-course-db.py 432fall2026
+   python scripts/backfill-weekly-heroes.py 432fall2026 1
+   python scripts/backfill-weekly-heroes.py 432fall2026 1 --apply
    ```
 
 4. Type `COURSE OFFLINE`. The script checks the deployed inactive setting.

@@ -1068,6 +1068,152 @@ def test_leaving_ended_starts_exactly_one_new_session(course_env):
     assert _state_row(course_env)["session_key"] == SESSION_KEY + 1
 
 
+def test_new_session_clears_prior_rejoin_markers_but_preserves_roster_history(
+        course_env):
+    _seed_response_history(course_env, session_key=SESSION_KEY)
+    history = json.dumps([{
+        "data_version": app_module.APP_VERSION,
+        "presentation_key": "presentation-1",
+        "session_key": SESSION_KEY,
+        "week_num": 1,
+        "team_id": course_env["teams"]["Team 2"],
+        "team": "Team 2",
+    }])
+    _set_state(course_env, phase="ended", presentation_history=history)
+    with _connect(course_env) as db:
+        db.execute(
+            """UPDATE students
+               SET last_team_id = CASE
+                   WHEN student_id IN ('s1', 's2') THEN ?
+                   WHEN student_id = 's3' THEN ?
+                   WHEN student_id = 's4' THEN ?
+               END
+               WHERE course_id = ?""",
+            (
+                course_env["teams"]["Team 1"],
+                course_env["teams"]["Team 3"],
+                course_env["teams"]["Team 2"],
+                course_env["course_id"],
+            ),
+        )
+        roster_before = {
+            row["student_id"]: row["team_id"]
+            for row in db.execute(
+                """SELECT student_id, team_id FROM students
+                   WHERE course_id = ? ORDER BY student_id""",
+                (course_env["course_id"],),
+            )
+        }
+        db.commit()
+    history_before = _history_counts(course_env)
+
+    response = _instructor_client(course_env).post(
+        "/api/set_phase",
+        json={
+            "phase": "setup",
+            "expected_phase": "ended",
+            "expected_session_key": SESSION_KEY,
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.get_json()["session_key"] == SESSION_KEY + 1
+    with _connect(course_env) as db:
+        students = {
+            row["student_id"]: (row["team_id"], row["last_team_id"])
+            for row in db.execute(
+                """SELECT student_id, team_id, last_team_id FROM students
+                   WHERE course_id = ? ORDER BY student_id""",
+                (course_env["course_id"],),
+            )
+        }
+    assert students == {
+        student_id: (team_id, team_id if team_id is not None else None)
+        for student_id, team_id in roster_before.items()
+    }
+    assert _history_counts(course_env) == history_before
+    state = _state_row(course_env)
+    assert state["phase"] == "setup"
+    assert state["session_key"] == SESSION_KEY + 1
+    assert state["presentation_history"] == history
+
+
+def test_new_setup_team_replaces_the_previous_session_recovery_target(
+        course_env):
+    _seed_response_history(course_env, session_key=SESSION_KEY)
+    _set_state(course_env, phase="ended")
+    with _connect(course_env) as db:
+        db.execute(
+            "UPDATE students SET last_team_id = ? WHERE student_id = 's1'",
+            (course_env["teams"]["Team 1"],),
+        )
+        db.commit()
+    instructor = _instructor_client(course_env)
+    new_session = instructor.post(
+        "/api/set_phase",
+        json={
+            "phase": "setup",
+            "expected_phase": "ended",
+            "expected_session_key": SESSION_KEY,
+        },
+    )
+    assert new_session.status_code == 200
+    assert new_session.get_json()["session_key"] == SESSION_KEY + 1
+    history_before = _history_counts(course_env)
+    baseline_roster_version = _state_row(course_env)["roster_version"]
+
+    student = _student_client(course_env, "s1")
+    new_team = student.post(
+        "/api/join_team",
+        json={"team_id": course_env["teams"]["Team 2"]},
+    )
+    assert new_team.status_code == 200
+    assert new_team.get_json()["roster_version"] == baseline_roster_version + 1
+    with _connect(course_env) as db:
+        joined = db.execute(
+            "SELECT team_id, last_team_id FROM students WHERE student_id = 's1'"
+        ).fetchone()
+        db.execute(
+            "UPDATE students SET team_id = NULL WHERE student_id = 's1'"
+        )
+        db.execute(
+            """UPDATE course_state SET phase = 'competition', teams_locked = 0
+               WHERE course_id = ?""",
+            (course_env["course_id"],),
+        )
+        db.commit()
+    assert dict(joined) == {
+        "team_id": course_env["teams"]["Team 2"],
+        "last_team_id": course_env["teams"]["Team 2"],
+    }
+
+    old_team = student.post(
+        "/api/join_team",
+        json={"team_id": course_env["teams"]["Team 1"]},
+    )
+    assert old_team.status_code == 403
+    assert old_team.get_json()["error"] == (
+        "During a live session, you can only rejoin the team you joined "
+        "for this session"
+    )
+    recovered = student.post(
+        "/api/join_team",
+        json={"team_id": course_env["teams"]["Team 2"]},
+    )
+    assert recovered.status_code == 200
+    assert recovered.get_json()["roster_version"] == baseline_roster_version + 2
+    with _connect(course_env) as db:
+        restored = db.execute(
+            "SELECT team_id, last_team_id FROM students WHERE student_id = 's1'"
+        ).fetchone()
+    assert dict(restored) == {
+        "team_id": course_env["teams"]["Team 2"],
+        "last_team_id": course_env["teams"]["Team 2"],
+    }
+    assert _state_row(course_env)["session_key"] == SESSION_KEY + 1
+    assert _history_counts(course_env) == history_before
+
+
 def test_removed_student_included_in_roster_merge_restores_same_identity_and_history(
         course_env):
     # Historical responses from an earlier session must not prevent roster
@@ -7171,6 +7317,426 @@ def _seed_current_session_thumb(env):
         db.commit()
 
 
+def _set_live_team_recovery_state(
+        env, *, student_id="s1", previous_team="Team 1",
+        phase="competition", locked=False):
+    """Simulate an assigned student unexpectedly losing live membership."""
+    with _connect(env) as db:
+        db.execute(
+            """UPDATE students
+               SET last_team_id = ?, team_id = NULL
+               WHERE course_id = ? AND student_id = ?""",
+            (env["teams"][previous_team], env["course_id"], student_id),
+        )
+        db.execute(
+            """UPDATE course_state SET phase = ?, teams_locked = ?
+               WHERE course_id = ?""",
+            (phase, int(locked), env["course_id"]),
+        )
+        db.commit()
+
+
+def test_unlocked_live_student_recovers_exact_previous_team_after_rating(
+        course_env):
+    now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S.%f")
+    _activate_presentation(
+        course_env,
+        poll_active=1,
+        poll_started_at=now,
+    )
+    rating = _student_client(course_env, "s4").post(
+        "/api/submit_rating",
+        json={
+            "presentation_key": "pres-current",
+            "q1_developed": 4,
+            "q2_easy": 5,
+        },
+    )
+    assert rating.status_code == 200
+
+    _set_live_team_recovery_state(course_env)
+    before = _state_row(course_env)
+    with _connect(course_env) as db:
+        rating_before = dict(db.execute(
+            """SELECT id, student_id, question_key, session_key,
+                      presenting_team_id, rater_team_id, q1_developed, q2_easy
+               FROM presentation_ratings"""
+        ).fetchone())
+
+    student = _student_client(course_env, "s1")
+    recovered = student.post(
+        "/api/join_team",
+        json={"team_id": course_env["teams"]["Team 1"]},
+    )
+
+    assert recovered.status_code == 200
+    assert recovered.get_json() == {"success": True, "roster_version": 1}
+    repeated = student.post(
+        "/api/join_team",
+        json={"team_id": course_env["teams"]["Team 1"]},
+    )
+    assert repeated.status_code == 200
+    assert repeated.get_json() == {"success": True, "roster_version": 1}
+
+    own_rating = student.post(
+        "/api/submit_rating",
+        json={
+            "presentation_key": "pres-current",
+            "q1_developed": 5,
+            "q2_easy": 5,
+        },
+    )
+    assert own_rating.status_code == 403
+    assert own_rating.get_json()["error"] == (
+        "You cannot rate your own presentation"
+    )
+
+    after = _state_row(course_env)
+    with _connect(course_env) as db:
+        restored = db.execute(
+            """SELECT team_id, last_team_id FROM students
+               WHERE course_id = ? AND student_id = 's1'""",
+            (course_env["course_id"],),
+        ).fetchone()
+        rating_after = dict(db.execute(
+            """SELECT id, student_id, question_key, session_key,
+                      presenting_team_id, rater_team_id, q1_developed, q2_easy
+               FROM presentation_ratings"""
+        ).fetchone())
+        rating_count = db.execute(
+            "SELECT COUNT(*) FROM presentation_ratings"
+        ).fetchone()[0]
+
+    assert dict(restored) == {
+        "team_id": course_env["teams"]["Team 1"],
+        "last_team_id": course_env["teams"]["Team 1"],
+    }
+    assert rating_after == rating_before
+    assert rating_count == 1
+    assert after["session_key"] == before["session_key"] == SESSION_KEY
+    assert after["phase"] == before["phase"] == "competition"
+    assert after["poll_question_key"] == before["poll_question_key"]
+    assert after["poll_active"] == before["poll_active"] == 1
+    assert after["roster_version"] == before["roster_version"] + 1
+
+
+def test_unlocked_discussion_student_recovers_previous_team_after_thumb(
+        course_env):
+    _seed_current_session_thumb(course_env)
+    _set_live_team_recovery_state(course_env, phase="discussion")
+    before = _state_row(course_env)
+
+    response = _student_client(course_env, "s1").post(
+        "/api/join_team",
+        json={"team_id": course_env["teams"]["Team 1"]},
+    )
+
+    assert response.status_code == 200
+    assert response.get_json() == {"success": True, "roster_version": 1}
+    after = _state_row(course_env)
+    with _connect(course_env) as db:
+        student = db.execute(
+            "SELECT team_id, last_team_id FROM students WHERE student_id = 's1'"
+        ).fetchone()
+        thumb_count = db.execute(
+            "SELECT COUNT(*) FROM teammate_thumbs"
+        ).fetchone()[0]
+    assert dict(student) == {
+        "team_id": course_env["teams"]["Team 1"],
+        "last_team_id": course_env["teams"]["Team 1"],
+    }
+    assert thumb_count == 1
+    assert after["phase"] == before["phase"] == "discussion"
+    assert after["session_key"] == before["session_key"] == SESSION_KEY
+    assert after["roster_version"] == before["roster_version"] + 1
+
+
+def test_live_previous_team_recovery_respects_team_lock(course_env):
+    _set_live_team_recovery_state(course_env, locked=True)
+
+    response = _student_client(course_env, "s1").post(
+        "/api/join_team",
+        json={"team_id": course_env["teams"]["Team 1"]},
+    )
+
+    assert response.status_code == 403
+    assert response.get_json()["error"] == (
+        "Teams are currently locked by the instructor"
+    )
+    with _connect(course_env) as db:
+        student = db.execute(
+            "SELECT team_id, last_team_id FROM students WHERE student_id = 's1'"
+        ).fetchone()
+    assert dict(student) == {
+        "team_id": None,
+        "last_team_id": course_env["teams"]["Team 1"],
+    }
+    assert _state_row(course_env)["roster_version"] == 0
+
+
+def test_live_student_cannot_recover_to_a_different_team(course_env):
+    _set_live_team_recovery_state(course_env)
+
+    response = _student_client(course_env, "s1").post(
+        "/api/join_team",
+        json={"team_id": course_env["teams"]["Team 2"]},
+    )
+
+    assert response.status_code == 403
+    assert response.get_json()["error"] == (
+        "During a live session, you can only rejoin the team you joined "
+        "for this session"
+    )
+    with _connect(course_env) as db:
+        student = db.execute(
+            "SELECT team_id, last_team_id FROM students WHERE student_id = 's1'"
+        ).fetchone()
+    assert dict(student) == {
+        "team_id": None,
+        "last_team_id": course_env["teams"]["Team 1"],
+    }
+    assert _state_row(course_env)["roster_version"] == 0
+
+
+def test_unassigned_live_student_without_previous_team_cannot_join(course_env):
+    _set_state(course_env, phase="competition")
+
+    response = _student_client(course_env, "s3").post(
+        "/api/join_team",
+        json={"team_id": course_env["teams"]["Team 2"]},
+    )
+
+    assert response.status_code == 403
+    assert response.get_json()["error"] == (
+        "During a live session, you can only rejoin the team you joined "
+        "for this session"
+    )
+    with _connect(course_env) as db:
+        student = db.execute(
+            "SELECT team_id, last_team_id FROM students WHERE student_id = 's3'"
+        ).fetchone()
+    assert dict(student) == {"team_id": None, "last_team_id": None}
+    assert _state_row(course_env)["roster_version"] == 0
+
+
+@pytest.mark.parametrize("team_id", (0, "Team 2"))
+def test_assigned_student_cannot_leave_or_switch_during_live_session(
+        course_env, team_id):
+    _set_state(course_env, phase="competition")
+    requested_team = (
+        course_env["teams"][team_id] if isinstance(team_id, str) else team_id
+    )
+
+    response = _student_client(course_env, "s1").post(
+        "/api/join_team", json={"team_id": requested_team}
+    )
+
+    assert response.status_code == 403
+    assert response.get_json()["error"] == (
+        "During a live session, you can only rejoin the team you joined "
+        "for this session"
+    )
+    with _connect(course_env) as db:
+        student = db.execute(
+            "SELECT team_id FROM students WHERE student_id = 's1'"
+        ).fetchone()
+    assert student["team_id"] == course_env["teams"]["Team 1"]
+    assert _state_row(course_env)["roster_version"] == 0
+
+
+def test_live_previous_team_recovery_still_rejects_a_full_team(course_env):
+    _set_live_team_recovery_state(course_env)
+    with _connect(course_env) as db:
+        db.execute(
+            "UPDATE students SET team_id = ? WHERE student_id = 's3'",
+            (course_env["teams"]["Team 1"],),
+        )
+        db.execute("UPDATE course_state SET max_members_per_team = 2")
+        db.commit()
+
+    response = _student_client(course_env, "s1").post(
+        "/api/join_team",
+        json={"team_id": course_env["teams"]["Team 1"]},
+    )
+
+    assert response.status_code == 409
+    assert response.get_json()["error"] == "That team is full"
+    assert _state_row(course_env)["roster_version"] == 0
+
+
+def test_live_previous_team_recovery_still_rejects_a_hidden_team(course_env):
+    _set_live_team_recovery_state(course_env, previous_team="Team 4")
+    with _connect(course_env) as db:
+        db.execute("UPDATE course_state SET max_teams = 3")
+        db.commit()
+
+    response = _student_client(course_env, "s1").post(
+        "/api/join_team",
+        json={"team_id": course_env["teams"]["Team 4"]},
+    )
+
+    assert response.status_code == 400
+    assert response.get_json()["error"] == "Team is not available"
+    assert _state_row(course_env)["roster_version"] == 0
+
+
+@pytest.mark.parametrize("phase", ("discussion", "competition"))
+def test_team_lock_can_toggle_during_live_phases(course_env, phase):
+    _set_state(course_env, phase=phase)
+    with _connect(course_env) as db:
+        db.execute("UPDATE course_state SET teams_locked = 1")
+        db.commit()
+    client = _instructor_client(course_env)
+
+    unlocked = client.post(
+        "/api/toggle_lock_teams",
+        json={
+            "locked": False,
+            "expected_phase": phase,
+            "expected_session_key": SESSION_KEY,
+        },
+    )
+    assert unlocked.status_code == 200
+    assert unlocked.get_json() == {"success": True, "locked": False}
+
+    locked = client.post(
+        "/api/toggle_lock_teams",
+        json={
+            "locked": True,
+            "expected_phase": phase,
+            "expected_session_key": SESSION_KEY,
+        },
+    )
+    assert locked.status_code == 200
+    assert locked.get_json() == {"success": True, "locked": True}
+    state = _state_row(course_env)
+    assert state["phase"] == phase
+    assert state["session_key"] == SESSION_KEY
+    assert state["teams_locked"] == 1
+
+
+def test_live_team_lock_toggle_rejects_a_stale_instructor_page(course_env):
+    _set_state(course_env, phase="competition")
+    with _connect(course_env) as db:
+        db.execute("UPDATE course_state SET teams_locked = 1")
+        db.commit()
+
+    response = _instructor_client(course_env).post(
+        "/api/toggle_lock_teams",
+        json={
+            "locked": False,
+            "expected_phase": "discussion",
+            "expected_session_key": SESSION_KEY,
+        },
+    )
+
+    assert response.status_code == 409
+    assert response.get_json()["error"] == (
+        "This instructor page is stale; reload before changing the course state"
+    )
+    state = _state_row(course_env)
+    assert state["phase"] == "competition"
+    assert state["session_key"] == SESSION_KEY
+    assert state["teams_locked"] == 1
+
+
+def test_team_lock_toggle_is_unavailable_after_end_session(course_env):
+    _set_state(course_env, phase="ended")
+    with _connect(course_env) as db:
+        db.execute("UPDATE course_state SET teams_locked = 1")
+        db.commit()
+
+    response = _instructor_client(course_env).post(
+        "/api/toggle_lock_teams",
+        json={
+            "locked": False,
+            "expected_phase": "ended",
+            "expected_session_key": SESSION_KEY,
+        },
+    )
+
+    assert response.status_code == 409
+    assert response.get_json()["error"] == (
+        "Team locking is unavailable after End Session"
+    )
+    state = _state_row(course_env)
+    assert state["phase"] == "ended"
+    assert state["session_key"] == SESSION_KEY
+    assert state["teams_locked"] == 1
+
+
+@pytest.mark.parametrize("phase", ("discussion", "competition"))
+def test_live_instructor_page_shows_team_lock_control_only(course_env, phase):
+    _set_state(course_env, phase=phase)
+    with _connect(course_env) as db:
+        db.execute("UPDATE course_state SET teams_locked = 1")
+        db.commit()
+
+    html = _instructor_client(course_env).get(
+        f"/instructor/{course_env['slug']}"
+    ).get_data(as_text=True)
+
+    assert 'id="btn-toggle-lock"' in html
+    assert "Unlock Teams" in html
+    assert "Clear All Teams" not in html
+
+
+@pytest.mark.parametrize("phase", ("discussion", "competition"))
+def test_unassigned_live_student_sees_only_previous_team_recovery(
+        course_env, phase):
+    _set_live_team_recovery_state(course_env, phase=phase)
+
+    html = _student_client(course_env, "s1").get(
+        "/dashboard"
+    ).get_data(as_text=True)
+
+    assert "Rejoin Your Team" in html
+    assert (
+        "Team rejoining is unlocked. You may return only to the team you "
+        "joined for this session."
+        in html
+    )
+    assert html.count('data-team-rejoin="true"') == 1
+    assert f'data-team-id="{course_env["teams"]["Team 1"]}"' in html
+    assert (
+        f'onclick="joinTeam({course_env["teams"]["Team 1"]})"' in html
+    )
+
+
+def test_locked_live_student_sees_no_team_recovery_button(course_env):
+    _set_live_team_recovery_state(course_env, locked=True)
+
+    html = _student_client(course_env, "s1").get(
+        "/dashboard"
+    ).get_data(as_text=True)
+
+    assert "Team Rejoining Locked" in html
+    assert "The instructor has temporarily locked team rejoining." in html
+    assert 'data-team-rejoin="true"' not in html
+
+
+def test_unassigned_live_student_without_previous_team_waits_for_instructor(
+        course_env):
+    _set_state(course_env, phase="competition")
+    with _connect(course_env) as db:
+        db.execute(
+            """UPDATE students SET team_id = NULL, last_team_id = NULL
+               WHERE student_id = 's3'"""
+        )
+        db.commit()
+
+    html = _student_client(course_env, "s3").get(
+        "/dashboard"
+    ).get_data(as_text=True)
+
+    assert "Waiting for Team Assignment" in html
+    assert (
+        "You did not join a team for this session. "
+        "Please ask your instructor to assign you."
+    ) in html
+    assert 'data-team-rejoin="true"' not in html
+
+
 def test_saved_activity_allows_identity_preserving_roster_detail_update(
         course_env):
     _seed_current_session_thumb(course_env)
@@ -8055,6 +8621,7 @@ def test_participation_counts_survive_new_session_remove_and_restore(
     )
     assert setup.status_code == 200
     assert setup.get_json()["session_key"] == SESSION_KEY + 1
+    baseline_roster_version = _state_row(course_env)["roster_version"]
 
     original_id = course_env["students"]["s1"]
     archived = instructor.delete(
@@ -8062,7 +8629,7 @@ def test_participation_counts_survive_new_session_remove_and_restore(
         json={
             "expected_phase": "setup",
             "expected_session_key": SESSION_KEY + 1,
-            "expected_roster_version": 0,
+            "expected_roster_version": baseline_roster_version,
         },
     )
     assert archived.status_code == 200
@@ -8071,7 +8638,7 @@ def test_participation_counts_survive_new_session_remove_and_restore(
         json={
             "expected_phase": "setup",
             "expected_session_key": SESSION_KEY + 1,
-            "expected_roster_version": 1,
+            "expected_roster_version": baseline_roster_version + 1,
             "student_id": "S1",
             "name": "Alice Restored",
             "pin": "5555",

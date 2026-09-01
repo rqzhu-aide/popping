@@ -21,6 +21,7 @@ from versioning import (  # noqa: E402
 
 
 V1_1_SCHEMA_VERSION = "1.1.0"
+V1_2_SCHEMA_VERSION = "1.2.0"
 
 
 def _baseline_connection():
@@ -82,7 +83,8 @@ def test_v1_1_to_v1_2_preserves_roster_name_and_adds_null_display_name():
 
         plan = database._schema_migration_plan(V1_1_SCHEMA_VERSION)
         assert [(source, target) for source, target, _migration in plan] == [
-            (V1_1_SCHEMA_VERSION, SCHEMA_VERSION)
+            (V1_1_SCHEMA_VERSION, V1_2_SCHEMA_VERSION),
+            (V1_2_SCHEMA_VERSION, SCHEMA_VERSION),
         ]
 
         assert database.upgrade_schema_connection(db) == SCHEMA_VERSION
@@ -122,7 +124,7 @@ def test_v1_2_validation_rejects_ledger_without_display_name_column():
         db.execute(
             """INSERT INTO schema_migrations
                (schema_version, applied_by_app_version) VALUES (?, ?)""",
-            [SCHEMA_VERSION, APP_VERSION],
+            [V1_2_SCHEMA_VERSION, APP_VERSION],
         )
         db.commit()
 
@@ -130,7 +132,7 @@ def test_v1_2_validation_rejects_ledger_without_display_name_column():
             RuntimeError,
             match=r"students is missing required column\(s\): display_name",
         ):
-            database.validate_current_schema(db)
+            database.upgrade_schema_connection(db)
     finally:
         db.close()
 

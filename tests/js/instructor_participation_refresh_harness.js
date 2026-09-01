@@ -36,6 +36,55 @@ async function main() {
                 ? participationName : null;
         },
     };
+    const makeParticipationSection = (teamId, hidden) => {
+        const list = { innerHTML: '' };
+        const summary = { textContent: '' };
+        const heading = { textContent: '' };
+        return {
+            dataset: { teamId: String(teamId) },
+            hidden,
+            list,
+            summary,
+            heading,
+            querySelector(selector) {
+                if (selector === '.team-participation-members') return list;
+                if (selector === '[data-role="team-summary"]') return summary;
+                if (selector === '.team-participation-heading h4') return heading;
+                return null;
+            },
+        };
+    };
+    const teamSections = [
+        makeParticipationSection(1, true),
+        makeParticipationSection(2, false),
+    ];
+    const teamOptions = [
+        { value: '', dataset: {}, textContent: '-- Choose team --' },
+        {
+            value: '1', disabled: true, textContent: 'Team 1 (empty)',
+            dataset: {
+                teamName: 'Team 1', memberCount: '0', neverCount: '0',
+                totalTurns: '0', completed: '0',
+            },
+        },
+        {
+            value: '2', disabled: false, textContent: 'Team 2',
+            dataset: {
+                teamName: 'Team 2', memberCount: '1', neverCount: '1',
+                totalTurns: '0', completed: '1',
+            },
+        },
+    ];
+    const competitionTeamSelect = { options: teamOptions, value: '2' };
+    const participationPlaceholder = { hidden: true };
+    const authoritativePreview = {
+        dataset: { visibleTeamId: '2' },
+        querySelectorAll(selector) {
+            assert.strictEqual(selector, '.team-participation-team');
+            return teamSections;
+        },
+    };
+    let authoritativePreviewEnabled = false;
     let fetchHandler;
     let confirmResult = true;
     let confirmMessage = '';
@@ -61,7 +110,18 @@ async function main() {
         window: windowStub,
         document: {
             getElementById(id) {
-                return id === 'team-participation-preview' ? {} : null;
+                if (id === 'team-participation-preview') {
+                    return authoritativePreviewEnabled
+                        ? authoritativePreview : {};
+                }
+                if (id === 'comp-team' && authoritativePreviewEnabled) {
+                    return competitionTeamSelect;
+                }
+                if (id === 'team-participation-placeholder' &&
+                        authoritativePreviewEnabled) {
+                    return participationPlaceholder;
+                }
+                return null;
             },
             querySelectorAll(selector) {
                 assert.strictEqual(
@@ -121,6 +181,12 @@ async function main() {
         'function showToast(message, type) {' +
             'toastMessages.push({ message: String(message), type });' +
         '}' +
+        'function escapeHtmlValue(value) {' +
+            "return String(value ?? '').replaceAll('&', '&amp;')" +
+                ".replaceAll('<', '&lt;').replaceAll('>', '&gt;')" +
+                ".replaceAll('\\\"', '&quot;').replaceAll(\"'\", '&#39;');" +
+        '}' +
+        'function escapeAttrValue(value) { return escapeHtmlValue(value); }' +
         'function applyStudentParticipationCounts(record) {' +
             'appliedRecords.push({ ...record });' +
         '}' +
@@ -136,6 +202,26 @@ async function main() {
     vm.runInContext(source.slice(
         historyStateStart,
         source.indexOf('function competitionTeamOption', historyStateStart)
+    ), sandbox);
+
+    const heroHelperStart = source.indexOf(
+        'function normalizedParticipationCount(value) {'
+    );
+    vm.runInContext(source.slice(
+        heroHelperStart,
+        source.indexOf('function participationBadgesHtml(', heroHelperStart)
+    ), sandbox);
+    const optionHelperStart = source.indexOf('function competitionTeamOption(');
+    vm.runInContext(source.slice(
+        optionHelperStart,
+        source.indexOf('function setMemberParticipationCount(', optionHelperStart)
+    ), sandbox);
+    const showTeamStart = source.indexOf(
+        'function showCompetitionTeamParticipation(teamId) {'
+    );
+    vm.runInContext(source.slice(
+        showTeamStart,
+        source.indexOf('function renderInstructorChallenge(', showTeamStart)
     ), sandbox);
 
     const refreshStart = source.indexOf(
@@ -161,6 +247,107 @@ async function main() {
     );
     assert.strictEqual(participationName.textContent, 'Sam (s2-public)');
     assert.strictEqual(appliedRecords[0].presentation_count, 2);
+
+    // The authoritative roster replaces every team list. This covers a member
+    // added after initial render, a move between teams, a removed member,
+    // current names/counts/badges, dropdown counts, and empty-team disabling.
+    authoritativePreviewEnabled = true;
+    sandbox.initialAuthoritativeTeams = [
+        {
+            id: 1, name: 'Team 1', members: [{
+                id: 's1', student_id: 'ID01', display_name: 'Alice',
+                presentation_count: 0, challenger_count: 1,
+                hero_badges: { gold: 1 },
+            }],
+        },
+        {
+            id: 2, name: 'Team 2', members: [{
+                id: 's2', student_id: 'ID02', display_name: 'Bob',
+                presentation_count: 2, challenger_count: 0,
+                hero_badges: {},
+            }],
+        },
+    ];
+    vm.runInContext(
+        'applyCompetitionParticipationRoster(initialAuthoritativeTeams)', sandbox
+    );
+    assert.match(teamSections[0].list.innerHTML, /data-student-id="s1"/);
+    assert.match(teamSections[0].list.innerHTML, /Alice \(ID01\)/);
+    assert.match(teamSections[0].list.innerHTML, /weekly-hero-badge-gold/);
+    assert.match(teamSections[1].list.innerHTML, /data-student-id="s2"/);
+    assert.strictEqual(teamOptions[1].disabled, false);
+    assert.strictEqual(teamOptions[1].dataset.memberCount, '1');
+    assert.strictEqual(teamOptions[1].textContent, 'Team 1 · 0/1 · 0 turns');
+    assert.strictEqual(teamSections[0].hidden, true);
+    assert.strictEqual(teamSections[1].hidden, false);
+    assert.strictEqual(authoritativePreview.dataset.visibleTeamId, '2');
+    assert.strictEqual(competitionTeamSelect.value, '2');
+
+    sandbox.changedAuthoritativeTeams = [
+        { id: 1, name: 'Team 1', members: [] },
+        {
+            id: 2, name: 'Team 2', members: [
+                {
+                    id: 's1', student_id: 'ID01', display_name: 'Alice Updated',
+                    presentation_count: 3, challenger_count: 4,
+                    hero_badges: { silver: 2 },
+                },
+                {
+                    id: 's3', student_id: 'ID03', display_name: 'Casey',
+                    presentation_count: 0, challenger_count: 0,
+                    hero_badges: { bronze: 1 },
+                },
+            ],
+        },
+    ];
+    vm.runInContext(
+        'applyCompetitionParticipationRoster(changedAuthoritativeTeams)', sandbox
+    );
+    assert.strictEqual(teamSections[0].list.innerHTML, '');
+    assert.match(teamSections[1].list.innerHTML, /data-student-id="s1"/);
+    assert.match(teamSections[1].list.innerHTML, /data-student-id="s3"/);
+    assert.doesNotMatch(teamSections[1].list.innerHTML, /data-student-id="s2"/);
+    assert.match(teamSections[1].list.innerHTML, /Alice Updated \(ID01\)/);
+    assert.match(teamSections[1].list.innerHTML, /weekly-hero-badge-silver/);
+    assert.match(teamSections[1].list.innerHTML, /weekly-hero-badge-bronze/);
+    assert.strictEqual(teamOptions[1].disabled, true);
+    assert.strictEqual(teamOptions[1].textContent, 'Team 1 (empty)');
+    assert.strictEqual(teamOptions[2].disabled, false);
+    assert.strictEqual(teamOptions[2].dataset.memberCount, '2');
+    assert.strictEqual(teamOptions[2].dataset.neverCount, '1');
+    assert.strictEqual(teamOptions[2].dataset.totalTurns, '3');
+    assert.strictEqual(
+        teamOptions[2].textContent,
+        'Team 2 · 1/2 · 3 turns (completed)'
+    );
+    assert.strictEqual(teamSections[0].summary.textContent, 'No members.');
+    assert.strictEqual(
+        teamSections[1].summary.textContent,
+        '1 of 2 members have no completed team turns.'
+    );
+    assert.strictEqual(teamSections[0].hidden, true);
+    assert.strictEqual(teamSections[1].hidden, false);
+
+    sandbox.emptySelectedTeam = [
+        {
+            id: 1, name: 'Team 1', members: [{
+                id: 's3', student_id: 'ID03', display_name: 'Casey',
+                presentation_count: 0, challenger_count: 0,
+                hero_badges: { bronze: 1 },
+            }],
+        },
+        { id: 2, name: 'Team 2', members: [] },
+    ];
+    vm.runInContext(
+        'applyCompetitionParticipationRoster(emptySelectedTeam)', sandbox
+    );
+    assert.strictEqual(competitionTeamSelect.value, '');
+    assert.strictEqual(teamOptions[2].disabled, true);
+    assert.strictEqual(teamSections[0].hidden, true);
+    assert.strictEqual(teamSections[1].hidden, true);
+    assert.strictEqual(authoritativePreview.dataset.visibleTeamId, '');
+    assert.strictEqual(participationPlaceholder.hidden, false);
+    authoritativePreviewEnabled = false;
     appliedRecords.length = 0;
     const syncStart = source.indexOf(
         'function syncCompetitionPresentationHistory'
@@ -489,7 +676,10 @@ async function main() {
     );
     assert.match(confirmMessage, /2 enrolled students are unassigned/i);
     assert.match(confirmMessage, /team-based voting totals/i);
-    assert.match(confirmMessage, /team selection closes/i);
+    assert.match(
+        confirmMessage,
+        /unassigned student may only rejoin this session's team/i
+    );
     assert.strictEqual(events.filter(event => event === 'reload').length, 0);
     assert.strictEqual(mutationErrors.length, 0);
 

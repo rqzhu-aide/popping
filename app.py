@@ -29,14 +29,19 @@ import yaml
 
 import config
 from database import (
+    calculate_weekly_hero_preview,
+    detect_weekly_hero_source_schema_version,
     ensure_schema,
     execute_db,
     forget_schema,
     get_db,
     get_max_members_per_team,
     get_max_teams,
+    get_weekly_hero_badge_counts,
+    get_weekly_hero_rows,
     init_app,
     init_db,
+    save_weekly_hero_summary,
     validate_current_schema,
     validate_legacy_adoption_candidate,
     inspect_schema_version,
@@ -2515,9 +2520,19 @@ def instructor_course(slug):
             or question['id'] == active_question_id
         ]
     presence_checked_at = _utcnow()
+    course_db = get_db(slug)
+    student_db_ids = [student['id'] for student in students]
     participation_counts = _participation_counts_by_student(
-        get_db(slug), course['id'], [student['id'] for student in students]
+        course_db, course['id'], student_db_ids
     )
+    weekly_hero_badges = {}
+    if state and state['phase'] == 'competition':
+        weekly_hero_badges = get_weekly_hero_badge_counts(
+            course_db,
+            course['id'],
+            before_week=selected_week,
+            student_ids=student_db_ids,
+        )
     students_enhanced = []
     for s in students:
         d = dict(s)
@@ -2529,6 +2544,8 @@ def instructor_course(slug):
         counts = participation_counts.get(s['id'], {})
         d['presentation_count'] = counts.get('presentation_count', 0)
         d['challenger_count'] = counts.get('challenger_count', 0)
+        if state and state['phase'] == 'competition':
+            d['hero_badges'] = weekly_hero_badges.get(s['id'], {})
         students_enhanced.append(d)
     online_student_count = sum(
         1 for student in students_enhanced if student['is_online']
@@ -3277,13 +3294,20 @@ def _compute_state(slug, include_poll_count=True, known_question_id=None,
                     [cid, pres_key])
                 active_challenges = result.get('active_challenges') or []
                 participation_ids = [hand['student_id'] for hand in hands]
-                participation_ids.extend(
+                active_challenger_ids = [
                     challenge.get('challenger_id')
                     for challenge in active_challenges
                     if isinstance(challenge, dict)
-                )
+                ]
+                participation_ids.extend(active_challenger_ids)
                 participation_counts = _participation_counts_by_student(
                     get_db(slug), cid, participation_ids
+                )
+                weekly_hero_badges = get_weekly_hero_badge_counts(
+                    get_db(slug),
+                    cid,
+                    before_week=state.get('discussion_week') or 1,
+                    student_ids=active_challenger_ids,
                 )
                 result['challenge_hands'] = [
                     {'student_id': h['student_id'],
@@ -3307,6 +3331,9 @@ def _compute_state(slug, include_poll_count=True, known_question_id=None,
                                 'presentation_count': 0,
                                 'challenger_count': 0,
                             }
+                        ),
+                        'hero_badges': weekly_hero_badges.get(
+                            challenge.get('challenger_id'), {}
                         ),
                     }
                     for challenge in active_challenges
@@ -3406,7 +3433,8 @@ def _compute_state(slug, include_poll_count=True, known_question_id=None,
 
 def _compute_teams(slug, course_id, max_teams=None, member_team_id=None,
                    include_all_members=True,
-                   include_participation_counts=False):
+                   include_participation_counts=False,
+                   hero_badges_before_week=None):
     """Compute the teams + members list for the versioned roster endpoint.
 
     Uses two roster queries instead of N+1, plus one aggregate participation
@@ -3440,10 +3468,19 @@ def _compute_teams(slug, course_id, max_teams=None, member_team_id=None,
                                            NULLIF(TRIM(name), ''), student_id)''',
             visible_member_team_ids)
     participation_counts = {}
+    weekly_hero_badges = {}
     if include_participation_counts:
+        member_ids = [member['id'] for member in all_members]
         participation_counts = _participation_counts_by_student(
-            get_db(slug), course_id, [member['id'] for member in all_members]
+            get_db(slug), course_id, member_ids
         )
+        if hero_badges_before_week is not None:
+            weekly_hero_badges = get_weekly_hero_badge_counts(
+                get_db(slug),
+                course_id,
+                before_week=hero_badges_before_week,
+                student_ids=member_ids,
+            )
     members_by_team = {}
     for m in all_members:
         resolved_name = _student_display_name(m)
@@ -3460,6 +3497,8 @@ def _compute_teams(slug, course_id, max_teams=None, member_team_id=None,
                 'presentation_count': 0,
                 'challenger_count': 0,
             }))
+            if hero_badges_before_week is not None:
+                member['hero_badges'] = weekly_hero_badges.get(m['id'], {})
         members_by_team.setdefault(m['team_id'], []).append(member)
     return [
         {'id': team['id'], 'name': team['name'], 'color': team['color'],
@@ -3478,9 +3517,20 @@ def api_teams():
         return jsonify({'error': 'Not logged in'}), 401
     course = query_db(slug, 'SELECT * FROM courses LIMIT 1', one=True)
     if role == 'instructor':
+        state = query_db(
+            slug,
+            '''SELECT phase, discussion_week FROM course_state
+               WHERE course_id = ?''',
+            [course['id']],
+            one=True,
+        )
         return jsonify(_compute_teams(
             slug, course['id'],
             include_participation_counts=True,
+            hero_badges_before_week=(
+                (state['discussion_week'] or 1)
+                if state and state['phase'] == 'competition' else None
+            ),
         ))
     student = query_db(
         slug,
@@ -3525,12 +3575,40 @@ def join_team():
         if not student:
             db.rollback()
             return jsonify({'error': 'Student not found'}), 404
-        if not state or state['phase'] != 'setup':
+        if not state or state['phase'] not in (
+                'setup', 'discussion', 'competition'):
             db.rollback()
             return jsonify({'error': 'Team selection is closed'}), 403
         if state['teams_locked']:
             db.rollback()
             return jsonify({'error': 'Teams are currently locked by the instructor'}), 403
+
+        live_phase = state['phase'] in ('discussion', 'competition')
+        live_restoration = False
+        if live_phase:
+            # Once a live phase begins, membership stays fixed except for an
+            # unassigned student restoring the exact team recorded before
+            # their removal. This repairs an accidental unassignment without
+            # reattributing saved feedback to a different team.
+            if student['team_id'] == team_id:
+                roster_version = _current_roster_version(
+                    db, state['course_id']
+                )
+                db.commit()
+                return jsonify({
+                    'success': True,
+                    'roster_version': roster_version,
+                })
+            if (not team_id or student['team_id'] is not None or
+                    student['last_team_id'] != team_id):
+                db.rollback()
+                return jsonify({
+                    'error': (
+                        'During a live session, you can only rejoin the team '
+                        'you joined for this session'
+                    )
+                }), 403
+            live_restoration = True
 
         # Leaving team (team_id = 0 means unassign).
         if not team_id:
@@ -3576,12 +3654,13 @@ def join_team():
             db.rollback()
             return jsonify({'error': 'That team is full'}), 409
 
-        freeze_guard = _session_roster_mutation_guard(
-            db, state['course_id'], state
-        )
-        if freeze_guard:
-            db.rollback()
-            return jsonify({'error': freeze_guard[0]}), freeze_guard[1]
+        if not live_restoration:
+            freeze_guard = _session_roster_mutation_guard(
+                db, state['course_id'], state
+            )
+            if freeze_guard:
+                db.rollback()
+                return jsonify({'error': freeze_guard[0]}), freeze_guard[1]
         db.execute(
             '''UPDATE students
                SET team_id = ?, last_team_id = ?, last_team_joined_at = CURRENT_TIMESTAMP
@@ -4229,7 +4308,86 @@ def set_phase():
                     return jsonify(transition), 409
             _finalize_active_presentation(slug, course['id'], db=db)
 
+        if phase == 'ended' and old_phase != 'ended':
+            weekly_result_week = state['discussion_week'] or 1
+            try:
+                weekly_source_schema = (
+                    detect_weekly_hero_source_schema_version(
+                        db, course['id'], weekly_result_week
+                    )
+                )
+            except RuntimeError:
+                db.rollback()
+                return jsonify({
+                    'error': (
+                        'Cannot save Weekly Hero results because this '
+                        'lecture week contains activity from more than one '
+                        'data version. Use a new lecture week for the new '
+                        'session, then review this week with the Weekly Hero '
+                        'backfill tool.'
+                    )
+                }), 409
+
+            saved_weekly_result = db.execute(
+                '''SELECT source_schema_version
+                   FROM weekly_hero_summaries
+                   WHERE course_id = ? AND week_num = ?''',
+                [course['id'], weekly_result_week],
+            ).fetchone()
+            if (saved_weekly_result
+                    and saved_weekly_result['source_schema_version']
+                    != weekly_source_schema):
+                db.rollback()
+                return jsonify({
+                    'error': (
+                        'Cannot replace this week\'s Weekly Hero result with '
+                        'a different data-version series. Use a new lecture '
+                        'week for the new session.'
+                    )
+                }), 409
+
+            weekly_preview = calculate_weekly_hero_preview(
+                db,
+                course['id'],
+                weekly_result_week,
+                source_schema_version=weekly_source_schema,
+            )
+            if not weekly_preview['recipient_coverage_complete']:
+                missing_keys = [
+                    item['presentation_key']
+                    for item in weekly_preview[
+                        'missing_participant_presentations'
+                    ]
+                ]
+                sample = ', '.join(missing_keys[:3])
+                suffix = '…' if len(missing_keys) > 3 else ''
+                db.rollback()
+                return jsonify({
+                    'error': (
+                        'Cannot save Weekly Hero results because historical '
+                        'team membership is missing for presentation(s): '
+                        f'{sample}{suffix}'
+                    )
+                }), 409
+            weekly_result = save_weekly_hero_summary(
+                db, weekly_preview, replace=True
+            )
+            if weekly_result['status'] != 'unchanged':
+                _bump_roster_version(slug, course['id'], db=db)
+
         session_increment = 1 if old_phase == 'ended' and phase != 'ended' else 0
+        if session_increment:
+            db.execute(
+                '''UPDATE students
+                   SET last_team_id = CASE
+                           WHEN is_active = 1 THEN team_id
+                           ELSE NULL
+                       END
+                   WHERE course_id = ?
+                     AND ((is_active = 1 AND last_team_id IS NOT team_id)
+                          OR (is_active != 1 AND last_team_id IS NOT NULL))''',
+                [course['id']],
+            )
         if old_phase != phase:
             db.execute(
                 '''UPDATE course_state
@@ -4849,9 +5007,12 @@ def toggle_lock_teams():
         if guard:
             db.rollback()
             return jsonify({'error': guard[0]}), guard[1]
-        if not state or state['phase'] != 'setup':
+        if not state or state['phase'] not in (
+                'setup', 'discussion', 'competition'):
             db.rollback()
-            return jsonify({'error': 'Team locking is only available during setup'}), 409
+            return jsonify({
+                'error': 'Team locking is unavailable after End Session'
+            }), 409
         db.execute(
             'UPDATE course_state SET teams_locked = ? WHERE course_id = ?',
             [locked, course['id']]
@@ -5785,7 +5946,7 @@ def edit_appendix_question():
 @app.route('/api/unassign_all', methods=['POST'])
 @instructor_login_required
 def unassign_all():
-    """Clear all active team assignments and lock student joining."""
+    """Clear active assignments and recovery markers, then lock joining."""
     slug = session['slug']
     data = request.get_json(silent=True) or {}
     ensure_schema(slug)
@@ -5805,12 +5966,20 @@ def unassign_all():
         if not state or state['phase'] != 'setup':
             db.rollback()
             return jsonify({'error': 'Teams can only be changed during setup'}), 409
-        count = db.execute(
-            '''SELECT COUNT(*) AS c FROM students
-               WHERE course_id = ? AND is_active = 1 AND team_id IS NOT NULL''',
+        counts = db.execute(
+            '''SELECT
+                   COUNT(CASE WHEN is_active = 1 AND team_id IS NOT NULL
+                              THEN 1 END)
+                       AS assigned_count,
+                   COUNT(CASE WHEN last_team_id IS NOT NULL THEN 1 END)
+                       AS recovery_marker_count
+               FROM students
+               WHERE course_id = ?''',
             [course['id']],
-        ).fetchone()['c']
-        if count:
+        ).fetchone()
+        count = counts['assigned_count']
+        recovery_marker_count = counts['recovery_marker_count']
+        if count or recovery_marker_count:
             freeze_guard = _session_roster_mutation_guard(
                 db, course['id'], state
             )
@@ -5819,9 +5988,12 @@ def unassign_all():
                 return jsonify({'error': freeze_guard[0]}), freeze_guard[1]
             db.execute(
                 '''UPDATE students
-                   SET last_team_id = COALESCE(last_team_id, team_id),
-                       team_id = NULL
-                   WHERE course_id = ? AND is_active = 1''', [course['id']]
+                   SET team_id = CASE WHEN is_active = 1 THEN NULL ELSE team_id END,
+                       last_team_id = NULL
+                   WHERE course_id = ?
+                     AND ((is_active = 1 AND team_id IS NOT NULL)
+                          OR last_team_id IS NOT NULL)''',
+                [course['id']]
             )
             roster_version = _bump_roster_version(
                 slug, course['id'], db=db
@@ -7825,6 +7997,10 @@ def reset_data():
             db.execute(
                 'DELETE FROM peer_reviews WHERE course_id = ?', [course_id]
             )
+        db.execute(
+            'DELETE FROM weekly_hero_summaries WHERE course_id = ?',
+            [course_id],
+        )
         db.execute('DELETE FROM teammate_thumbs WHERE course_id = ?', [course_id])
         db.execute('DELETE FROM presentation_ratings WHERE course_id = ?', [course_id])
         db.execute('DELETE FROM hidden_discussion_questions WHERE course_id = ?', [course_id])
@@ -8291,6 +8467,14 @@ def export_legacy_feedback(slug):
 
 def _compatible_export_week_exists(db, course_id, week_num, state_row):
     '''Return whether a later week has current-series durable results.'''
+    if db.execute(
+        '''SELECT 1 FROM weekly_hero_summaries
+           WHERE course_id = ? AND week_num = ?
+             AND popping_version_compatible(data_version, ?) = 1
+           LIMIT 1''',
+        [course_id, week_num, SCHEMA_VERSION],
+    ).fetchone():
+        return True
     for table in (
             'teammate_thumbs', 'presentation_ratings',
             'presentation_participants', 'challenge_rounds',
@@ -8491,9 +8675,21 @@ def export_data(slug):
                    (SELECT COUNT(*) FROM challenge_ratings
                     WHERE course_id = ? AND week_num IN ({week_ph})
                       AND popping_version_compatible(data_version, ?) = 1)
-                       AS challenge_ratings''',
+                       AS challenge_ratings,
+                   (SELECT COUNT(*)
+                    FROM weekly_hero_recipients recipient
+                    JOIN weekly_hero_results result
+                      ON result.id = recipient.result_id
+                    JOIN weekly_hero_summaries summary
+                      ON summary.id = result.summary_id
+                    WHERE summary.course_id = ?
+                      AND summary.week_num IN ({week_ph})
+                      AND popping_version_compatible(
+                              summary.data_version, ?) = 1)
+                       AS weekly_hero_recipients''',
             (
                 [cid, cid, max_teams, cid] + export_weeks + [SCHEMA_VERSION]
+                + [cid] + export_weeks + [SCHEMA_VERSION]
                 + [cid] + export_weeks + [SCHEMA_VERSION]
                 + [cid] + export_weeks + [SCHEMA_VERSION]
                 + [cid] + export_weeks + [SCHEMA_VERSION]
@@ -8688,6 +8884,9 @@ def export_data(slug):
                ORDER BY cr.challenge_key, cr.created_at''',
             [SCHEMA_VERSION, cid] + export_weeks + [SCHEMA_VERSION],
         )
+        weekly_hero_rows = get_weekly_hero_rows(
+            db, cid, current_week
+        )
         coursewide_participation_versions = query_db(
             slug,
             '''SELECT DISTINCT data_version
@@ -8749,7 +8948,7 @@ def export_data(slug):
             row['data_version']
             for rows in (
                 peer_reviews, ratings, presentation_participants,
-                challenge_rounds, challenge_ratings
+                challenge_rounds, challenge_ratings, weekly_hero_rows
             )
             for row in rows
         }
@@ -8824,6 +9023,7 @@ def export_data(slug):
              len(presentation_participants)),
             ('Week Challenge Rounds', len(challenge_rounds)),
             ('Week Challenge Ratings', len(challenge_ratings)),
+            ('Week Weekly Hero Recipients', len(weekly_hero_rows)),
         ]
         for r, (label, val) in enumerate(info_rows, 1):
             ws1.cell(row=r, column=1, value=label).font = bold_font
@@ -8899,7 +9099,63 @@ def export_data(slug):
         ws1.column_dimensions['G'].width = 14
 
         # ════════════════════════════════════════════════════════════════════
-        # TAB 2: Students, one row per student, gradebook-ready
+        # TAB 2: Weekly Hero, one row per awarded student
+        # ════════════════════════════════════════════════════════════════════
+        weekly_hero_sheet = wb.create_sheet('Weekly Hero')
+        weekly_hero_headers = [
+            'week', 'achievement', 'rank', 'team_id', 'team_name',
+            'student_id', 'student_name_at_award', 'average_score',
+            'ratings_submitted', 'score_sum', 'score_count',
+            'calculation_version', 'source_schema_version',
+            'source_data_versions', 'source_fingerprint', 'data_version',
+            'calculated_at',
+        ]
+        style_header(weekly_hero_sheet, weekly_hero_headers)
+        achievement_labels = {
+            'gold': 'Gold Team',
+            'silver': 'Silver Team',
+            'bronze': 'Bronze Team',
+            'bolt': 'Best Challenger',
+        }
+        weekly_hero_export_rows = []
+        for hero in weekly_hero_rows:
+            weekly_hero_export_rows.append([
+                hero['week_num'],
+                achievement_labels.get(
+                    hero['award_type'], hero['award_type']
+                ),
+                hero['rank'],
+                hero['team_id'] or '',
+                hero['team_name'] or '',
+                hero['student_identifier'] or '',
+                hero['student_name'] or hero['student_identifier'] or '',
+                hero['average_score'],
+                hero['rating_count'],
+                hero['score_sum'],
+                hero['score_count'],
+                public_version(hero['calculation_version']),
+                public_version(hero['source_schema_version']),
+                ', '.join(
+                    public_version(version)
+                    for version in hero['source_data_versions']
+                ),
+                hero['source_fingerprint'],
+                _export_data_version(hero['data_version']),
+                hero['calculated_at'],
+            ])
+        for row_number, row in enumerate(weekly_hero_export_rows, 2):
+            for column, value in enumerate(row, 1):
+                weekly_hero_sheet.cell(
+                    row=row_number, column=column, value=value
+                )
+        set_col_widths(
+            weekly_hero_sheet,
+            weekly_hero_headers,
+            weekly_hero_export_rows,
+        )
+
+        # ════════════════════════════════════════════════════════════════════
+        # TAB 3: Students, one row per student, gradebook-ready
         # ════════════════════════════════════════════════════════════════════
         ws2 = wb.create_sheet('Students')
         s_headers = [

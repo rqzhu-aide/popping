@@ -105,7 +105,8 @@ Data. Verification checks the archive; it does not migrate the database.
 For an existing `v1.0.x` database, use the offline boundary described in the
 main README. Locally, stop all workers and type `SERVICE STOPPED`. On Render,
 deploy the course as `active: false`, use Render Shell, and type
-`COURSE OFFLINE`. Then run this from the `v1.1.0` repository root:
+`COURSE OFFLINE`. Then run this from the repository root of the release you
+are upgrading to:
 
 ```bash
 python scripts/migrate-course-db.py 432fall2026

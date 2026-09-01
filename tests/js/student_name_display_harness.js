@@ -217,7 +217,13 @@ function testLiveChallengerRenderersUsePublicIds() {
         /instructorDisplayName\(\s*ch\s*\)/
     );
     assert(instructorRenderer.includes(
-        "${escapeHtml(challengerDisplay)} (${escapeHtml(ch.challenger_team_name || '')})"
+        "<span>${escapeHtml(challengerDisplay)}</span>"
+    ));
+    assert(instructorRenderer.includes(
+        "${weeklyHeroBadgesHtml(ch)}"
+    ));
+    assert(instructorRenderer.includes(
+        "<span>(${escapeHtml(ch.challenger_team_name || '')})</span>"
     ));
     assert(instructorRenderer.includes(
         "btn.setAttribute('aria-label', `Clear challenger ${challengerDisplay}`)"

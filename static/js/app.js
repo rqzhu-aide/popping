@@ -342,6 +342,53 @@ function normalizedParticipationCount(value) {
     return Number.isFinite(parsed) ? Math.max(0, Math.trunc(parsed)) : 0;
 }
 
+const WEEKLY_HERO_BADGE_TYPES = Object.freeze([
+    { key: 'gold', icon: '🥇', cssClass: 'gold', label: 'Gold team award' },
+    { key: 'silver', icon: '🥈', cssClass: 'silver', label: 'Silver team award' },
+    { key: 'bronze', icon: '🥉', cssClass: 'bronze', label: 'Bronze team award' },
+    { key: 'bolt', icon: '⚡', cssClass: 'bolt', label: 'Best Challenger award' },
+]);
+
+function weeklyHeroBadgeEntries(record) {
+    const badges = record?.hero_badges;
+    if (!badges || typeof badges !== 'object' || Array.isArray(badges)) {
+        return [];
+    }
+    return WEEKLY_HERO_BADGE_TYPES.map(type => ({
+        ...type,
+        count: normalizedParticipationCount(badges[type.key]),
+    })).filter(badge => badge.count > 0);
+}
+
+function weeklyHeroBadgeItemsHtml(entries) {
+    return entries.map(badge => {
+        const duration = `${badge.count} week${badge.count === 1 ? '' : 's'}`;
+        const accessibleLabel = `${badge.label}, ${duration}`;
+        const title = `${badge.label}: ${duration}`;
+        return `<span class="weekly-hero-badge weekly-hero-badge-${badge.cssClass}" role="img"
+                      aria-label="${escapeAttrValue(accessibleLabel)}"
+                      title="${escapeAttrValue(title)}">${badge.icon} <strong>×${badge.count}</strong></span>`;
+    }).join('');
+}
+
+function weeklyHeroBadgesHtml(record) {
+    const entries = weeklyHeroBadgeEntries(record);
+    if (entries.length === 0) return '';
+    return `<span class="weekly-hero-badges" data-role="weekly-hero-badges">
+        <span class="visually-hidden">Weekly Hero achievements:</span>
+        ${weeklyHeroBadgeItemsHtml(entries)}
+    </span>`;
+}
+
+function updateWeeklyHeroBadges(host, record) {
+    if (!host) return;
+    const entries = weeklyHeroBadgeEntries(record);
+    host.hidden = entries.length === 0;
+    host.innerHTML = entries.length === 0 ? '' : `
+        <span class="visually-hidden">Weekly Hero achievements:</span>
+        ${weeklyHeroBadgeItemsHtml(entries)}`;
+}
+
 function participationBadgesHtml(record, showChallengeTurns = true) {
     if (!record ||
             !Object.prototype.hasOwnProperty.call(record, 'presentation_count') ||
@@ -3782,9 +3829,97 @@ function markCompetitionParticipationCountsDirty() {
     _competitionParticipationNextRetryAt = 0;
 }
 
+function competitionParticipationMemberHtml(member) {
+    const presentationCount = normalizedParticipationCount(
+        member?.presentation_count
+    );
+    const challengerCount = normalizedParticipationCount(
+        member?.challenger_count
+    );
+    return `<li class="team-participation-member"
+                data-student-id="${escapeAttrValue(member?.id ?? '')}"
+                data-presentation-count="${presentationCount}"
+                data-challenger-count="${challengerCount}">
+        <span class="team-participation-member-name">${escapeHtmlValue(
+            instructorDisplayName(member)
+        )}</span>
+        ${weeklyHeroBadgesHtml(member)}
+        <span class="participation-badges" aria-label="Participation history">
+            <span class="participation-badge${presentationCount === 0 ? ' is-zero' : ''}">Team turns: <strong class="team-turn-count">${presentationCount}</strong></span>
+            <span class="participation-badge${challengerCount === 0 ? ' is-zero' : ''}">Challenge turns: <strong class="challenge-turn-count">${challengerCount}</strong></span>
+        </span>
+    </li>`;
+}
+
+function reconcileCompetitionParticipationTeam(section, team) {
+    if (!section) return;
+    const members = Array.isArray(team?.members) ? team.members : [];
+    const memberList = section.querySelector('.team-participation-members');
+    if (memberList) {
+        // This is an authoritative replacement. Rebuilding the small team list
+        // handles students joining, moving, or leaving without stale rows.
+        memberList.innerHTML = members.map(
+            competitionParticipationMemberHtml
+        ).join('');
+    }
+
+    const teamName = String(team?.name || '').trim();
+    const heading = section.querySelector('.team-participation-heading h4');
+    if (heading && teamName) {
+        heading.textContent = `${teamName} participation history`;
+    }
+    const presentationCounts = members.map(member =>
+        normalizedParticipationCount(member?.presentation_count)
+    );
+    const neverCount = presentationCounts.filter(count => count === 0).length;
+    const totalTurns = presentationCounts.reduce((sum, count) => sum + count, 0);
+    const summary = section.querySelector('[data-role="team-summary"]');
+    if (summary) {
+        summary.textContent = members.length
+            ? `${neverCount} of ${members.length} members have no completed team turns.`
+            : 'No members.';
+    }
+
+    const option = competitionTeamOption(section.dataset.teamId);
+    if (!option) return;
+    if (teamName) {
+        option.dataset.teamName = teamName;
+        option.dataset.baseLabel = teamName;
+    }
+    option.dataset.memberCount = String(members.length);
+    option.dataset.neverCount = String(neverCount);
+    option.dataset.totalTurns = String(totalTurns);
+    option.disabled = members.length === 0;
+    updateCompetitionTeamOptionLabel(option);
+    const select = document.getElementById('comp-team');
+    if (option.disabled && select &&
+            String(select.value || '') === String(option.value)) {
+        select.value = '';
+        showCompetitionTeamParticipation('');
+    }
+}
+
 function applyCompetitionParticipationRoster(teams) {
+    const authoritativeTeams = Array.isArray(teams) ? teams : [];
+    const preview = document.getElementById('team-participation-preview');
+    if (preview && typeof preview.querySelectorAll === 'function') {
+        const teamsById = new Map(authoritativeTeams.map(team => [
+            String(team?.id ?? ''), team,
+        ]));
+        preview.querySelectorAll('.team-participation-team').forEach(section => {
+            const team = teamsById.get(String(section.dataset.teamId || ''));
+            reconcileCompetitionParticipationTeam(
+                section,
+                team || { members: [] }
+            );
+        });
+        return;
+    }
+
+    // Compatibility fallback for a partially rendered page. Normal instructor
+    // pages use the authoritative team-section replacement above.
     const membersById = new Map();
-    (teams || []).forEach(team => {
+    authoritativeTeams.forEach(team => {
         const members = Array.isArray(team.members) ? team.members : [];
         members.forEach(member => {
             const studentId = String(member.id ?? '');
@@ -3805,6 +3940,12 @@ function applyCompetitionParticipationRoster(teams) {
             '.team-participation-member-name'
         );
         if (member && name) name.textContent = instructorDisplayName(member);
+        if (member && typeof updateWeeklyHeroBadges === 'function') {
+            updateWeeklyHeroBadges(
+                row.querySelector('[data-role="weekly-hero-badges"]'),
+                member
+            );
+        }
     });
 }
 
@@ -3980,7 +4121,11 @@ function renderInstructorChallenge(state) {
                 row.dataset.challengeKey = String(ch.challenge_key);
                 row.innerHTML = `<span class="challenge-active-details">
                     <strong>Challenger ${ch.challenge_num}:</strong>
-                    ${escapeHtml(challengerDisplay)} (${escapeHtml(ch.challenger_team_name || '')})
+                    <span class="challenge-active-person">
+                        <span>${escapeHtml(challengerDisplay)}</span>
+                        ${weeklyHeroBadgesHtml(ch)}
+                        <span>(${escapeHtml(ch.challenger_team_name || '')})</span>
+                    </span>
                     <span class="participation-badge${challengeTurns === 0 ? ' is-zero' : ''}">Challenge turns: <strong>${challengeTurns}</strong></span>
                     <span class="hint">${ratingText}</span>
                 </span>`;
@@ -4832,7 +4977,8 @@ window.setPhase = async function(phase) {
             const proceed = confirm(
                 `${count} enrolled ${studentLabel} unassigned. They will be ` +
                 'excluded from team activities and team-based voting totals. ' +
-                `Team selection closes when ${nextPhaseLabel} begins. ` +
+                'During the live session, an unassigned student may only ' +
+                "rejoin this session's team while team rejoining is unlocked. " +
                 `Start ${nextPhaseLabel} with the assigned students?`
             );
             if (!proceed) return;

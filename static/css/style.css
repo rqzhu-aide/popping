@@ -2949,6 +2949,64 @@ body.modal-open { overflow: hidden; }
     min-width: 0;
     overflow-wrap: anywhere;
 }
+.weekly-hero-badges {
+    align-items: center;
+    display: inline-flex;
+    flex: 0 0 auto;
+    flex-wrap: wrap;
+    gap: 4px;
+    vertical-align: middle;
+}
+.weekly-hero-badges[hidden] {
+    display: none;
+}
+.weekly-hero-badge {
+    align-items: center;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    display: inline-flex;
+    font-size: 0.72rem;
+    font-variant-numeric: tabular-nums;
+    gap: 2px;
+    line-height: 1.2;
+    padding: 3px 6px;
+    white-space: nowrap;
+}
+.weekly-hero-badge-gold {
+    background: var(--warning-soft);
+    border-color: var(--warning-border);
+    color: var(--warning-text);
+}
+.weekly-hero-badge-silver {
+    background: var(--surface);
+    border-color: var(--text-muted);
+    color: var(--text);
+}
+.weekly-hero-badge-bronze {
+    background: #3f2718;
+    border-color: #b77946;
+    color: #fed7aa;
+}
+.weekly-hero-badge-bolt {
+    background: var(--accent-bg-soft);
+    border-color: var(--primary);
+    color: var(--primary);
+}
+.weekly-hero-badge strong {
+    color: inherit;
+}
+html.light .weekly-hero-badge-bronze {
+    background: #fff7ed;
+    border-color: #c47a44;
+    color: #7c2d12;
+}
+.challenge-active-person {
+    align-items: center;
+    display: inline-flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    min-width: 0;
+}
 .challenge-hand-row {
     align-items: center;
     display: flex;

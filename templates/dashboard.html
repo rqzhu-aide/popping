@@ -115,7 +115,7 @@
         <p class="hint">The instructor has temporarily locked team changes.</p>
         {% else %}
         <h2>Select Your Team</h2>
-        <p class="hint">Choose a team to join. You can change this during setup.</p>
+        <p class="hint">Choose a team to join. You can change teams while Setup is open and teams are unlocked.</p>
         <div class="team-grid">
             {% for t in teams %}
             {% set is_full = max_members and t.member_count >= max_members %}
@@ -129,9 +129,40 @@
             {% endfor %}
         </div>
         {% endif %}
+        {% elif state.phase in ['discussion', 'competition'] %}
+        {% if teams_locked %}
+        <h2>Team Rejoining Locked</h2>
+        <p class="hint">The instructor has temporarily locked team rejoining.</p>
+        {% elif student.last_team_id %}
+        <h2>Rejoin Your Team</h2>
+        <p class="hint">Team rejoining is unlocked. You may return only to the team you joined for this session.</p>
+        {% set prior_team = namespace(found=false) %}
+        <div class="team-grid">
+            {% for t in teams %}
+            {% if t.id == student.last_team_id %}
+            {% set prior_team.found = true %}
+            {% set is_full = max_members and t.member_count >= max_members %}
+            <button class="team-card" data-team-id="{{ t.id }}"
+                    data-team-rejoin="true"
+                    style="--team-color: {{ t.color }}"
+                    onclick="joinTeam({{ t.id }})"{% if is_full %} disabled title="This session's team is full"{% endif %}>
+                <span class="team-dot" style="background: {{ t.color }}"></span>
+                <span class="team-name">{{ t.name }}</span>
+                <span class="team-capacity">{{ t.member_count }}/{{ max_members }}{% if is_full %} · Full{% endif %}</span>
+            </button>
+            {% endif %}
+            {% endfor %}
+        </div>
+        {% if not prior_team.found %}
+        <p class="hint text-warning">The team you joined for this session is not currently available. Please ask your instructor for help.</p>
+        {% endif %}
         {% else %}
         <h2>Waiting for Team Assignment</h2>
-        <p class="hint">Team selection is closed. Please ask your instructor to assign you to a team.</p>
+        <p class="hint">You did not join a team for this session. Please ask your instructor to assign you.</p>
+        {% endif %}
+        {% else %}
+        <h2>Waiting for Team Assignment</h2>
+        <p class="hint">Please ask your instructor to assign you to a team.</p>
         {% endif %}
     </section>
     {% else %}
