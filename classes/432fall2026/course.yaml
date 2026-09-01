@@ -3,7 +3,7 @@ name: Basics of Statistical Learning
 url: https://teazrq.github.io/stat432rpy/
 code: STAT 432
 semester: Fall 2026
-active: true
+active: false
 team_pool_size: 20
 max_teams: 6
 max_members_per_team: 10
