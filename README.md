@@ -100,18 +100,19 @@ After creating a course, you get:
 classes/432fall2026/
 ├── course.yaml          # Course metadata (name, code, active teams, etc.)
 ├── init-db.sh           # Script to reset/reinitialize this course's DB
-└── week-1-questions.md  # Questions for both question-based phases
+└── week-01-questions.md # Questions for both question-based phases
 
 data/432fall2026/
 ├── popping.db           # The SQLite database (created by init-db.sh)
 └── questions/           # Instructor-uploaded weekly files, when present
-    └── week-1-questions.md
+    └── week-01-questions.md
 ```
 
 ### Weekly Question File
 
 For each week, provide one UTF-8 Markdown file named
-`week-N-questions.md`, where `N` is the week number. You can commit it under
+`week-NN-questions.md`, where `NN` is the week number padded to at least two
+digits, such as `01`, `02`, or `10`. You can commit it under
 `classes/{slug}/` and deploy it through GitHub, or upload it from the instructor
 Setup page. The application loads a bundled GitHub file automatically, and the
 browser formats its Markdown, equations, and fenced code blocks. The two
@@ -148,10 +149,14 @@ The same strict parser drives upload preview, saving, readiness, and the two
 question-based phases: Group Discussion and Present and Challenge. If any block
 is malformed, the whole upload is rejected and the previous valid source
 remains in place. A confirmed valid upload is saved
-under `data/{slug}/questions/week-N-questions.md` and overrides the bundled
-file with the same name under `classes/{slug}/`, including after later GitHub
+under `data/{slug}/questions/week-NN-questions.md` and overrides the bundled
+file for the same week under `classes/{slug}/`, including after later GitHub
 deploys. Do not use both sources for the same week unless that override is
-intentional. Legacy `weekN/index.md` and `qNN.html` files are ignored.
+intentional. Existing unpadded files such as `week-1-questions.md` remain
+readable. Within either location, the padded filename takes precedence when
+both exist; a persistent upload takes precedence over either bundled name.
+Weekly appendix files follow the same naming and precedence rules, using
+`week-NN-appendix.md`. Legacy `weekN/index.md` and `qNN.html` files are ignored.
 
 ## Server Terminal Operations
 
@@ -182,7 +187,7 @@ bundled weekly questions under `classes/` must come from GitHub.
    Use a simple course slug made from letters, digits, hyphens, or underscores,
    such as `546fall2026`.
 2. Keep the generated course set to `active: false`. Add any bundled
-   `week-N-questions.md` files, commit the course folder to GitHub, and wait for
+   `week-NN-questions.md` files, commit the course folder to GitHub, and wait for
    the inactive course to deploy.
 3. From the server shell at the repository root, initialize the persistent
    database:
@@ -400,12 +405,12 @@ popping/
 │   └── 432fall2026/
 │       ├── course.yaml
 │       ├── init-db.sh
-│       └── week-1-questions.md
+│       └── week-01-questions.md
 ├── data/                   # Runtime SQLite databases (not committed)
 │   └── 432fall2026/
 │       ├── popping.db
 │       └── questions/
-│           └── week-1-questions.md
+│           └── week-01-questions.md
 ├── static/
 │   ├── css/style.css
 │   └── js/app.js

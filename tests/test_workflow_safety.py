@@ -1989,7 +1989,7 @@ def test_legacy_discussion_hide_request_is_neutralized(course_env):
 
 def test_legacy_hidden_rows_do_not_change_the_shared_question_set(course_env):
     class_dir = Path(config.CLASSES_DIR) / course_env["slug"]
-    (class_dir / "week-1-questions.md").write_text(
+    (class_dir / "week-01-questions.md").write_text(
         "---\nid: topic\ntitle: Topic\n---\n\nDiscuss the broad topic.\n\n"
         "---\nid: topic-detail\ntitle: Topic Detail\n---\n\n"
         "Discuss the detailed topic.\n",
@@ -2024,7 +2024,7 @@ def test_legacy_hidden_rows_do_not_change_the_shared_question_set(course_env):
 
 def test_legacy_hidden_bank_row_is_ignored_after_content_edit(course_env):
     class_dir = Path(config.CLASSES_DIR) / course_env["slug"]
-    question_file = class_dir / "week-1-questions.md"
+    question_file = class_dir / "week-01-questions.md"
     original_title = "Original title"
     original_body = "Original body."
     question_file.write_text(
@@ -2119,7 +2119,7 @@ def test_student_discussion_list_matches_full_instructor_set(course_env):
         f"---\ntitle: Q{num}\nid: q{num}\n---\n\nBank body {num}.\n"
         for num in range(1, 6)
     ]
-    (class_dir / "week-1-questions.md").write_text(
+    (class_dir / "week-01-questions.md").write_text(
         "\n".join(blocks), encoding="utf-8"
     )
     _set_state(course_env, phase="discussion")
@@ -2777,12 +2777,12 @@ def test_export_assets_and_filename_use_only_selected_week(course_env):
         course_env["data_dir"] / course_env["slug"] / "appendix"
     )
     appendix_dir.mkdir()
-    (appendix_dir / "week-1-appendix.md").write_text(
+    (appendix_dir / "week-01-appendix.md").write_text(
         "Appendix week 1", encoding="utf-8"
     )
     legacy_appendix = (
         Path(config.CLASSES_DIR) / course_env["slug"]
-        / "week-2-appendix.md"
+        / "week-02-appendix.md"
     )
     legacy_appendix.write_text("Appendix week 2", encoding="utf-8")
     _set_state(course_env, discussion_week=2)
@@ -2799,12 +2799,12 @@ def test_export_assets_and_filename_use_only_selected_week(course_env):
     with zipfile.ZipFile(io.BytesIO(response.data)) as archive:
         names = set(archive.namelist())
         appendix_text = archive.read(
-            "appendix/week-2-appendix.md"
+            "appendix/week-02-appendix.md"
         ).decode("utf-8")
     assert {
         "course_data.xlsx",
-        "questions/week-2-questions.md",
-        "appendix/week-2-appendix.md",
+        "questions/week-02-questions.md",
+        "appendix/week-02-appendix.md",
     }.issubset(names)
     assert "questions/week2/index.md" not in names
     assert "questions/week2/q01.html" not in names
@@ -3191,7 +3191,7 @@ def test_tools_menu_marks_roster_upload_setup_only_outside_setup(course_env):
 
 def test_export_reports_question_asset_failure(course_env, monkeypatch):
     class_dir = Path(config.CLASSES_DIR) / course_env["slug"]
-    (class_dir / "week-1-questions.md").write_text(
+    (class_dir / "week-01-questions.md").write_text(
         "question asset", encoding="utf-8"
     )
 
@@ -4092,7 +4092,7 @@ def test_question_revision_refreshes_same_question_id(course_env):
 
     canonical_path = (
         Path(config.CLASSES_DIR) / course_env["slug"]
-        / "week-1-questions.md"
+        / "week-01-questions.md"
     )
     canonical_path.write_text(
         "---\ntitle: Discussion week 1\nid: discussion-1\n---\n\n"
@@ -4168,7 +4168,7 @@ title: Hidden by the broken fence
 
 def _write_catalog_week(env, week_num):
     class_dir = Path(config.CLASSES_DIR) / env["slug"]
-    (class_dir / f"week-{week_num}-questions.md").write_text(
+    (class_dir / f"week-{week_num:02d}-questions.md").write_text(
         f"""---
 title: Discussion week {week_num}
 id: discussion-{week_num}
@@ -4182,7 +4182,7 @@ Discuss week {week_num}.
 
 def test_runtime_question_readers_accept_utf8_bom(course_env):
     class_dir = Path(config.CLASSES_DIR) / course_env["slug"]
-    (class_dir / "week-1-questions.md").write_text(
+    (class_dir / "week-01-questions.md").write_text(
         "---\ntitle: BOM discussion\nid: bom-discussion\n---\n\nDiscuss it.\n",
         encoding="utf-8-sig",
     )
@@ -4766,7 +4766,7 @@ def test_appendix_edit_updates_body_and_preserves_label(course_env):
 
     appendix_path = (
         Path(config.DATA_DIR) / course_env["slug"] / "appendix"
-        / "week-1-appendix.md"
+        / "week-01-appendix.md"
     )
     source = appendix_path.read_text(encoding="utf-8")
     assert "A1: First (revised)" in source
@@ -8879,7 +8879,7 @@ def test_appendix_create_is_idempotent_with_client_request_id(course_env):
     assert conflict.status_code == 409
     appendix_path = (
         Path(config.DATA_DIR) / course_env["slug"] / "appendix"
-        / "week-1-appendix.md"
+        / "week-01-appendix.md"
     )
     saved = appendix_path.read_text(encoding="utf-8")
     assert saved.count("client_request_id: appendix-retry-1") == 1
@@ -8910,7 +8910,7 @@ def test_instructor_poll_syncs_same_week_catalog_once_after_live_turn(
 
     question_path = (
         Path(config.CLASSES_DIR) / course_env["slug"]
-        / "week-1-questions.md"
+        / "week-01-questions.md"
     )
     question_path.write_text(
         "---\nid: discussion-1\ntitle: Revised same-week title\n"
@@ -9018,7 +9018,7 @@ def test_missing_saved_week_stays_exact_and_keeps_role_parity(course_env):
         Path(config.DATA_DIR) / course_env["slug"] / "appendix"
     )
     appendix_dir.mkdir(parents=True)
-    (appendix_dir / "week-3-appendix.md").write_text(
+    (appendix_dir / "week-03-appendix.md").write_text(
         "---\ntitle: 'A1: Recovery question'\n---\n\n"
         "Use the exact saved week.\n",
         encoding="utf-8",
@@ -9224,7 +9224,7 @@ def test_security_headers_and_authenticated_no_store_policy(course_env):
 def test_legacy_appendix_seed_copy_is_atomic_idempotent_and_non_destructive(
         course_env):
     class_dir = Path(config.CLASSES_DIR) / course_env["slug"]
-    source = class_dir / "week-2-appendix.md"
+    source = class_dir / "week-02-appendix.md"
     source.write_text(
         "---\ntitle: 'A1: Legacy seed'\n---\n\nLegacy content.\n",
         encoding="utf-8",
@@ -9238,7 +9238,7 @@ def test_legacy_appendix_seed_copy_is_atomic_idempotent_and_non_destructive(
 
     destination = (
         Path(config.DATA_DIR) / course_env["slug"] / "appendix"
-        / "week-2-appendix.md"
+        / "week-02-appendix.md"
     )
     assert len(set(results)) == 1
     assert source.is_file()

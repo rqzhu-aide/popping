@@ -61,7 +61,7 @@ def upload_env(tmp_path, monkeypatch):
     bundled_source = _weekly_source(
         ("bundled", "Bundled question", "Bundled content."),
     )
-    (class_dir / "week-1-questions.md").write_bytes(bundled_source)
+    (class_dir / "week-01-questions.md").write_bytes(bundled_source)
 
     course_dir = data_dir / slug
     course_dir.mkdir()
@@ -180,7 +180,7 @@ def _upload(client, payload, week=1, **fields):
             "expected_phase": "setup",
             "expected_session_key": str(SESSION_KEY),
             **fields,
-            "file": (io.BytesIO(payload), f"week-{week}-questions.md"),
+            "file": (io.BytesIO(payload), f"week-{week:02d}-questions.md"),
         },
         content_type="multipart/form-data",
     )
@@ -225,7 +225,7 @@ def test_preview_is_read_only_and_confirmed_override_feeds_both_catalogs(
     client = _instructor_client(upload_env)
     persistent_path = (
         upload_env["data_dir"] / upload_env["slug"] / "questions"
-        / "week-1-questions.md"
+        / "week-01-questions.md"
     )
 
     preview = _upload(client, payload)
@@ -277,7 +277,7 @@ def test_preview_is_read_only_and_confirmed_override_feeds_both_catalogs(
     assert all(row["source_key"] for row in rows)
 
     # A bundled-file edit cannot override the confirmed persistent source.
-    (upload_env["class_dir"] / "week-1-questions.md").write_bytes(
+    (upload_env["class_dir"] / "week-01-questions.md").write_bytes(
         _weekly_source(("wrong", "Wrong source", "Wrong body."))
     )
     refreshed = client.get("/api/discussion_questions").get_json()["questions"]
@@ -400,7 +400,7 @@ def test_invalid_token_and_invalid_source_leave_file_and_database_unchanged(
     _confirm_upload(client, original)
     persistent_path = (
         upload_env["data_dir"] / upload_env["slug"] / "questions"
-        / "week-1-questions.md"
+        / "week-01-questions.md"
     )
     rows_before = _question_rows(upload_env)
     with _connect(upload_env) as db:
@@ -470,7 +470,7 @@ def test_upload_requires_instructor_setup_and_is_disabled_for_demo(
 
     persistent_path = (
         upload_env["data_dir"] / upload_env["slug"] / "questions"
-        / "week-1-questions.md"
+        / "week-01-questions.md"
     )
     assert not persistent_path.exists()
 
@@ -506,7 +506,7 @@ def test_export_contains_persistent_canonical_source_not_legacy_assets(
     assert response.status_code == 200
     with zipfile.ZipFile(io.BytesIO(response.data)) as archive:
         names = set(archive.namelist())
-        exported = archive.read("questions/week-2-questions.md")
+        exported = archive.read("questions/week-02-questions.md")
     assert exported == payload
     assert "questions/week2/index.md" not in names
     assert "questions/week2/q01.html" not in names
@@ -578,7 +578,7 @@ def test_later_id_first_block_without_title_is_rejected_before_persistence(
     client = _instructor_client(upload_env)
     persistent_path = (
         upload_env["data_dir"] / upload_env["slug"] / "questions"
-        / "week-1-questions.md"
+        / "week-01-questions.md"
     )
 
     response = _upload(client, malformed)

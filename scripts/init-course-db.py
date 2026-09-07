@@ -59,6 +59,7 @@ from pin_policy import is_valid_instructor_pin
 from question_catalog import (
     discover_catalog_weeks,
     read_week_questions,
+    resolve_week_file,
     validate_question_catalog,
 )
 from scripts.maintenance_safety import confirmation_prompt, validate_confirmation
@@ -106,7 +107,7 @@ def build_team_rows(config):
 
 
 def read_presentation_question_index(config_dir, week_num):
-    question_path = os.path.join(config_dir, f'week-{week_num}-questions.md')
+    question_path = resolve_week_file(config_dir, week_num)
     if not os.path.isfile(question_path):
         return []
     return read_week_questions(question_path, week_num=week_num)

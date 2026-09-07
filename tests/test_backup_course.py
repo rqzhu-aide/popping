@@ -9,6 +9,7 @@ from threading import Barrier
 import zipfile
 
 import database
+from versioning import APP_VERSION, public_version
 
 import pytest
 
@@ -49,10 +50,10 @@ def create_course(data_dir, slug="safe101", directory_slug=None):
     db.execute("INSERT INTO notes (value) VALUES ('captured')")
     db.commit()
     db.close()
-    questions = course_dir / "questions" / "week-1-questions.md"
+    questions = course_dir / "questions" / "week-01-questions.md"
     questions.parent.mkdir()
     questions.write_text("weekly questions\n", encoding="utf-8")
-    appendix = course_dir / "appendix" / "week-1-appendix.md"
+    appendix = course_dir / "appendix" / "week-01-appendix.md"
     appendix.parent.mkdir()
     appendix.write_text("appendix questions\n", encoding="utf-8")
     return course_dir
@@ -72,7 +73,7 @@ def test_create_bundle_captures_database_and_persistent_question_files(
     manifest = backup_course_module.verify_archive(archive_path)
     assert manifest["format"] == "popping-course-backup-v1"
     assert manifest["course_slug"] == "safe101"
-    assert manifest["website_version"] == "v1.3.0"
+    assert manifest["website_version"] == public_version(APP_VERSION)
     assert manifest["database_schema_version"] == "v1.0.0"
     assert manifest["export_format_version"] == "v1.3.0"
     assert manifest["contained_data_versions"] == []
@@ -82,13 +83,13 @@ def test_create_bundle_captures_database_and_persistent_question_files(
     by_path = {item["path"]: item for item in manifest["files"]}
     assert set(by_path) == {
         "popping.db",
-        "questions/week-1-questions.md",
-        "appendix/week-1-appendix.md",
+        "questions/week-01-questions.md",
+        "appendix/week-01-appendix.md",
     }
     assert all(len(item["sha256"]) == 64 for item in by_path.values())
 
     with zipfile.ZipFile(archive_path) as archive:
-        assert archive.read("questions/week-1-questions.md").replace(
+        assert archive.read("questions/week-01-questions.md").replace(
             b"\r\n", b"\n"
         ) == b"weekly questions\n"
         snapshot = tmp_path / "snapshot.db"
@@ -148,7 +149,7 @@ def test_bundle_manifest_uses_archived_database_schema_ledger(
     archive_path = backup_course_module.create_backup("safe101", destination)
 
     manifest = backup_course_module.verify_archive(archive_path)
-    assert manifest["website_version"] == "v1.3.0"
+    assert manifest["website_version"] == public_version(APP_VERSION)
     assert manifest["database_schema_version"] == "v1.4.0"
     assert manifest["contained_data_versions"] == ["v1.4.7"]
     assert manifest["contains_unclassified_data"] is True
@@ -237,7 +238,7 @@ def test_verify_rejects_tampered_file(
     with zipfile.ZipFile(original) as source, zipfile.ZipFile(tampered, "w") as target:
         for name in source.namelist():
             contents = source.read(name)
-            if name == "questions/week-1-questions.md":
+            if name == "questions/week-01-questions.md":
                 contents = b"changed after the manifest was written\n"
             target.writestr(name, contents)
 

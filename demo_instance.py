@@ -15,7 +15,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from database import migrate_schema_connection, upgrade_schema_connection
-from question_catalog import read_week_questions
+from question_catalog import read_week_questions, resolve_week_file, weekly_filename
 
 
 DEMO_INSTANCE_RE = re.compile(r'^demo_[0-9a-f]{32}$')
@@ -88,7 +88,7 @@ def _demo_lifecycle_lock(data_dir, timeout=0.0):
 
 
 def _read_week_questions(classes_dir):
-    question_path = os.path.join(classes_dir, 'demo', 'week-1-questions.md')
+    question_path = resolve_week_file(os.path.join(classes_dir, 'demo'), 1)
     return read_week_questions(question_path, week_num=1)
 
 
@@ -179,11 +179,17 @@ def _restore_appendix_files(data_dir, classes_dir, slug):
     source_dir = os.path.join(classes_dir, 'demo')
     if not os.path.isdir(source_dir):
         return
-    for name in os.listdir(source_dir):
-        if re.fullmatch(r'week-\d+-appendix\.md', name):
+    weeks = {
+        int(match.group(1))
+        for name in os.listdir(source_dir)
+        if (match := re.fullmatch(r'week-(\d+)-appendix\.md', name))
+    }
+    for week in sorted(weeks):
+        source = resolve_week_file(source_dir, week, kind='appendix')
+        if os.path.isfile(source):
             shutil.copyfile(
-                os.path.join(source_dir, name),
-                os.path.join(appendix_dir, name),
+                source,
+                os.path.join(appendix_dir, weekly_filename(week, 'appendix')),
             )
 
 

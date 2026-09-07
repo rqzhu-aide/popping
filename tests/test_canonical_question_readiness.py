@@ -3,6 +3,7 @@
 from pathlib import Path
 import sys
 
+import pytest
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -12,11 +13,13 @@ from question_catalog import (  # noqa: E402
     discover_catalog_weeks,
     read_week_questions,
     validate_question_catalog,
+    validate_week_question_file,
+    weekly_filename,
 )
 
 
 def _write_week(directory, week, question_id, title, content):
-    path = directory / f"week-{week}-questions.md"
+    path = directory / f"week-{week:02d}-questions.md"
     path.write_text(
         "\n".join(
             (
@@ -122,3 +125,55 @@ def test_bundled_file_is_used_only_when_persistent_override_is_absent(tmp_path):
     assert week.ready is True
     assert week.discussion == week.presentation
     assert Path(week.discussion.path) == bundled_path
+
+
+@pytest.mark.parametrize("week", [1, 2, 9, 10, 99, 100])
+def test_week_filename_padding_and_discovery(tmp_path, week):
+    path = _write_week(tmp_path, week, "one", "One", "Body.")
+    assert path.name == weekly_filename(week)
+    assert discover_catalog_weeks(tmp_path) == (week,)
+    assert validate_question_catalog(tmp_path).get_week(week).ready
+
+
+def test_padded_file_wins_and_duplicate_names_discover_one_week(tmp_path):
+    padded = _write_week(tmp_path, 2, "current", "Current", "Current body.")
+    legacy = tmp_path / "week-2-questions.md"
+    legacy.write_text("Invalid legacy content", encoding="utf-8")
+
+    assert discover_catalog_weeks(tmp_path) == (2,)
+    status = validate_question_catalog(tmp_path).get_week(2)
+    assert status.ready
+    assert Path(status.discussion.path) == padded
+    # Explicit validation checks the requested file, even when a sibling exists.
+    assert not validate_week_question_file(legacy).ready
+
+
+def test_legacy_upload_still_overrides_new_bundled_filename(tmp_path):
+    persistent = tmp_path / "persistent"
+    bundled = tmp_path / "bundled"
+    persistent.mkdir()
+    bundled.mkdir()
+    _write_week(bundled, 2, "bundled", "Bundled", "Bundled body.")
+    uploaded = _write_week(persistent, 2, "uploaded", "Uploaded", "Body.")
+    legacy = uploaded.rename(persistent / "week-2-questions.md")
+
+    status = validate_question_catalog(
+        persistent, fallback_dir=bundled
+    ).get_week(2)
+    assert status.ready
+    assert Path(status.discussion.path) == legacy
+
+    # A malformed newer override must not silently expose an older source.
+    uploaded.write_text("Invalid new content", encoding="utf-8")
+    status = validate_question_catalog(
+        persistent, fallback_dir=bundled
+    ).get_week(2)
+    assert not status.ready
+    assert Path(status.discussion.path) == uploaded
+
+
+def test_noncanonical_extra_zeroes_are_not_advertised_as_ready(tmp_path):
+    path = tmp_path / "week-002-questions.md"
+    path.write_text("---\nid: one\ntitle: One\n---\n\nBody.", encoding="utf-8")
+    assert discover_catalog_weeks(tmp_path) == ()
+    assert not validate_week_question_file(path).ready

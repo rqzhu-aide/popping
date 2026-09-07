@@ -89,7 +89,7 @@ def test_seed_is_isolated_and_has_expected_course_shape(tmp_path):
     assert (
         simulator.classes_dir
         / "simulation"
-        / "week-1-questions.md"
+        / "week-01-questions.md"
     ).is_file()
     runtime_class = simulator.classes_dir / "simulation"
     assert not list(runtime_class.glob("week-*-appendix.md"))
@@ -99,7 +99,7 @@ def test_seed_is_isolated_and_has_expected_course_shape(tmp_path):
     assert week.discussion.count == 4
     assert week.presentation.count == 4
     assert (
-        PROJECT_ROOT / "classes" / "demo" / "week-1-appendix.md"
+        PROJECT_ROOT / "classes" / "demo" / "week-01-appendix.md"
     ).is_file()
 
     with sqlite3.connect(simulator.db_path) as db:

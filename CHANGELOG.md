@@ -3,6 +3,24 @@
 All notable changes to Popping are recorded here. Releases use semantic
 versions as defined in `VERSIONING.md`.
 
+## [v1.3.1] - 2026-09-07
+
+### Added
+
+- Published the 11 pooled STAT 432 Week 2 discussion questions, with student
+  contribution credits and an explicit Gaussian assumption for the
+  prediction-interval question.
+
+### Changed
+
+- Standardized weekly question and appendix filenames to `week-NN-questions.md`
+  and `week-NN-appendix.md`, using at least two digits for the week number.
+- Kept existing unpadded filenames readable. The padded filename takes
+  precedence within each location, and persistent uploads continue to override
+  bundled course files for the same week.
+- Advanced the website to `v1.3.1`; the database schema and export format remain
+  at `v1.3.0`.
+
 ## [v1.3.0] - 2026-09-01
 
 ### Added

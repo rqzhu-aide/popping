@@ -2,6 +2,7 @@
 
 import importlib.util
 import os
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -117,8 +118,8 @@ class TestCliDemoSeed:
         assert _run_init(tmp_path).returncode == 0
         db_path = tmp_path / 'demo' / 'popping.db'
         appendix_dir = tmp_path / 'demo' / 'appendix'
-        appendix = appendix_dir / 'week-1-appendix.md'
-        shipped = (CLASSES_DIR / 'demo' / 'week-1-appendix.md').read_text(
+        appendix = appendix_dir / 'week-01-appendix.md'
+        shipped = (CLASSES_DIR / 'demo' / 'week-01-appendix.md').read_text(
             encoding='utf-8'
         )
 
@@ -130,12 +131,16 @@ class TestCliDemoSeed:
         connection.commit()
         connection.close()
         appendix.write_text('changed', encoding='utf-8')
-        (appendix_dir / 'week-2-appendix.md').write_text('extra', encoding='utf-8')
+        (appendix_dir / 'week-1-appendix.md').write_text('legacy', encoding='utf-8')
+        (appendix_dir / 'week-02-appendix.md').write_text('extra', encoding='utf-8')
+        (appendix_dir / 'week-2-appendix.md').write_text('legacy extra', encoding='utf-8')
 
         result = _run_init(tmp_path)
         assert result.returncode == 0, result.stderr
         _assert_seed_shape(db_path)
         assert appendix.read_text(encoding='utf-8') == shipped
+        assert not (appendix_dir / 'week-1-appendix.md').exists()
+        assert not (appendix_dir / 'week-02-appendix.md').exists()
         assert not (appendix_dir / 'week-2-appendix.md').exists()
 
     def test_failed_reset_rolls_back_existing_data(self, tmp_path, monkeypatch):
@@ -169,8 +174,16 @@ class TestCliDemoSeed:
         db_path = tmp_path / 'demo' / 'popping.db'
         connection = _open_db(db_path)
         connection.execute("UPDATE course_state SET phase = 'competition'")
+        questions_before = connection.execute(
+            'SELECT id, source_key FROM questions ORDER BY id'
+        ).fetchall()
         connection.commit()
         connection.close()
+        appendix_dir = tmp_path / 'demo' / 'appendix'
+        canonical_appendix = appendix_dir / 'week-01-appendix.md'
+        legacy_appendix = appendix_dir / 'week-1-appendix.md'
+        canonical_appendix.rename(legacy_appendix)
+        legacy_appendix.write_text('Existing material', encoding='utf-8')
 
         result = _run_init(tmp_path, '--ensure')
         assert result.returncode == 0, result.stderr
@@ -179,8 +192,13 @@ class TestCliDemoSeed:
             assert connection.execute(
                 'SELECT phase FROM course_state'
             ).fetchone()[0] == 'competition'
+            assert connection.execute(
+                'SELECT id, source_key FROM questions ORDER BY id'
+            ).fetchall() == questions_before
         finally:
             connection.close()
+        assert legacy_appendix.read_text(encoding='utf-8') == 'Existing material'
+        assert not canonical_appendix.exists()
 
     def test_ensure_upgrades_version_one_seed_to_current_shape(self, tmp_path):
         assert _run_init(tmp_path).returncode == 0
@@ -247,6 +265,47 @@ class TestCliDemoSeed:
         assert present.returncode == 0
 
 
+@pytest.mark.parametrize('mode', ['cli', 'private'])
+@pytest.mark.parametrize('filename_week', ['01', '1'])
+def test_demo_seed_reads_both_names_and_writes_padded_appendix(
+    tmp_path, monkeypatch, mode, filename_week
+):
+    demo_dir = tmp_path / 'classes' / 'demo'
+    demo_dir.mkdir(parents=True)
+    shutil.copyfile(
+        CLASSES_DIR / 'demo' / 'week-01-questions.md',
+        demo_dir / f'week-{filename_week}-questions.md',
+    )
+    (demo_dir / f'week-{filename_week}-appendix.md').write_text(
+        'Chosen appendix', encoding='utf-8'
+    )
+    if filename_week == '01':
+        (demo_dir / 'week-1-questions.md').write_text(
+            'Malformed older copy', encoding='utf-8'
+        )
+        (demo_dir / 'week-1-appendix.md').write_text(
+            'Older appendix', encoding='utf-8'
+        )
+
+    data_dir = tmp_path / 'data'
+    if mode == 'cli':
+        module = _load_init_module(data_dir, monkeypatch)
+        monkeypatch.setattr(module, 'BASE_DIR', str(tmp_path))
+        module.init_demo_db()
+        slug = 'demo'
+    else:
+        slug = demo_instance.create_demo_instance(
+            str(data_dir), str(tmp_path / 'classes'), str(SCHEMA)
+        )
+
+    _assert_seed_shape(data_dir / slug / 'popping.db', expected_slug=slug)
+    appendix_dir = data_dir / slug / 'appendix'
+    assert (appendix_dir / 'week-01-appendix.md').read_text(
+        encoding='utf-8'
+    ) == 'Chosen appendix'
+    assert not (appendix_dir / 'week-1-appendix.md').exists()
+
+
 @pytest.fixture
 def private_demo_env(tmp_path):
     data_dir = tmp_path / 'data'
@@ -293,8 +352,8 @@ class TestPrivateDemoDatabase:
         )
         connection.commit()
         connection.close()
-        appendix_a = private_demo_env['data_dir'] / slug_a / 'appendix' / 'week-1-appendix.md'
-        appendix_b = private_demo_env['data_dir'] / slug_b / 'appendix' / 'week-1-appendix.md'
+        appendix_a = private_demo_env['data_dir'] / slug_a / 'appendix' / 'week-01-appendix.md'
+        appendix_b = private_demo_env['data_dir'] / slug_b / 'appendix' / 'week-01-appendix.md'
         appendix_a.write_text('instance A only', encoding='utf-8')
 
         connection = _open_db(path_b)

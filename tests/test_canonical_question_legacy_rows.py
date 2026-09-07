@@ -73,7 +73,7 @@ def test_active_legacy_row_does_not_substitute_new_or_pre_rendered_content(
         "Shared title",
         "New canonical body that was not active when the session started.",
     ))
-    (upload_env["class_dir"] / "week-1-questions.md").write_bytes(canonical)
+    (upload_env["class_dir"] / "week-01-questions.md").write_bytes(canonical)
     legacy_dir = upload_env["class_dir"] / "week1"
     legacy_dir.mkdir()
     (legacy_dir / "q01.html").write_text(

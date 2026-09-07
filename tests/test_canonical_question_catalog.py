@@ -39,7 +39,7 @@ print("hello")
 """
 
     questions = parse_week_questions(
-        source, source_path="week-7-questions.md"
+        source, source_path="week-07-questions.md"
     )
 
     assert questions == [
@@ -64,7 +64,7 @@ print("hello")
 
 
 def test_reader_accepts_bom_and_enforces_question_limit(tmp_path):
-    path = tmp_path / "week-3-questions.md"
+    path = tmp_path / "week-03-questions.md"
     path.write_text(
         """---
 id: first

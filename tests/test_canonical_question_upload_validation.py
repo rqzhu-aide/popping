@@ -21,7 +21,7 @@ from tests.test_canonical_question_upload import (
 def _persistent_path(env, week=1):
     return (
         env["data_dir"] / env["slug"] / "questions"
-        / f"week-{week}-questions.md"
+        / f"week-{week:02d}-questions.md"
     )
 
 
@@ -289,7 +289,7 @@ def test_export_captures_question_bytes_inside_its_database_snapshot(
 
     assert export_response.status_code == 200
     with zipfile.ZipFile(io.BytesIO(export_response.data)) as archive:
-        exported_questions = archive.read("questions/week-1-questions.md")
+        exported_questions = archive.read("questions/week-01-questions.md")
     assert exported_questions == original
 
     assert upload_response.status_code == 200, upload_response.get_json()

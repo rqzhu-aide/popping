@@ -24,7 +24,7 @@ def _codes(status):
 
 
 def _write_valid_week(course_dir, week=1):
-    (course_dir / f"week-{week}-questions.md").write_text(
+    (course_dir / f"week-{week:02d}-questions.md").write_text(
         """---
 id: bias_variance
 title: Bias Variance
@@ -70,7 +70,7 @@ def test_valid_catalog_reports_each_section_ready(tmp_path):
 
 
 def test_catalog_uses_one_file_for_both_phase_readiness(tmp_path):
-    (tmp_path / "week-2-questions.md").write_text(
+    (tmp_path / "week-02-questions.md").write_text(
         "---\nid: available-discussion\n"
         "title: Available discussion\n---\n\nDiscuss this.\n",
         encoding="utf-8",
@@ -87,7 +87,7 @@ def test_catalog_uses_one_file_for_both_phase_readiness(tmp_path):
 
 
 def test_discussion_rejects_invalid_and_duplicate_ids_and_titles(tmp_path):
-    (tmp_path / "week-1-questions.md").write_text(
+    (tmp_path / "week-01-questions.md").write_text(
         """---
 id: Question One
 title: Repeated title
@@ -125,7 +125,7 @@ Third body.
 
 
 def test_discussion_requires_stable_question_ids(tmp_path):
-    (tmp_path / "week-1-questions.md").write_text(
+    (tmp_path / "week-01-questions.md").write_text(
         "---\ntitle: Missing ID\n---\n\nDiscuss this.\n",
         encoding="utf-8",
     )
@@ -153,7 +153,7 @@ def test_discussion_requires_stable_question_ids(tmp_path):
 )
 def test_discussion_rejects_empty_non_utf8_and_malformed_files(
         tmp_path, contents, expected_code):
-    (tmp_path / "week-1-questions.md").write_bytes(contents)
+    (tmp_path / "week-01-questions.md").write_bytes(contents)
 
     status = validate_discussion_week(tmp_path, 1)
 
@@ -229,7 +229,7 @@ def test_presentation_rejects_empty_and_non_utf8_files(
 
 
 def test_catalog_accepts_utf8_bom_question_sources(tmp_path):
-    (tmp_path / "week-1-questions.md").write_text(
+    (tmp_path / "week-01-questions.md").write_text(
         "---\nid: bom-discussion\n"
         "title: BOM discussion\n---\n\nDiscuss this.\n",
         encoding="utf-8-sig",
@@ -253,7 +253,7 @@ def test_catalog_accepts_utf8_bom_question_sources(tmp_path):
 
 
 def test_discovery_uses_only_canonical_weekly_files(tmp_path):
-    (tmp_path / "week-2-questions.md").write_text("placeholder", encoding="utf-8")
+    (tmp_path / "week-02-questions.md").write_text("placeholder", encoding="utf-8")
     (tmp_path / "week4").mkdir()
     (tmp_path / "week-0-questions.md").write_text("ignored", encoding="utf-8")
     (tmp_path / "weekx").mkdir()
@@ -279,7 +279,7 @@ def test_checked_in_course_uses_each_week_file_for_both_phases():
 
 
 def test_submission_validator_rejects_duplicate_ids_and_titles(tmp_path):
-    question_file = tmp_path / "week-1-questions.md"
+    question_file = tmp_path / "week-01-questions.md"
     question_file.write_text(
         """---
 id: Same-ID

@@ -13,11 +13,30 @@ import yaml
 
 
 DISCUSSION_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
-DISCUSSION_FILE_PATTERN = re.compile(r"^week-(\d+)-questions\.md$")
+DISCUSSION_FILE_PATTERN = re.compile(r"^week-([0-9]+)-questions\.md$")
 PRESENTATION_DIR_PATTERN = re.compile(r"^week(\d+)$")
 PRESENTATION_ENTRY_PATTERN = re.compile(r"^(\d+)\.\s+(.+)$")
 PRESENTATION_HTML_PATTERN = re.compile(r"^q\d+\.html$")
 MAX_TITLE_LENGTH = 200
+
+
+def weekly_filename(week_num, kind="questions"):
+    """Use at least two digits for weekly material filenames."""
+    return f"week-{week_num:02d}-{kind}.md"
+
+
+def resolve_week_file(directory, week_num, kind="questions", fallback_dir=None):
+    """Prefer padded names, retaining older files and directory precedence."""
+    roots = [Path(directory)]
+    if fallback_dir is not None:
+        roots.append(Path(fallback_dir))
+    filename = weekly_filename(week_num, kind)
+    for root in roots:
+        for name in dict.fromkeys((filename, f"week-{week_num}-{kind}.md")):
+            candidate = root / name
+            if candidate.exists():
+                return candidate
+    return roots[-1] / filename
 
 
 @dataclass(frozen=True)
@@ -363,9 +382,14 @@ def _parse_discussion_blocks(text, path):
 
 
 def validate_discussion_week(course_dir, week_num):
-    """Validate ``week-N-questions.md`` for one week."""
-    course_path = Path(course_dir)
-    path = course_path / f"week-{week_num}-questions.md"
+    """Validate ``week-NN-questions.md``, with unpadded legacy fallback."""
+    return _validate_discussion_file(
+        resolve_week_file(course_dir, week_num), week_num
+    )
+
+
+def _validate_discussion_file(path, week_num):
+    """Validate the exact selected file without resolving its name again."""
     text, read_issue = _read_utf8(path, "discussion_file")
     if read_issue:
         return CatalogSectionStatus(False, 0, str(path), (read_issue,))
@@ -467,18 +491,19 @@ def validate_week_question_file(path):
     """Validate one already-resolved canonical weekly question file."""
     question_path = Path(path)
     match = DISCUSSION_FILE_PATTERN.fullmatch(question_path.name)
-    if not match:
+    week_num = int(match.group(1)) if match else 0
+    if week_num < 1 or question_path.name not in (
+            weekly_filename(week_num), f"week-{week_num}-questions.md"):
         issue = _issue(
             "discussion_file_name_invalid",
-            "Weekly question filename must use week-N-questions.md",
+            "Weekly question filename must use week-NN-questions.md "
+            "(for example, week-02-questions.md)",
             question_path,
         )
         return CatalogSectionStatus(
             False, 0, str(question_path), (issue,)
         )
-    return validate_discussion_week(
-        question_path.parent, int(match.group(1))
-    )
+    return _validate_discussion_file(question_path, week_num)
 
 
 def parse_week_questions(
@@ -729,7 +754,10 @@ def discover_catalog_weeks(course_dir, fallback_dir=None):
         for child in root.iterdir():
             match = DISCUSSION_FILE_PATTERN.fullmatch(child.name)
             if child.is_file() and match:
-                weeks.add(int(match.group(1)))
+                week = int(match.group(1))
+                if child.name in (
+                        weekly_filename(week), f"week-{week}-questions.md"):
+                    weeks.add(week)
     return tuple(sorted(week for week in weeks if week > 0))
 
 
@@ -753,10 +781,9 @@ def validate_question_catalog(
 
     statuses = []
     for week in selected_weeks:
-        filename = f"week-{week}-questions.md"
-        primary = course_path / filename
-        fallback = fallback_path / filename if fallback_path else None
-        resolved = primary if primary.exists() else (fallback or primary)
+        resolved = resolve_week_file(
+            course_path, week, fallback_dir=fallback_path
+        )
         section = validate_week_question_file(resolved)
         statuses.append(WeekCatalogStatus(
             week=week,

@@ -7118,7 +7118,7 @@ function renderDiscussionQuestions(data) {
     appendixQuestionsById.clear();
 
     if (!data.questions || data.questions.length === 0) {
-        container.innerHTML = '<p class="empty">No questions found. Add <code>week-N-questions.md</code> files in the course folder, then select a week during setup.</p>';
+        container.innerHTML = '<p class="empty">No questions found. Add <code>week-NN-questions.md</code> files (for example, <code>week-02-questions.md</code>) in the course folder, then select a week during setup.</p>';
         resolveRestoredAppendixEditMode();
         return;
     }

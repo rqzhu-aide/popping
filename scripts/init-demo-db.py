@@ -4,7 +4,7 @@
 Creates a self-contained 'demo' course with:
   - 1 instructor (the web demo bypasses login)
   - 2 unassigned students and 2 teams
-  - Sample questions read from classes/demo/week-1-questions.md
+  - Sample questions read from classes/demo/week-01-questions.md
   - Course state in 'setup' phase
 
 Usage:
@@ -25,7 +25,7 @@ if BASE_DIR not in sys.path:
     sys.path.insert(0, BASE_DIR)
 
 from database import migrate_schema_connection, upgrade_schema_connection
-from question_catalog import read_week_questions
+from question_catalog import read_week_questions, resolve_week_file, weekly_filename
 
 
 def resolve_data_dir():
@@ -209,9 +209,7 @@ def _populate(conn):
             (course_id, sid, name, 'demo', None)
         )
 
-    question_path = os.path.join(
-        BASE_DIR, 'classes', 'demo', 'week-1-questions.md'
-    )
+    question_path = resolve_week_file(os.path.join(BASE_DIR, 'classes', 'demo'), 1)
     questions = read_week_questions(question_path, week_num=1)
 
     for q in questions:
@@ -349,13 +347,15 @@ def _reset_demo_appendix():
     appendix_dir = os.path.join(DB_DIR, 'appendix')
     os.makedirs(appendix_dir, exist_ok=True)
     for week in range(1, 20):
-        target = os.path.join(appendix_dir, f'week-{week}-appendix.md')
-        try:
-            os.remove(target)
-        except FileNotFoundError:
-            pass
-        source = os.path.join(
-            BASE_DIR, 'classes', 'demo', f'week-{week}-appendix.md'
+        canonical_name = weekly_filename(week, 'appendix')
+        target = os.path.join(appendix_dir, canonical_name)
+        for name in {canonical_name, f'week-{week}-appendix.md'}:
+            try:
+                os.remove(os.path.join(appendix_dir, name))
+            except FileNotFoundError:
+                pass
+        source = resolve_week_file(
+            os.path.join(BASE_DIR, 'classes', 'demo'), week, kind='appendix'
         )
         if os.path.isfile(source):
             shutil.copyfile(source, target)

@@ -65,7 +65,9 @@ from question_catalog import (
     parse_question_blocks,
     parse_week_questions,
     read_week_questions,
+    resolve_week_file,
     validate_question_catalog,
+    weekly_filename,
 )
 from versioning import (
     APP_VERSION,
@@ -891,21 +893,22 @@ def _persistent_questions_dir(slug):
 def _persistent_week_question_path(slug, week_num):
     return os.path.join(
         _persistent_questions_dir(slug),
-        f'week-{week_num}-questions.md',
+        weekly_filename(week_num),
     )
 
 
 def _bundled_week_question_path(slug, week_num):
     return os.path.join(
-        _course_class_dir(slug), f'week-{week_num}-questions.md'
+        _course_class_dir(slug), weekly_filename(week_num)
     )
 
 
 def _resolve_week_question_path(slug, week_num):
     """Resolve a durable upload first, then the bundled course fallback."""
-    persistent = _persistent_week_question_path(slug, week_num)
-    return persistent if os.path.exists(persistent) else \
-        _bundled_week_question_path(slug, week_num)
+    return str(resolve_week_file(
+        _persistent_questions_dir(slug), week_num,
+        fallback_dir=_course_class_dir(slug),
+    ))
 
 
 def _validate_course_question_catalog(slug, weeks=None):
@@ -4878,7 +4881,7 @@ def upload_questions():
     try:
         questions = parse_week_questions(
             text,
-            source_path=f'week-{week}-questions.md',
+            source_path=weekly_filename(week),
             week_num=week,
             max_questions=MAX_WEEK_QUESTIONS,
         )
@@ -4891,7 +4894,9 @@ def upload_questions():
     ]
     digest = hashlib.sha256(raw).hexdigest()
     destination = _persistent_week_question_path(slug, week)
-    destination_baseline = _question_destination_baseline(destination)
+    destination_baseline = _question_destination_baseline(str(
+        resolve_week_file(_persistent_questions_dir(slug), week)
+    ))
     expected_token = _question_upload_preview_token(
         slug, week, digest, destination_baseline
     )
@@ -4948,7 +4953,9 @@ def upload_questions():
                 'error': 'Questions can only be uploaded during setup'
             }), 409
 
-        locked_baseline = _question_destination_baseline(destination)
+        locked_baseline = _question_destination_baseline(str(
+            resolve_week_file(_persistent_questions_dir(slug), week)
+        ))
         locked_token = _question_upload_preview_token(
             slug, week, digest, locked_baseline
         )
@@ -5465,16 +5472,26 @@ def _appendix_dir(slug):
     """Directory for appendix question files on the persistent data disk."""
     d = os.path.join(config.DATA_DIR, slug, 'appendix')
     os.makedirs(d, exist_ok=True)
-    # Publish legacy appendix seeds atomically without changing source files.
+    # Publish bundled and unpadded appendix files under the canonical name.
     # Linking a fully written temporary file creates the destination only if
     # another worker has not already published it.
-    for week in range(1, 20):
-        old = os.path.join(_course_class_dir(slug), f'week-{week}-appendix.md')
+    class_dir = _course_class_dir(slug)
+    weeks = set()
+    for directory in (d, class_dir):
+        if os.path.isdir(directory):
+            for name in os.listdir(directory):
+                match = re.fullmatch(r'week-([0-9]+)-appendix\.md', name)
+                if match and int(match.group(1)) > 0:
+                    weeks.add(int(match.group(1)))
+    for week in sorted(weeks):
+        old = str(resolve_week_file(
+            d, week, 'appendix', fallback_dir=class_dir
+        ))
         if os.path.exists(old):
-            new = os.path.join(d, f'week-{week}-appendix.md')
+            new = os.path.join(d, weekly_filename(week, 'appendix'))
             if not os.path.exists(new):
                 temporary = os.path.join(
-                    d, f'.week-{week}-appendix.{uuid.uuid4().hex}.tmp'
+                    d, f'.week-{week:02d}-appendix.{uuid.uuid4().hex}.tmp'
                 )
                 try:
                     with open(old, 'rb') as source, open(temporary, 'xb') as target:
@@ -5496,7 +5513,7 @@ def _appendix_dir(slug):
 
 def _appendix_path(slug, week):
     """File path for a given week's appendix questions."""
-    return os.path.join(_appendix_dir(slug), f'week-{week}-appendix.md')
+    return os.path.join(_appendix_dir(slug), weekly_filename(week, 'appendix'))
 
 
 @app.route('/api/questions', methods=['POST'])
@@ -8625,21 +8642,17 @@ def export_data(slug):
             discussion_path = _resolve_week_question_path(slug, export_week)
             add_asset(
                 discussion_path,
-                f'questions/week-{export_week}-questions.md',
+                f'questions/{weekly_filename(export_week)}',
             )
 
         for export_week in export_weeks:
-            appendix_path = os.path.join(
-                config.DATA_DIR, slug, 'appendix',
-                f'week-{export_week}-appendix.md',
+            appendix_path = resolve_week_file(
+                os.path.join(config.DATA_DIR, slug, 'appendix'),
+                export_week, 'appendix', fallback_dir=class_dir,
             )
-            if not os.path.isfile(appendix_path):
-                appendix_path = os.path.join(
-                    class_dir, f'week-{export_week}-appendix.md'
-                )
             add_asset(
                 appendix_path,
-                f'appendix/week-{export_week}-appendix.md',
+                f'appendix/{weekly_filename(export_week, "appendix")}',
             )
 
         if asset_bytes > MAX_EXPORT_BYTES:

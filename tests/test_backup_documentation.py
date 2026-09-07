@@ -14,7 +14,7 @@ def test_question_guide_documents_only_the_canonical_weekly_source():
     guide = read("question-guide/README.md")
     assert "one UTF-8 Markdown file" in guide
     assert "exact same ordered question set" in guide
-    assert "week-N-questions.md" in guide
+    assert "week-NN-questions.md" in guide
     assert "Legacy files are not used" in guide
     assert "does not read" in guide
     assert "server reads `index.md`" not in guide

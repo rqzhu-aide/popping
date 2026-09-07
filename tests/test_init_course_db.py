@@ -46,7 +46,7 @@ teams:
     )
     (week_dir / "q01.html").write_text("<p>First question</p>\n", encoding="utf-8")
     (week_dir / "q02.html").write_text("<p>Second question</p>\n", encoding="utf-8")
-    (config_dir / "week-1-questions.md").write_text(
+    (config_dir / "week-01-questions.md").write_text(
         """---
 title: First discussion question
 id: discussion-1
@@ -352,7 +352,7 @@ def test_initializer_rejects_invalid_canonical_catalog_before_writing_database(
 ):
     data_dir = tmp_path / "data"
     monkeypatch.setenv("DATA_DIR", str(data_dir))
-    (course_config / "week-1-questions.md").write_text(
+    (course_config / "week-01-questions.md").write_text(
         "---\ntitle: Missing stable id\n---\n\nDiscuss this.\n",
         encoding="utf-8",
     )
@@ -373,7 +373,7 @@ def test_initializer_allows_new_course_without_question_material(
 ):
     data_dir = tmp_path / "data"
     monkeypatch.setenv("DATA_DIR", str(data_dir))
-    (course_config / "week-1-questions.md").unlink()
+    (course_config / "week-01-questions.md").unlink()
     for path in (course_config / "week1").iterdir():
         path.unlink()
     (course_config / "week1").rmdir()
@@ -415,24 +415,47 @@ def test_initializer_validates_only_material_that_exists(
     assert_valid_course_db(data_dir / "safe101" / "popping.db")
 
 
-def test_initializer_rejects_noncanonical_leading_zero_week_filename(
+@pytest.mark.parametrize("filename", ["week-01-questions.md", "week-1-questions.md"])
+def test_initializer_accepts_padded_and_legacy_week_filenames(
+    init_course_db_module, course_config, filename
+):
+    canonical = course_config / "week-01-questions.md"
+    if filename != canonical.name:
+        canonical.rename(course_config / filename)
+
+    catalog = init_course_db_module.validate_initial_question_catalog(
+        str(course_config)
+    )
+    assert len(catalog) == 1
+    assert catalog[0].ready
+    questions = init_course_db_module.read_presentation_question_index(
+        str(course_config), 1
+    )
+    assert questions[0]['source_key'] == 'week-1-q-discussion-1'
+
+
+def test_initializer_prefers_padded_week_when_legacy_file_also_exists(
     init_course_db_module, course_config
 ):
-    canonical = course_config / "week-1-questions.md"
-    noncanonical = course_config / "week-01-questions.md"
-    noncanonical.write_bytes(canonical.read_bytes())
-    canonical.unlink()
+    (course_config / "week-1-questions.md").write_text(
+        "Malformed older copy", encoding="utf-8"
+    )
 
-    with pytest.raises(ValueError, match="week 1 is not ready"):
-        init_course_db_module.validate_initial_question_catalog(
-            str(course_config)
-        )
+    catalog = init_course_db_module.validate_initial_question_catalog(
+        str(course_config)
+    )
+    assert len(catalog) == 1
+    assert catalog[0].ready
+    questions = init_course_db_module.read_presentation_question_index(
+        str(course_config), 1
+    )
+    assert questions[0]['title'] == 'First discussion question'
 
 
 def test_initializer_rejects_malformed_later_bundled_week(
     init_course_db_module, course_config
 ):
-    (course_config / "week-2-questions.md").write_text(
+    (course_config / "week-02-questions.md").write_text(
         """---
 id: missing-title
 ---
@@ -451,7 +474,7 @@ This block has no title.
 def test_initializer_validates_every_bundled_week_but_seeds_only_week_one(
     init_course_db_module, course_config, tmp_path, monkeypatch
 ):
-    (course_config / "week-2-questions.md").write_text(
+    (course_config / "week-02-questions.md").write_text(
         """---
 id: later-week
 title: Later week
@@ -483,7 +506,7 @@ def test_initializer_ignores_legacy_presentation_material_without_canonical_file
 ):
     data_dir = tmp_path / "data"
     monkeypatch.setenv("DATA_DIR", str(data_dir))
-    (course_config / "week-1-questions.md").unlink()
+    (course_config / "week-01-questions.md").unlink()
 
     result = run_initializer(
         init_course_db_module,
@@ -509,7 +532,7 @@ def test_initializer_accepts_utf8_bom_in_config_and_canonical_questions(
     monkeypatch.setenv("DATA_DIR", str(data_dir))
     config_path = course_config / "course.yaml"
     config_path.write_bytes(b"\xef\xbb\xbf" + config_path.read_bytes())
-    question_path = course_config / "week-1-questions.md"
+    question_path = course_config / "week-01-questions.md"
     question_path.write_bytes(b"\xef\xbb\xbf" + question_path.read_bytes())
 
     result = run_initializer(

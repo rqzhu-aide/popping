@@ -9,16 +9,20 @@ Present and Challenge.
 Use this filename for a bundled course file:
 
 ```text
-classes/<course-slug>/week-N-questions.md
+classes/<course-slug>/week-NN-questions.md
 ```
 
 A file uploaded from the instructor Setup page is stored at:
 
 ```text
-data/<course-slug>/questions/week-N-questions.md
+data/<course-slug>/questions/week-NN-questions.md
 ```
 
-The uploaded file overrides the bundled file for the same week. Question order
+Use a week number padded to at least two digits, such as `week-01-questions.md`
+or `week-02-questions.md`. The uploaded file overrides the bundled file for the
+same week. Existing unpadded files such as `week-1-questions.md` remain readable.
+Within either location, the padded filename takes precedence when both exist;
+a persistent upload takes precedence over either bundled name. Question order
 is the order of the blocks in the Markdown file.
 
 Keep one Markdown file per week. Do not split the questions across files.
@@ -87,7 +91,9 @@ import numpy as np
 
 No server restart is needed. If appendix questions are added in the instructor
 page, they are appended to the same classroom question set in both Group
-Discussion and Present and Challenge.
+Discussion and Present and Challenge. Weekly appendix files use
+`week-NN-appendix.md` and follow the same precedence rules. Existing unpadded
+appendix files remain readable.
 
 ## Legacy files are not used
 
@@ -95,9 +101,9 @@ Directories such as `classes/<course-slug>/weekN/` containing `index.md` and
 `qNN.html` are an obsolete pre-rendered workflow. The current application
 does not read, sync, or display questions from those files. Do not author
 them for a future class. Move any question you still need into the canonical
-`week-N-questions.md` file, either as a bundled GitHub file or as a Setup
+`week-NN-questions.md` file, either as a bundled GitHub file or as a Setup
 upload.
 
 For a starting point, see
 [`classes/templates/question-template.md`](../classes/templates/question-template.md)
-or a checked-in `classes/<course-slug>/week-N-questions.md` file.
+or a checked-in `classes/<course-slug>/week-NN-questions.md` file.
