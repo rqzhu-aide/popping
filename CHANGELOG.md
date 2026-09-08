@@ -3,6 +3,15 @@
 All notable changes to Popping are recorded here. Releases use semantic
 versions as defined in `VERSIONING.md`.
 
+## [v1.3.3] - 2026-09-08
+
+### Fixed
+
+- Allowed late students to join while the course is back in Setup after
+  activity has been saved. Returning students can also restore their recorded
+  team. Leaving or switching teams remains blocked once activity is saved.
+- Kept the database schema and export format at `v1.3.0`.
+
 ## [v1.3.2] - 2026-09-08
 
 ### Fixed

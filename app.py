@@ -3654,7 +3654,13 @@ def join_team():
             db.rollback()
             return jsonify({'error': 'That team is full'}), 409
 
-        if not live_phase:
+        # Returning to Setup must still admit late arrivals without letting
+        # existing members move saved activity to another team.
+        preserves_membership = (
+            student['team_id'] is None and
+            student['last_team_id'] in (None, team_id)
+        )
+        if not preserves_membership:
             freeze_guard = _session_roster_mutation_guard(
                 db, state['course_id'], state
             )

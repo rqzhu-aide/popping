@@ -8,7 +8,7 @@ releases may change the website without changing the database contract.
 import re
 
 
-APP_VERSION = "1.3.2"
+APP_VERSION = "1.3.3"
 BASELINE_SCHEMA_VERSION = "1.0.0"
 SCHEMA_VERSION = "1.3.0"
 DATABASE_SCHEMA_VERSION = SCHEMA_VERSION

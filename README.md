@@ -461,6 +461,8 @@ popping/
 5. **End Session** → Instructor exports Current Week Results and uploads the workbook
    to Canvas.
 
+Late arrivals can also join if the instructor returns to **Setup** after
+activity has been saved. Existing members still cannot leave or switch teams.
 Late joining leaves earlier feedback and completed presentation records
 unchanged. Missing individual responses stay blank in the results workbook.
 Team presentation participation is recorded for the members present when the
