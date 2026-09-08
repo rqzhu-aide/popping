@@ -26,7 +26,7 @@ def test_templates_present_version_and_unambiguous_download_labels():
     assert "Download Current Week Results" in instructor
     assert "Download Legacy Data" in base
     assert (
-        "Older-version or unclassified records excluded from current-week results"
+        "Unsupported-version or unclassified records excluded from weekly results"
         in base
     )
     assert "Download Legacy Feedback (week unknown)" not in base
@@ -81,14 +81,15 @@ def test_instructor_login_accepts_longer_ascii_digit_pins():
     assert 'maxlength="4"' in student_login
 
 
-def test_versioning_policy_documents_patch_compatibility_and_legacy_boundary():
+def test_versioning_policy_documents_supported_history_and_legacy_boundary():
     policy = (PROJECT_ROOT / "VERSIONING.md").read_text(encoding="utf-8")
     changelog = (PROJECT_ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
 
     assert "baseline is `v1.0.0`" in policy
-    assert "major and minor numbers match" in policy
-    assert "`v1.0.3` data is compatible with every `v1.0.x`" in policy
-    assert "database schema advances to `v1.1.0`" in policy
+    assert "distinguish major/minor versions" in policy
+    assert "currently `v1.0.x` through `v1.3.x`" in policy
+    assert "Rows retain their original data versions" in policy
+    assert "unsupported versions remain in Download Legacy Data" in policy
     assert "popping-course-backup-v1" in policy
     assert "## [v1.0.0]" in changelog
 

@@ -17,9 +17,9 @@ Each course lives in its own folder with its own SQLite database. This keeps cou
 - **Instructor Panel**: Control phases, pick presenting team, manage students.
 - **Participation History**: Instructors can compare course-wide presentation-team
   and challenger turn counts when choosing participants.
-- **Data Export**: Download versioned results for the current or any previous
-  week, a dedicated full-roster participation snapshot, or older and
-  unclassified legacy data.
+- **Data Export**: Download results for any saved week, regardless of the
+  currently selected week, with a full-roster participation snapshot.
+  Unsupported and unclassified data remain available separately.
 
 ## Tech Stack
 
@@ -32,8 +32,10 @@ Each course lives in its own folder with its own SQLite database. This keeps cou
 
 The versioned baseline is `v1.0.0`. Website-only changes increment the patch
 number. Any database structure change increments at least the minor number.
-Data is current when its major and minor numbers match the database schema;
-older compatibility lines remain available through **Download Legacy Data**.
+Saved activity from supported earlier versions contributes to the same
+course-wide turn counts, awards, and weekly results. Original version tags
+are preserved. **Download Legacy Data** contains unsupported or unclassified
+records rather than ordinary earlier-week activity.
 See [VERSIONING.md](VERSIONING.md) for the policy and [CHANGELOG.md](CHANGELOG.md)
 for the release history.
 
@@ -326,9 +328,9 @@ The `v1.3.0` migration adds normalized weekly result summaries and award
 recipients without rewriting ratings or participation records.
 
 Website releases `v1.3.x` use database schema and export format `v1.3.0`.
-Records written by an older compatibility line remain available through
-**Download Legacy Data** after the upgrade. A full course reset starts with an
-empty current-version database instead.
+Starting with `v1.3.3`, records from supported earlier versions stay included
+in normal classroom history and results after migration. A full course reset
+starts with an empty database instead.
 
 After migration, preview and save a Weekly Hero summary for each completed
 older week. For example, these commands reconstruct Week 1 from its preserved
@@ -448,7 +450,9 @@ popping/
 1. Click **Instructor Login** on your course → enter username + PIN.
 2. Go directly to the control panel for that course.
 3. Control phases, manage students, set questions, select presenting teams.
-4. Export **Current Week Results** at the end of class. Download legacy data separately when it is available.
+4. Use **Tools → Download Results** to select any week with saved activity,
+   even when it is later than the currently selected week. Downloads are
+   available during Setup or after End Session.
 
 ## Course Flow
 

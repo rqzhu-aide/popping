@@ -30,7 +30,6 @@ import yaml
 import config
 from database import (
     calculate_weekly_hero_preview,
-    detect_weekly_hero_source_schema_version,
     ensure_schema,
     execute_db,
     forget_schema,
@@ -75,8 +74,8 @@ from versioning import (
     BASELINE_SCHEMA_VERSION,
     EXPORT_FORMAT_VERSION,
     SCHEMA_VERSION,
-    compatibility_label,
-    compatible_series,
+    activity_compatibility_label,
+    activity_data_supported,
     parse_version,
     public_version,
 )
@@ -357,13 +356,8 @@ def _history_data_version(item):
 
 
 def _data_version_is_compatible(value):
-    """Fail closed unless a stored data version matches this schema series."""
-    try:
-        return (
-            compatible_series(value) == compatible_series(SCHEMA_VERSION)
-        )
-    except (TypeError, ValueError):
-        return False
+    """Read historical activity supported by the current migrated schema."""
+    return activity_data_supported(value)
 
 
 def _history_item_is_compatible(item):
@@ -405,7 +399,7 @@ def _compatible_rating_weeks(db, course_id):
                   COUNT(DISTINCT week_num) AS week_count
            FROM presentation_ratings
            WHERE course_id = ? AND week_num IS NOT NULL
-             AND popping_version_compatible(data_version, ?) = 1
+             AND popping_activity_supported(data_version, ?) = 1
            GROUP BY question_key''',
         [course_id, SCHEMA_VERSION],
     ).fetchall()
@@ -1983,6 +1977,7 @@ def healthz():
         'courses_checked': checked,
         'website_version': public_version(APP_VERSION),
         'database_schema_version': reported_schema_version,
+        'data_compatibility': activity_compatibility_label(),
     }
     if any(
         version != SCHEMA_VERSION
@@ -2451,6 +2446,10 @@ def instructor_course(slug):
     state = query_db(slug,
         'SELECT * FROM course_state WHERE course_id = ?', [course['id']], one=True
     )
+    available_result_weeks = _available_result_weeks(
+        get_db(slug), course['id'],
+        (state['discussion_week'] if state else None) or 1, state,
+    )
     poll_duration = get_poll_duration(slug)
     if state:
         state = dict(state)
@@ -2566,15 +2565,15 @@ def instructor_course(slug):
             '''SELECT COUNT(DISTINCT student_id) AS c FROM (
                    SELECT grader_id AS student_id FROM teammate_thumbs
                    WHERE course_id = ? AND session_key = ?
-                     AND popping_version_compatible(data_version, ?) = 1
+                     AND popping_activity_supported(data_version, ?) = 1
                    UNION
                    SELECT student_id FROM presentation_ratings
                    WHERE course_id = ? AND session_key = ?
-                     AND popping_version_compatible(data_version, ?) = 1
+                     AND popping_activity_supported(data_version, ?) = 1
                    UNION
                    SELECT rater_id AS student_id FROM challenge_ratings
                    WHERE course_id = ? AND session_key = ?
-                     AND popping_version_compatible(data_version, ?) = 1
+                     AND popping_activity_supported(data_version, ?) = 1
                )''',
             [course['id'], state['session_key'] or 0, SCHEMA_VERSION,
              course['id'], state['session_key'] or 0, SCHEMA_VERSION,
@@ -2623,6 +2622,7 @@ def instructor_course(slug):
         teams_locked=teams_locked,
         session_started_at=state['session_started_at'] if state and 'session_started_at' in state.keys() else None,
         end_stats=end_stats,
+        available_result_weeks=available_result_weeks,
         presented_question_ids=list(presented_question_ids),
         POLL_DURATION=poll_duration
     )
@@ -2788,7 +2788,7 @@ def _participation_counts_by_student(db, course_id, student_ids=None):
                 WHERE participant.course_id = ?
                   AND typeof(participant.week_num) = 'integer'
                   AND participant.week_num > 0
-                  AND popping_version_compatible(
+                  AND popping_activity_supported(
                           participant.data_version, ?) = 1
                 GROUP BY participant.student_id
             ),
@@ -2801,7 +2801,7 @@ def _participation_counts_by_student(db, course_id, student_ids=None):
                 WHERE challenge.course_id = ?
                   AND typeof(challenge.week_num) = 'integer'
                   AND challenge.week_num > 0
-                  AND popping_version_compatible(
+                  AND popping_activity_supported(
                           challenge.data_version, ?) = 1
                 GROUP BY challenge.challenger_id
             )
@@ -2896,7 +2896,7 @@ def _compute_top_teams(slug, course_id, history, session_key):
         '''SELECT question_key, presenting_team_id, presenting_team_name,
                   q1_developed, q2_easy
            FROM presentation_ratings WHERE course_id = ? AND session_key = ?
-             AND popping_version_compatible(data_version, ?) = 1''',
+             AND popping_activity_supported(data_version, ?) = 1''',
         [course_id, session_key, SCHEMA_VERSION])
 
     team_scores = {}
@@ -2952,7 +2952,7 @@ def _compute_top_challengers(slug, course_id, session_key):
            FROM challenge_ratings cr
            LEFT JOIN students student ON student.id = cr.challenger_id
            WHERE cr.course_id = ? AND cr.session_key = ?
-             AND popping_version_compatible(cr.data_version, ?) = 1''',
+             AND popping_activity_supported(cr.data_version, ?) = 1''',
         [course_id, session_key, SCHEMA_VERSION])
 
     challenger_scores = {}
@@ -3067,7 +3067,7 @@ def _compute_state(slug, include_poll_count=True, known_question_id=None,
             '''SELECT COUNT(DISTINCT student_id) AS c
                FROM presentation_ratings
                WHERE course_id = ? AND session_key = ? AND question_key = ?
-                 AND popping_version_compatible(data_version, ?) = 1''',
+                 AND popping_activity_supported(data_version, ?) = 1''',
             [cid, state.get('session_key', 0), pres_key, SCHEMA_VERSION],
             one=True)
         poll_count = cnt['c'] if cnt else 0
@@ -3234,7 +3234,7 @@ def _compute_state(slug, include_poll_count=True, known_question_id=None,
                              ON team.team_id = grader.team_id
                            WHERE thumb.course_id = ? AND thumb.session_key = ?
                              AND thumb.question_key = ?
-                             AND popping_version_compatible(
+                             AND popping_activity_supported(
                                      thumb.data_version, ?) = 1
                            GROUP BY grader.team_id
                        )
@@ -3363,7 +3363,7 @@ def _compute_state(slug, include_poll_count=True, known_question_id=None,
                                        challenger_team_id, presenting_team_id
                                 FROM challenge_rounds
                                 WHERE course_id = ?
-                                  AND popping_version_compatible(
+                                  AND popping_activity_supported(
                                           data_version, ?) = 1
                                   AND challenge_key IN ({placeholders})
                             ),
@@ -3374,7 +3374,7 @@ def _compute_state(slug, include_poll_count=True, known_question_id=None,
                                 JOIN selected_challenges challenge
                                   ON challenge.challenge_key = rating.challenge_key
                                  AND challenge.course_id = rating.course_id
-                                WHERE popping_version_compatible(
+                                WHERE popping_activity_supported(
                                           rating.data_version, ?) = 1
                                 GROUP BY rating.challenge_key
                             ),
@@ -4002,7 +4002,7 @@ def my_responses():
                JOIN students recipient ON recipient.id = thumb.recipient_id
                WHERE thumb.course_id = ? AND thumb.session_key = ?
                  AND thumb.question_key = ? AND thumb.grader_id = ?
-                 AND popping_version_compatible(
+                 AND popping_activity_supported(
                          thumb.data_version, ?) = 1
                ORDER BY recipient.student_id''',
             [student['course_id'], state['session_key'] or 0,
@@ -4017,7 +4017,7 @@ def my_responses():
             slug,
             '''SELECT q1_developed, q2_easy FROM presentation_ratings
                WHERE course_id = ? AND student_id = ? AND question_key = ?
-                 AND popping_version_compatible(data_version, ?) = 1''',
+                 AND popping_activity_supported(data_version, ?) = 1''',
             [student['course_id'], student['id'], presentation_key,
              SCHEMA_VERSION], one=True
         )
@@ -4034,7 +4034,7 @@ def my_responses():
             '''SELECT challenge_key, score FROM challenge_ratings
                WHERE course_id = ? AND rater_id = ?
                  AND presentation_key = ?
-                 AND popping_version_compatible(data_version, ?) = 1''',
+                 AND popping_activity_supported(data_version, ?) = 1''',
             [student['course_id'], student['id'], presentation_key,
              SCHEMA_VERSION],
         )
@@ -4147,7 +4147,7 @@ def _finalize_active_presentation(slug, course_id, db=None):
             count = db.execute(
                 '''SELECT COUNT(DISTINCT student_id) AS c FROM presentation_ratings
                    WHERE course_id = ? AND question_key = ?
-                     AND popping_version_compatible(data_version, ?) = 1''',
+                     AND popping_activity_supported(data_version, ?) = 1''',
                 [course_id, presentation_key, SCHEMA_VERSION]
             ).fetchone()
             title = (question['title'] or question['question_text']) \
@@ -4181,7 +4181,7 @@ def _finalize_active_presentation(slug, course_id, db=None):
                                       challenger_team_id, challenger_team_name
                                FROM challenge_rounds
                                WHERE course_id = ? AND presentation_key = ?
-                                 AND popping_version_compatible(
+                                 AND popping_activity_supported(
                                          data_version, ?) = 1
                                ORDER BY challenge_num''',
                             [course_id, presentation_key, SCHEMA_VERSION]
@@ -4316,47 +4316,12 @@ def set_phase():
 
         if phase == 'ended' and old_phase != 'ended':
             weekly_result_week = state['discussion_week'] or 1
-            try:
-                weekly_source_schema = (
-                    detect_weekly_hero_source_schema_version(
-                        db, course['id'], weekly_result_week
-                    )
-                )
-            except RuntimeError:
-                db.rollback()
-                return jsonify({
-                    'error': (
-                        'Cannot save Weekly Hero results because this '
-                        'lecture week contains activity from more than one '
-                        'data version. Use a new lecture week for the new '
-                        'session, then review this week with the Weekly Hero '
-                        'backfill tool.'
-                    )
-                }), 409
-
-            saved_weekly_result = db.execute(
-                '''SELECT source_schema_version
-                   FROM weekly_hero_summaries
-                   WHERE course_id = ? AND week_num = ?''',
-                [course['id'], weekly_result_week],
-            ).fetchone()
-            if (saved_weekly_result
-                    and saved_weekly_result['source_schema_version']
-                    != weekly_source_schema):
-                db.rollback()
-                return jsonify({
-                    'error': (
-                        'Cannot replace this week\'s Weekly Hero result with '
-                        'a different data-version series. Use a new lecture '
-                        'week for the new session.'
-                    )
-                }), 409
-
             weekly_preview = calculate_weekly_hero_preview(
                 db,
                 course['id'],
                 weekly_result_week,
-                source_schema_version=weekly_source_schema,
+                source_schema_version=SCHEMA_VERSION,
+                include_supported_history=True,
             )
             if not weekly_preview['recipient_coverage_complete']:
                 missing_keys = [
@@ -7394,7 +7359,7 @@ def submit_challenge_rating():
         challenge = db.execute(
             '''SELECT * FROM challenge_rounds
                WHERE course_id = ? AND challenge_key = ?
-                 AND popping_version_compatible(data_version, ?) = 1''',
+                 AND popping_activity_supported(data_version, ?) = 1''',
             [student['course_id'], challenge_key, SCHEMA_VERSION]
         ).fetchone()
         if not challenge:
@@ -7637,7 +7602,7 @@ def api_students():
                 WHERE course_id = ?
                   AND typeof(week_num) = 'integer'
                   AND week_num > 0
-                  AND popping_version_compatible(data_version, ?) = 1
+                  AND popping_activity_supported(data_version, ?) = 1
                 GROUP BY student_id
             ),
             challenger_counts AS (
@@ -7647,7 +7612,7 @@ def api_students():
                 WHERE course_id = ?
                   AND typeof(week_num) = 'integer'
                   AND week_num > 0
-                  AND popping_version_compatible(data_version, ?) = 1
+                  AND popping_activity_supported(data_version, ?) = 1
                 GROUP BY challenger_id
             )
             SELECT s.id, s.student_id, s.name, s.display_name, s.team_id,
@@ -8139,7 +8104,7 @@ def export_legacy_feedback(slug):
         legacy_where = (
             'p.course_id = ? AND (p.week_num IS NULL OR '
             "typeof(p.week_num) != 'integer' OR p.week_num <= 0 OR "
-            'popping_version_compatible(p.data_version, ?) = 0)'
+            'popping_activity_supported(p.data_version, ?) = 0)'
         )
         legacy_row_count = sum(
             db.execute(
@@ -8486,38 +8451,31 @@ def export_legacy_feedback(slug):
     )
 
 def _compatible_export_week_exists(db, course_id, week_num, state_row):
-    '''Return whether a later week has current-series durable results.'''
-    if db.execute(
-        '''SELECT 1 FROM weekly_hero_summaries
-           WHERE course_id = ? AND week_num = ?
-             AND popping_version_compatible(data_version, ?) = 1
-           LIMIT 1''',
-        [course_id, week_num, SCHEMA_VERSION],
-    ).fetchone():
-        return True
+    """Return whether a later week has supported saved results."""
+    return week_num in _available_result_weeks(db, course_id, 0, state_row)
+
+
+def _available_result_weeks(db, course_id, current_week, state_row):
+    """List current/past weeks and every other week with supported activity."""
+    weeks = set(range(1, (_positive_lecture_week(current_week) or 0) + 1))
     for table in (
             'teammate_thumbs', 'presentation_ratings',
             'presentation_participants', 'challenge_rounds',
-            'challenge_ratings'):
-        found = db.execute(
-            f'''SELECT 1 FROM {table}
-                WHERE course_id = ? AND week_num = ?
-                  AND popping_version_compatible(data_version, ?) = 1
-                LIMIT 1''',
-            [course_id, week_num, SCHEMA_VERSION],
-        ).fetchone()
-        if found:
-            return True
+            'challenge_ratings', 'weekly_hero_summaries'):
+        weeks.update(row['week_num'] for row in db.execute(
+            f'''SELECT DISTINCT week_num FROM {table}
+                WHERE course_id = ? AND typeof(week_num) = 'integer'
+                  AND week_num > 0 AND popping_activity_supported(data_version) = 1''',
+            [course_id],
+        ).fetchall())
 
     raw_history = state_row['presentation_history'] if state_row else None
-    if not raw_history:
-        return False
     try:
-        history = json.loads(raw_history)
+        history = json.loads(raw_history or '[]')
     except (TypeError, ValueError):
-        return False
-    if not isinstance(history, list):
-        return False
+        history = []
+    if not isinstance(history, list) or not history:
+        return sorted(weeks, reverse=True)
     question_weeks = {
         row['id']: (1 if row['week_num'] is None else row['week_num'])
         for row in db.execute(
@@ -8526,14 +8484,16 @@ def _compatible_export_week_exists(db, course_id, week_num, state_row):
         ).fetchall()
     }
     rating_weeks = _compatible_rating_weeks(db, course_id)
-    return any(
-        _history_item_is_compatible(item)
-        and _resolve_history_week(
+    for item in history:
+        if not _history_item_is_compatible(item):
+            continue
+        week_num = _resolve_history_week(
             item, question_weeks=question_weeks,
             rating_weeks=rating_weeks,
-        ) == week_num
-        for item in history
-    )
+        )
+        if week_num is not None:
+            weeks.add(week_num)
+    return sorted(weeks, reverse=True)
 
 
 @app.route('/export/<slug>')
@@ -8674,23 +8634,23 @@ def export_data(slug):
                     )) AS teams,
                    (SELECT COUNT(*) FROM teammate_thumbs
                     WHERE course_id = ? AND week_num IN ({week_ph})
-                      AND popping_version_compatible(data_version, ?) = 1)
+                      AND popping_activity_supported(data_version, ?) = 1)
                        AS thumbs,
                    (SELECT COUNT(*) FROM presentation_ratings
                     WHERE course_id = ? AND week_num IN ({week_ph})
-                      AND popping_version_compatible(data_version, ?) = 1)
+                      AND popping_activity_supported(data_version, ?) = 1)
                        AS ratings,
                    (SELECT COUNT(*) FROM presentation_participants
                     WHERE course_id = ? AND week_num IN ({week_ph})
-                      AND popping_version_compatible(data_version, ?) = 1)
+                      AND popping_activity_supported(data_version, ?) = 1)
                        AS presentation_participants,
                    (SELECT COUNT(*) FROM challenge_rounds
                     WHERE course_id = ? AND week_num IN ({week_ph})
-                      AND popping_version_compatible(data_version, ?) = 1)
+                      AND popping_activity_supported(data_version, ?) = 1)
                        AS challenge_rounds,
                    (SELECT COUNT(*) FROM challenge_ratings
                     WHERE course_id = ? AND week_num IN ({week_ph})
-                      AND popping_version_compatible(data_version, ?) = 1)
+                      AND popping_activity_supported(data_version, ?) = 1)
                        AS challenge_ratings,
                    (SELECT COUNT(*)
                     FROM weekly_hero_recipients recipient
@@ -8700,7 +8660,7 @@ def export_data(slug):
                       ON summary.id = result.summary_id
                     WHERE summary.course_id = ?
                       AND summary.week_num IN ({week_ph})
-                      AND popping_version_compatible(
+                      AND popping_activity_supported(
                               summary.data_version, ?) = 1)
                        AS weekly_hero_recipients''',
             (
@@ -8768,7 +8728,7 @@ def export_data(slug):
                JOIN students g ON p.grader_id = g.id
                JOIN students r ON p.recipient_id = r.id
                WHERE p.course_id = ? AND p.week_num IN ({week_ph})
-                 AND popping_version_compatible(p.data_version, ?) = 1
+                 AND popping_activity_supported(p.data_version, ?) = 1
                ORDER BY p.created_at''',
             [cid] + export_weeks + [SCHEMA_VERSION],
         )
@@ -8790,7 +8750,7 @@ def export_data(slug):
                FROM presentation_ratings pr
                JOIN students s ON pr.student_id = s.id
                WHERE pr.course_id = ? AND pr.week_num IN ({week_ph})
-                 AND popping_version_compatible(pr.data_version, ?) = 1
+                 AND popping_activity_supported(pr.data_version, ?) = 1
                ORDER BY pr.question_key, pr.created_at''',
             [cid] + export_weeks + [SCHEMA_VERSION],
         )
@@ -8809,7 +8769,7 @@ def export_data(slug):
                  AND typeof(participant.week_num) = 'integer'
                  AND participant.week_num > 0
                  AND participant.week_num IN ({week_ph})
-                 AND popping_version_compatible(
+                 AND popping_activity_supported(
                          participant.data_version, ?) = 1
                ORDER BY participant.session_key,
                         participant.presentation_key, participant.id''',
@@ -8841,12 +8801,12 @@ def export_data(slug):
                 AND rating.week_num = ch.week_num
                 AND typeof(rating.week_num) = 'integer'
                 AND rating.week_num > 0
-                AND popping_version_compatible(
+                AND popping_activity_supported(
                         rating.data_version, ?) = 1
                WHERE ch.course_id = ? AND ch.week_num IN ({week_ph})
                  AND typeof(ch.week_num) = 'integer'
                  AND ch.week_num > 0
-                 AND popping_version_compatible(ch.data_version, ?) = 1
+                 AND popping_activity_supported(ch.data_version, ?) = 1
                GROUP BY ch.id
                ORDER BY ch.session_key, ch.presentation_key, ch.challenge_num''',
             [SCHEMA_VERSION, cid] + export_weeks + [SCHEMA_VERSION],
@@ -8892,11 +8852,11 @@ def export_data(slug):
                 AND ch.week_num = cr.week_num
                 AND typeof(ch.week_num) = 'integer'
                 AND ch.week_num > 0
-                AND popping_version_compatible(ch.data_version, ?) = 1
+                AND popping_activity_supported(ch.data_version, ?) = 1
                WHERE cr.course_id = ? AND cr.week_num IN ({week_ph})
                  AND typeof(cr.week_num) = 'integer'
                  AND cr.week_num > 0
-                 AND popping_version_compatible(cr.data_version, ?) = 1
+                 AND popping_activity_supported(cr.data_version, ?) = 1
                ORDER BY cr.challenge_key, cr.created_at''',
             [SCHEMA_VERSION, cid] + export_weeks + [SCHEMA_VERSION],
         )
@@ -8910,14 +8870,14 @@ def export_data(slug):
                WHERE course_id = ?
                  AND typeof(week_num) = 'integer'
                  AND week_num > 0
-                 AND popping_version_compatible(data_version, ?) = 1
+                 AND popping_activity_supported(data_version, ?) = 1
                UNION
                SELECT DISTINCT data_version
                FROM challenge_rounds
                WHERE course_id = ?
                  AND typeof(week_num) = 'integer'
                  AND week_num > 0
-                 AND popping_version_compatible(data_version, ?) = 1''',
+                 AND popping_activity_supported(data_version, ?) = 1''',
             [cid, SCHEMA_VERSION, cid, SCHEMA_VERSION],
         )
 
@@ -8978,7 +8938,7 @@ def export_data(slug):
             public_version(value) for value in included_data_versions
         ]
         exported_at = _exported_at_utc()
-        data_compatibility = compatibility_label(SCHEMA_VERSION)
+        data_compatibility = activity_compatibility_label()
         # Release the snapshot lock after all database rows and files are captured.
         db.commit()
         snapshot_open = False
@@ -9023,7 +8983,7 @@ def export_data(slug):
             ('Lecture Week', current_week),
             ('Export Scope', f'Week {current_week}'),
             ('Participation Roster Scope',
-             'Course-wide compatible participation through export time'),
+             'Course-wide saved participation through export time'),
             ('Website Version', public_version(APP_VERSION)),
             ('Database Schema Version', public_version(SCHEMA_VERSION)),
             ('Export Format Version', public_version(EXPORT_FORMAT_VERSION)),

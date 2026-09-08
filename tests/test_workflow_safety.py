@@ -8170,6 +8170,7 @@ def test_healthz_checks_active_course_storage(course_env):
         "courses_checked": 1,
         "website_version": f"v{app_module.APP_VERSION}",
         "database_schema_version": f"v{app_module.SCHEMA_VERSION}",
+        "data_compatibility": "v1.0.x through v1.3.x",
     }
 
     offline_path = Path(str(course_env["db_path"]) + ".offline")

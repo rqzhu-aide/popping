@@ -92,15 +92,15 @@ the ZIP is generated, but one weekly workbook is still not a complete
 replacement for a course backup.
 
 The `v1.0.x` schema did not record these events, so its database and exports
-cannot provide a trustworthy participation backfill. After future schema-line
-changes, incompatible event rows remain available through **Download Legacy
-Data** under the normal compatibility policy.
+cannot provide a trustworthy participation backfill. Supported historical
+events remain included in normal turn counts and weekly results after schema
+migration. Unsupported or unclassified rows remain in **Download Legacy Data**.
 
 Before restoring, compare the recorded database schema version with the running
 release. A backup on the same major/minor compatibility line can be restored
 directly. An older compatibility line must go through the supported database
-migration so that its record versions remain available through Download Legacy
-Data. Verification checks the archive; it does not migrate the database.
+migration before its saved history is used by the running release.
+Verification checks the archive; it does not migrate the database.
 
 For an existing `v1.0.x` database, use the offline boundary described in the
 main README. Locally, stop all workers and type `SERVICE STOPPED`. On Render,

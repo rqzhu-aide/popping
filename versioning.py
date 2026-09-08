@@ -1,8 +1,8 @@
 """Authoritative semantic versions and compatibility rules for Popping.
 
-Stored versions never include the public ``v`` prefix.  Database and data
-compatibility is intentionally defined by the numeric major/minor pair: patch
-releases may change the website without changing the database contract.
+Stored versions never include the public ``v`` prefix. Schema compatibility
+uses the numeric major/minor pair. Activity from supported older schemas stays
+readable after migration, without rewriting its original version.
 """
 
 import re
@@ -61,6 +61,28 @@ def compatibility_label(value):
 def versions_compatible(left, right):
     """Return whether two versions share the same major/minor contract."""
     return compatible_series(left) == compatible_series(right)
+
+
+def activity_data_supported(value, current_version=SCHEMA_VERSION):
+    """Read saved activity from every known schema migrated into this course."""
+    try:
+        source = compatible_series(value)
+        current = compatible_series(current_version)
+    except (TypeError, ValueError):
+        return False
+    known = {compatible_series(version) for version in SCHEMA_VERSION_HISTORY}
+    return current in known and source in known and source <= current
+
+
+def activity_compatibility_label():
+    return (
+        f'{compatibility_label(BASELINE_SCHEMA_VERSION)} through '
+        f'{compatibility_label(SCHEMA_VERSION)}'
+    )
+
+
+def sqlite_activity_supported(value, current_version=SCHEMA_VERSION):
+    return int(activity_data_supported(value, current_version))
 
 
 def sqlite_versions_compatible(left, right):

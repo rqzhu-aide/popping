@@ -14,7 +14,9 @@ from versioning import (
     BASELINE_SCHEMA_VERSION,
     SCHEMA_VERSION,
     SCHEMA_VERSION_HISTORY,
+    activity_data_supported,
     parse_version,
+    sqlite_activity_supported,
     sqlite_versions_compatible,
     versions_compatible,
 )
@@ -280,6 +282,16 @@ def _register_version_functions(connection):
         connection.create_function(
             'popping_version_compatible', 2, sqlite_versions_compatible
         )
+    for arity in (1, 2):
+        try:
+            connection.create_function(
+                'popping_activity_supported', arity,
+                sqlite_activity_supported, deterministic=True,
+            )
+        except TypeError:  # pragma: no cover - older SQLite bindings
+            connection.create_function(
+                'popping_activity_supported', arity, sqlite_activity_supported,
+            )
 
 
 def _schema_ledger_exists(db):
@@ -1868,41 +1880,47 @@ def detect_weekly_hero_source_schema_version(db, course_id, week_num):
 
 
 def _weekly_hero_source_rows(
-        db, course_id, week_num, source_schema_version):
+        db, course_id, week_num, source_schema_version,
+        include_supported_history=False):
     _register_version_functions(db)
-    params = [course_id, week_num, source_schema_version]
+    params = [course_id, week_num]
+    if include_supported_history:
+        version_filter = 'popping_activity_supported(data_version) = 1'
+    else:
+        version_filter = 'popping_version_compatible(data_version, ?) = 1'
+        params.append(source_schema_version)
     presentation_ratings = _weekly_hero_query_dicts(
         db,
-        '''SELECT id, session_key, week_num, question_key,
+        f'''SELECT id, session_key, week_num, question_key,
                   presenting_team_id, presenting_team_name, question_id,
                   question_title, q1_developed, q2_easy, data_version,
                   created_at
            FROM presentation_ratings
            WHERE course_id = ? AND week_num = ?
-             AND popping_version_compatible(data_version, ?) = 1
+             AND {version_filter}
            ORDER BY id''',
         params,
     )
     challenge_ratings = _weekly_hero_query_dicts(
         db,
-        '''SELECT id, session_key, week_num, challenge_key,
+        f'''SELECT id, session_key, week_num, challenge_key,
                   presentation_key, challenger_id, challenger_name,
                   challenger_team_id, challenger_team_name, score,
                   data_version, created_at
            FROM challenge_ratings
            WHERE course_id = ? AND week_num = ?
-             AND popping_version_compatible(data_version, ?) = 1
+             AND {version_filter}
            ORDER BY id''',
         params,
     )
     participants = _weekly_hero_query_dicts(
         db,
-        '''SELECT id, session_key, week_num, presentation_key, student_id,
+        f'''SELECT id, session_key, week_num, presentation_key, student_id,
                   student_identifier, student_name, team_id, team_name,
                   data_version, created_at
            FROM presentation_participants
            WHERE course_id = ? AND week_num = ?
-             AND popping_version_compatible(data_version, ?) = 1
+             AND {version_filter}
            ORDER BY id''',
         params,
     )
@@ -1957,8 +1975,11 @@ def _weekly_hero_source_rows(
         if key not in rating_keys:
             continue
         try:
-            compatible = versions_compatible(
-                _weekly_hero_history_version(item), source_schema_version
+            version = _weekly_hero_history_version(item)
+            compatible = (
+                activity_data_supported(version)
+                if include_supported_history
+                else versions_compatible(version, source_schema_version)
             )
         except (TypeError, ValueError):
             compatible = False
@@ -2320,14 +2341,23 @@ def _weekly_hero_fingerprint_source(source, challenger_results):
 
 
 def calculate_weekly_hero_preview(
-        db, course_id, week_num, source_schema_version=SCHEMA_VERSION):
-    """Calculate one read-only, deterministic weekly award preview."""
+        db, course_id, week_num, source_schema_version=SCHEMA_VERSION,
+        *, include_supported_history=False):
+    """Calculate one read-only, deterministic weekly award preview.
+
+    Normal course sessions combine supported historical activity. Explicit
+    backfills can retain one source series by leaving the history mode off.
+    Original row versions and participant snapshots are preserved in both.
+    """
+    if type(include_supported_history) is not bool:
+        raise ValueError('Supported-history selection must be a boolean')
     week_num = _weekly_hero_week(week_num)
     source_schema_version = _weekly_hero_source_schema_version(
         source_schema_version
     )
     source = _weekly_hero_source_rows(
-        db, course_id, week_num, source_schema_version
+        db, course_id, week_num, source_schema_version,
+        include_supported_history=include_supported_history,
     )
     team_results, missing_coverage = _weekly_hero_team_results(source)
     challenger_results = _weekly_hero_challenger_results(source)
@@ -2340,6 +2370,8 @@ def calculate_weekly_hero_preview(
             source, challenger_results
         ),
     }
+    if include_supported_history:
+        fingerprint_payload['source_selection'] = 'supported_history'
     fingerprint_json = json.dumps(
         fingerprint_payload,
         ensure_ascii=False,
@@ -2370,6 +2402,7 @@ def calculate_weekly_hero_preview(
         'week_num': week_num,
         'calculation_version': WEEKLY_HERO_CALCULATION_VERSION,
         'source_schema_version': source_schema_version,
+        'include_supported_history': include_supported_history,
         'source_data_versions': source_versions,
         'source_fingerprint': source_fingerprint,
         'source_presentation_rating_count': len(
@@ -2398,6 +2431,9 @@ def save_weekly_hero_summary(db, preview, replace=False):
     source_schema_version = _weekly_hero_source_schema_version(
         preview.get('source_schema_version')
     )
+    include_supported_history = preview.get('include_supported_history', False)
+    if type(include_supported_history) is not bool:
+        raise ValueError('Supported-history selection must be a boolean')
     expected_fingerprint = preview.get('source_fingerprint')
     if (not isinstance(expected_fingerprint, str)
             or not re.fullmatch(r'[0-9a-f]{64}', expected_fingerprint)):
@@ -2415,6 +2451,7 @@ def save_weekly_hero_summary(db, preview, replace=False):
         course_id,
         week_num,
         source_schema_version=source_schema_version,
+        include_supported_history=include_supported_history,
     )
     if current['source_fingerprint'] != expected_fingerprint:
         raise RuntimeError(

@@ -339,6 +339,7 @@ def test_healthz_accepts_versioned_schema_and_reports_versions(
         "courses_checked": 1,
         "website_version": public_version(APP_VERSION),
         "database_schema_version": public_version(SCHEMA_VERSION),
+        "data_compatibility": "v1.0.x through v1.3.x",
     }
 
 
@@ -656,7 +657,7 @@ def test_weekly_export_routes_only_compatible_known_week_rows_and_versions(
     assert manifest["export_format_version"] == public_version(
         EXPORT_FORMAT_VERSION
     )
-    assert manifest["data_compatibility"] == "v1.3.x"
+    assert manifest["data_compatibility"] == "v1.0.x through v1.3.x"
     assert manifest["data_versions"] == ["v1.3.3"]
     _assert_utc_timestamp(manifest["exported_at_utc"])
 
@@ -668,10 +669,10 @@ def test_weekly_export_routes_only_compatible_known_week_rows_and_versions(
     assert summary["Website Version"] == public_version(APP_VERSION)
     assert summary["Database Schema Version"] == "v1.3.0"
     assert summary["Export Format Version"] == "v1.3.0"
-    assert summary["Data Compatibility"] == "v1.3.x"
+    assert summary["Data Compatibility"] == "v1.0.x through v1.3.x"
     assert summary["Data Versions Included"] == "v1.3.3"
     assert summary["Participation Roster Scope"] == (
-        "Course-wide compatible participation through export time"
+        "Course-wide saved participation through export time"
     )
     _assert_utc_timestamp(summary["Exported At (UTC)"])
     assert summary["Week Peer Reviews (thumbs)"] == 1
@@ -753,7 +754,7 @@ def test_weekly_export_routes_only_compatible_known_week_rows_and_versions(
         assert [row["data_version"] for row in rows] == ["v1.3.3"]
 
 
-def test_v13_export_separates_names_and_routes_v12_rows_to_legacy(
+def test_v13_export_separates_names_and_includes_v12_history(
         versioned_course_env):
     from openpyxl import load_workbook
 
@@ -800,12 +801,12 @@ def test_v13_export_separates_names_and_routes_v12_rows_to_legacy(
     assert manifest["website_version"] == public_version(APP_VERSION)
     assert manifest["database_schema_version"] == "v1.3.0"
     assert manifest["export_format_version"] == "v1.3.0"
-    assert manifest["data_compatibility"] == "v1.3.x"
+    assert manifest["data_compatibility"] == "v1.0.x through v1.3.x"
     current_rows = _workbook_rows(workbook, "Peer Reviews")
     assert [
         row["discussion_post_key"]
         for row in current_rows
-    ] == ["v13-current"]
+    ] == ["v13-current", "v12-legacy"]
     assert current_rows[0]["grader_name"] == "Kit"
     assert current_rows[0]["recipient_name"] == "Bob"
 
@@ -830,13 +831,9 @@ def test_v13_export_separates_names_and_routes_v12_rows_to_legacy(
     legacy_rows = list(csv.DictReader(io.StringIO(
         legacy.data.decode("utf-8-sig")
     )))
-    v12_row = next(
-        row for row in legacy_rows
-        if row["record_type"] == "teammate_thumb"
-        and row["question_key"] == "v12-legacy"
-    )
+    assert legacy_rows == []
+    v12_row = current_rows[1]
     assert v12_row["data_version"] == "v1.2.9"
-    assert v12_row["legacy_reason"] == "incompatible_data_version"
     assert v12_row["grader_name"] == "Bob"
     assert v12_row["recipient_name"] == "Kit"
 
@@ -1629,11 +1626,11 @@ def test_end_summary_rankings_and_live_history_ignore_incompatible_rows(
         db.commit()
 
     instructor_state = _instructor_client(env).get("/api/state").get_json()
-    assert instructor_state["completed_presentation_count"] == 1
+    assert instructor_state["completed_presentation_count"] == 2
     assert {
         item["presentation_key"]
         for item in instructor_state["presentation_history"]
-    } == {"rank-current"}
+    } == {"rank-current", "rank-baseline"}
 
     instructor_html = _instructor_client(env).get(
         f"/instructor/{env['slug']}"

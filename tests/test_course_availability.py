@@ -666,6 +666,7 @@ def test_safe_pending_schema_health_reports_actual_database_version(
         "courses_checked": 1,
         "website_version": app_module.public_version(app_module.APP_VERSION),
         "database_schema_version": "v1.0.0",
+        "data_compatibility": "v1.0.x through v1.3.x",
         "schema_migration_pending": True,
         "course_database_schema_versions": {slug: "v1.0.0"},
     }

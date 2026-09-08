@@ -19,17 +19,23 @@ CSV files, and manifests include it.
 
 ## Compatibility rule
 
-Data is current when its major and minor numbers match the database schema's
-major and minor numbers. Patch differences are compatible. For example,
-`v1.0.3` data is compatible with every `v1.0.x` website and database release.
+The database must have completed the supported schema migrations before the
+website uses it. Schema checks and explicit version-specific backfills still
+distinguish major/minor versions.
 
-When the database schema advances to `v1.1.0`, data from `v1.0.x` is retained
-but excluded from Current Week Results. It remains available through Download
-Legacy Data. Records whose lecture week is unknown also remain legacy,
-independently of their data version.
+Starting with `v1.3.3`, normal classroom views and exports read saved activity
+from every supported migrated series, currently `v1.0.x` through `v1.3.x`.
+For example, `v1.2.5` Week 1 activity contributes to the same course-wide turn
+counts and weekly downloads as `v1.3.3` Week 2 activity. Normal Weekly Hero
+calculation can combine these versions within one week.
 
-A single database may therefore contain several data versions. The database
-schema version must not be used as a replacement for per-record data versions.
+Rows retain their original data versions. No reset, reimport, or relabeling is
+required. The export manifest reports the accepted range and the actual source
+versions included. Unknown or invalid lecture weeks, malformed versions, and
+unsupported versions remain in Download Legacy Data.
+
+Download Results lists the selected week, earlier weeks, and every other week
+with saved results. Selecting Week 1 does not hide a saved Week 2 download.
 
 ## v1.1.0 participation history
 
@@ -65,8 +71,9 @@ known team for an archived student.
 It also includes finalized membership in **Presentation Participants** and
 retained selections in **Challenge Rounds** for the selected
 week. Complete course backup bundles include both event tables in `popping.db`.
-These records carry their own data versions and follow the normal current versus
-legacy export rule after a future compatibility-line change.
+These records retain their own data versions and stay usable under the
+supported-history rule above. Missing historical membership is never inferred
+from the current roster.
 
 ## v1.2.0 display names
 
@@ -78,10 +85,9 @@ roster names:
 - Student views resolve display name, roster name, then ID and show one item.
   Instructor views use the same resolved name and append the student ID.
 
-The migration adds the new column without changing existing roster names. Under
-the compatibility rule, activity written by `v1.0.x` or `v1.1.x` remains in
-the database but moves to Download Legacy Data after the `v1.2.0` upgrade.
-Resetting a course instead creates an empty current-version database.
+The migration adds the new column without changing existing roster names.
+Existing activity retains its original version and remains readable under the
+supported-history rule. Resetting a course creates an empty database.
 
 ## v1.3.0 Weekly Hero history
 
@@ -99,8 +105,10 @@ Resetting a course instead creates an empty current-version database.
 - Future sessions aggregate prior-week gold, silver, bronze, and bolt counts
   by the stable student database identity.
 
-Ending a `v1.3.x` week calculates and saves its summary transactionally. A
-completed `v1.2.x` week can be reconstructed after migration with:
+Ending a week calculates and saves its summary transactionally using supported
+saved activity from that week, including earlier versions. For an explicit
+version-specific reconstruction, a completed `v1.2.x` week can also be processed
+after migration with:
 
 ```bash
 python scripts/backfill-weekly-heroes.py <course_slug> <week>
@@ -114,9 +122,8 @@ unchanged fingerprint. `--apply --replace` is required to replace a different
 saved summary. Source ratings, challenges, participants, teams, and students
 are never rewritten by this backfill.
 
-The new summary rows use `v1.3.x` provenance. Preserved `v1.2.x` source rows
-remain legacy after the schema transition and retain their original data
-versions.
+New summary rows use `v1.3.x` provenance. Their source version list and
+fingerprint describe the original activity, including `v1.2.x` records.
 
 ## Version bump rules
 

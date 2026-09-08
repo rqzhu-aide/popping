@@ -12,6 +12,16 @@ versions as defined in `VERSIONING.md`.
   team. Leaving or switching teams remains blocked once activity is saved.
 - Kept the database schema and export format at `v1.3.0`.
 
+### Changed
+
+- Unified saved activity from supported `v1.0.x` through `v1.3.x` releases in
+  course-wide turn counts, weekly results, and normal Weekly Hero calculation.
+  Original record versions and historical membership are preserved.
+- Listed every week with saved results in Download Results, including weeks
+  later than the currently selected week.
+- Kept the website at `v1.3.3`. Unknown-week and unsupported records remain
+  available separately through Download Legacy Data.
+
 ## [v1.3.2] - 2026-09-08
 
 ### Fixed

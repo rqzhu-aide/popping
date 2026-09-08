@@ -747,7 +747,7 @@ def test_badge_counts_respect_prior_week_and_student_filters(hero_env):
         ) == {}
 
 
-def test_end_session_refuses_mixed_sources_and_preserves_v1_2_summary(
+def test_end_session_refreshes_mixed_sources_and_preserves_prior_awards(
         hero_env):
     _seed_ranked_week(hero_env, data_version="1.2.7")
     with _connect(hero_env) as db:
@@ -764,18 +764,24 @@ def test_end_session_refuses_mixed_sources_and_preserves_v1_2_summary(
             [saved["summary_id"]],
         ).fetchone())
         results_before = [
-            tuple(row) for row in db.execute(
+            {key: row[key] for key in row.keys()
+             if key not in ("id", "summary_id", "created_at")}
+            for row in db.execute(
                 """SELECT * FROM weekly_hero_results
-                   WHERE summary_id = ? ORDER BY id""",
+                   WHERE summary_id = ? ORDER BY result_key""",
                 [saved["summary_id"]],
             )
         ]
         recipients_before = [
-            tuple(row) for row in db.execute(
-                """SELECT recipient.* FROM weekly_hero_recipients recipient
+            {key: row[key] for key in row.keys()
+             if key not in ("id", "result_id", "created_at")}
+            for row in db.execute(
+                """SELECT result.result_key, recipient.*
+                   FROM weekly_hero_recipients recipient
                    JOIN weekly_hero_results result
                      ON result.id = recipient.result_id
-                   WHERE result.summary_id = ? ORDER BY recipient.id""",
+                   WHERE result.summary_id = ?
+                   ORDER BY result.result_key, recipient.recipient_key""",
                 [saved["summary_id"]],
             )
         ]
@@ -833,13 +839,7 @@ def test_end_session_refuses_mixed_sources_and_preserves_v1_2_summary(
         },
     )
 
-    assert response.status_code == 409
-    message = response.get_json()["error"].casefold()
-    assert "weekly hero" in message
-    assert any(fragment in message for fragment in (
-        "mixed", "multiple compatibility", "more than one data version",
-    ))
-    assert "backfill" in message
+    assert response.status_code == 200, response.get_json()
     with _connect(hero_env) as db:
         state_after = dict(db.execute(
             """SELECT phase, session_key, roster_version
@@ -847,30 +847,44 @@ def test_end_session_refuses_mixed_sources_and_preserves_v1_2_summary(
             [hero_env["course_id"]],
         ).fetchone())
         summary_after = dict(db.execute(
-            "SELECT * FROM weekly_hero_summaries WHERE id = ?",
-            [saved["summary_id"]],
+            "SELECT * FROM weekly_hero_summaries WHERE course_id = ? AND week_num = 1",
+            [hero_env["course_id"]],
         ).fetchone())
         results_after = [
-            tuple(row) for row in db.execute(
+            {key: row[key] for key in row.keys()
+             if key not in ("id", "summary_id", "created_at")}
+            for row in db.execute(
                 """SELECT * FROM weekly_hero_results
-                   WHERE summary_id = ? ORDER BY id""",
-                [saved["summary_id"]],
+                   WHERE summary_id = ? ORDER BY result_key""",
+                [summary_after["id"]],
             )
         ]
         recipients_after = [
-            tuple(row) for row in db.execute(
-                """SELECT recipient.* FROM weekly_hero_recipients recipient
+            {key: row[key] for key in row.keys()
+             if key not in ("id", "result_id", "created_at")}
+            for row in db.execute(
+                """SELECT result.result_key, recipient.*
+                   FROM weekly_hero_recipients recipient
                    JOIN weekly_hero_results result
                      ON result.id = recipient.result_id
-                   WHERE result.summary_id = ? ORDER BY recipient.id""",
-                [saved["summary_id"]],
+                   WHERE result.summary_id = ?
+                   ORDER BY result.result_key, recipient.recipient_key""",
+                [summary_after["id"]],
             )
         ]
         assert db.execute(
             "SELECT COUNT(*) FROM weekly_hero_summaries"
         ).fetchone()[0] == 1
-    assert state_after == state_before
-    assert summary_after == summary_before
+    assert state_after["phase"] == "ended"
+    assert state_after["session_key"] == state_before["session_key"]
+    assert state_after["roster_version"] == state_before["roster_version"] + 1
+    assert summary_before["source_schema_version"] == V1_2
+    assert summary_after["source_schema_version"] == SCHEMA_VERSION
+    assert json.loads(summary_after["source_data_versions"]) == ["1.2.7", SCHEMA_VERSION]
+    assert summary_after["source_presentation_rating_count"] == 5
+    assert summary_after["source_participant_count"] == 5
+    assert summary_after["source_challenge_rating_count"] == 3
+    assert summary_after["source_fingerprint"] != summary_before["source_fingerprint"]
     assert results_after == results_before
     assert recipients_after == recipients_before
 
