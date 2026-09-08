@@ -81,6 +81,17 @@ function makeSession(routes, options = {}) {
         'rating-status': makeElement('rating-status'),
         'btn-submit-rating': makeElement('btn-submit-rating'),
     };
+    const teammateCards = (options.teammateIds || []).map(studentId => {
+        const card = makeElement(`card-${studentId}`);
+        card.dataset.studentId = studentId;
+        return card;
+    });
+    if (teammateCards.length) {
+        const selfCard = makeElement('card-you');
+        selfCard.dataset.studentId = 'you';
+        selfCard.dataset.rosterStudentId = 'S1';
+        teammateCards.push(selfCard);
+    }
 
     let nowMs = 1_000_000;
     class FakeDate extends Date {
@@ -114,7 +125,10 @@ function makeSession(routes, options = {}) {
             if (sel === '.dashboard') return dashboardEl;
             return null;
         },
-        querySelectorAll() { return []; },
+        querySelectorAll(sel) {
+            if (sel === '.teammate-card[data-student-id]') return teammateCards;
+            return [];
+        },
         getElementById(id) { return elementsById[id] || null; },
         createElement() { return makeElement(); },
         addEventListener() {},
@@ -299,6 +313,54 @@ async function scenarioRosterRetriesWithBackoff() {
     assert.deepStrictEqual(session.fetchLog.map(u => u.split('?')[0]), ['/api/poll'],
         'healthy session should send only the main poll');
     console.error('PASS roster retry');
+}
+
+async function scenarioLateJoinRefreshesDiscussionCards() {
+    for (const teammateIds of [[], ['S2']]) {
+        const members = ['S1', ...teammateIds].map(student_id => ({
+            student_id, name: student_id,
+        }));
+        const team = { id: 1, name: 'Team 1', color: '#abc', members };
+        const session = makeSession([
+            ['/api/poll', [7, 8, 9].map(version => ok({
+                changed: true,
+                state_version: version,
+                state: { ...discussionState, my_team: team, roster_version: version },
+                poll_interval: 1000,
+            }))],
+            ['/api/discussion_questions', [ok({ version: 2, questions: [] })]],
+            ['/api/my_responses', [ok({
+                phase: 'discussion', session_key: 4, thumb_recipient_ids: [],
+            })]],
+            ['/api/teams', [
+                ok([team]),
+                ok([{ ...team, members: [...members].reverse().map(member => ({
+                    ...member, name: `${member.name} updated`,
+                })) }]),
+                ok([{ ...team, members: [...members, { student_id: 'S3', name: 'Late arrival' }] }]),
+            ]],
+        ], { myTeamId: 1, teammateIds });
+        await session.drain();
+        assert.strictEqual(session.getReloadCount(), 0,
+            'matching rendered membership must not reload on initial roster sync');
+
+        session.advance(1500);
+        await session.pollOnce();
+        assert.strictEqual(session.getReloadCount(), 0,
+            'name or ordering changes without membership changes must not reload');
+
+        vm.runInContext('_studentVoteInFlight = 1', session.sandbox);
+        session.advance(1500);
+        await session.pollOnce();
+        assert.strictEqual(session.getReloadCount(), 0,
+            'a newcomer must not interrupt an in-flight vote');
+        vm.runInContext('_studentVoteInFlight = 0; completePendingDashboardReload()', session.sandbox);
+        assert.strictEqual(session.getReloadCount(), 1,
+            teammateIds.length
+                ? 'a newcomer should refresh existing teammates discussion cards'
+                : 'a newcomer should replace the solo-team message with discussion cards');
+    }
+    console.error('PASS late join discussion card refresh');
 }
 
 async function scenarioDiscussionQuestionsRetry() {
@@ -799,6 +861,7 @@ async function scenarioIntentionalDemoNavigationStopsStalePoll() {
 
 (async () => {
     await scenarioRosterRetriesWithBackoff();
+    await scenarioLateJoinRefreshesDiscussionCards();
     await scenarioDiscussionQuestionsRetry();
     await scenarioMyResponsesRetry();
     await scenarioAmbiguousThumbWaitsForMatchingReadback();

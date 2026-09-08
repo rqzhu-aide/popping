@@ -7498,19 +7498,95 @@ def test_live_student_cannot_recover_to_a_different_team(course_env):
     assert _state_row(course_env)["roster_version"] == 0
 
 
-def test_unassigned_live_student_without_previous_team_cannot_join(course_env):
-    _set_state(course_env, phase="competition")
+@pytest.mark.parametrize("phase", ("discussion", "competition"))
+def test_unassigned_live_student_can_join_once_after_saved_activity(
+        course_env, phase):
+    _seed_current_session_thumb(course_env)
+    _set_state(course_env, phase=phase)
+    history_before = _history_counts(course_env)
+    student_client = _student_client(course_env, "s3")
+
+    response = student_client.post(
+        "/api/join_team",
+        json={"team_id": course_env["teams"]["Team 2"]},
+    )
+
+    assert response.status_code == 200
+    assert response.get_json() == {"success": True, "roster_version": 1}
+    repeated = student_client.post(
+        "/api/join_team",
+        json={"team_id": course_env["teams"]["Team 2"]},
+    )
+    assert repeated.status_code == 200
+    assert repeated.get_json() == response.get_json()
+    for forbidden_team in (0, course_env["teams"]["Team 1"]):
+        forbidden = student_client.post(
+            "/api/join_team", json={"team_id": forbidden_team}
+        )
+        assert forbidden.status_code == 403
+    with _connect(course_env) as db:
+        student = db.execute(
+            """SELECT team_id, last_team_id, last_team_joined_at FROM students
+               WHERE student_id = 's3'"""
+        ).fetchone()
+    assert student["team_id"] == student["last_team_id"] == (
+        course_env["teams"]["Team 2"]
+    )
+    assert student["last_team_joined_at"] is not None
+    state = _state_row(course_env)
+    assert state["roster_version"] == 1
+    assert state["phase"] == phase
+    assert state["session_key"] == SESSION_KEY
+    assert _history_counts(course_env) == history_before
+
+
+def test_concurrent_late_joins_cannot_switch_teams(course_env):
+    _set_state(course_env, phase="discussion")
+    clients = [_student_client(course_env, "s3") for _ in range(2)]
+    targets = [course_env["teams"][name] for name in ("Team 1", "Team 2")]
+
+    def join(index):
+        return clients[index].post(
+            "/api/join_team", json={"team_id": targets[index]}
+        ).status_code
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        statuses = list(executor.map(join, range(2)))
+
+    assert sorted(statuses) == [200, 403]
+    with _connect(course_env) as db:
+        student = db.execute(
+            "SELECT team_id, last_team_id FROM students WHERE student_id = 's3'"
+        ).fetchone()
+    winning_team = targets[statuses.index(200)]
+    assert student["team_id"] == student["last_team_id"] == winning_team
+    assert _state_row(course_env)["roster_version"] == 1
+
+
+@pytest.mark.parametrize("phase", ("discussion", "competition"))
+@pytest.mark.parametrize("restriction,status", (
+    ("locked", 403), ("full", 409), ("hidden", 400), ("ended", 403),
+))
+def test_late_first_join_respects_team_availability(
+        course_env, phase, restriction, status):
+    _set_state(course_env, phase=phase)
+    with _connect(course_env) as db:
+        if restriction == "locked":
+            db.execute("UPDATE course_state SET teams_locked = 1")
+        elif restriction == "full":
+            db.execute("UPDATE course_state SET max_members_per_team = 1")
+        elif restriction == "hidden":
+            db.execute("UPDATE course_state SET max_teams = 1")
+        else:
+            db.execute("UPDATE course_state SET phase = 'ended'")
+        db.commit()
 
     response = _student_client(course_env, "s3").post(
         "/api/join_team",
         json={"team_id": course_env["teams"]["Team 2"]},
     )
 
-    assert response.status_code == 403
-    assert response.get_json()["error"] == (
-        "During a live session, you can only rejoin the team you joined "
-        "for this session"
-    )
+    assert response.status_code == status
     with _connect(course_env) as db:
         student = db.execute(
             "SELECT team_id, last_team_id FROM students WHERE student_id = 's3'"
@@ -7520,9 +7596,10 @@ def test_unassigned_live_student_without_previous_team_cannot_join(course_env):
 
 
 @pytest.mark.parametrize("team_id", (0, "Team 2"))
+@pytest.mark.parametrize("phase", ("discussion", "competition"))
 def test_assigned_student_cannot_leave_or_switch_during_live_session(
-        course_env, team_id):
-    _set_state(course_env, phase="competition")
+        course_env, team_id, phase):
+    _set_state(course_env, phase=phase)
     requested_team = (
         course_env["teams"][team_id] if isinstance(team_id, str) else team_id
     )
@@ -7703,37 +7780,47 @@ def test_unassigned_live_student_sees_only_previous_team_recovery(
     )
 
 
-def test_locked_live_student_sees_no_team_recovery_button(course_env):
-    _set_live_team_recovery_state(course_env, locked=True)
+@pytest.mark.parametrize("student_id", ("s1", "s3"))
+@pytest.mark.parametrize("phase", ("discussion", "competition"))
+def test_locked_live_student_sees_no_team_join_button(
+        course_env, student_id, phase):
+    _set_live_team_recovery_state(course_env, locked=True, phase=phase)
 
-    html = _student_client(course_env, "s1").get(
+    html = _student_client(course_env, student_id).get(
         "/dashboard"
     ).get_data(as_text=True)
 
-    assert "Team Rejoining Locked" in html
-    assert "The instructor has temporarily locked team rejoining." in html
-    assert 'data-team-rejoin="true"' not in html
+    assert "Team Joining Locked" in html
+    assert (
+        "The instructor has temporarily locked team joining and rejoining."
+        in html
+    )
+    assert 'onclick="joinTeam(' not in html
 
 
-def test_unassigned_live_student_without_previous_team_waits_for_instructor(
-        course_env):
-    _set_state(course_env, phase="competition")
+@pytest.mark.parametrize("phase", ("discussion", "competition"))
+def test_unassigned_live_student_sees_available_team_choices(course_env, phase):
+    _set_state(course_env, phase=phase)
     with _connect(course_env) as db:
-        db.execute(
-            """UPDATE students SET team_id = NULL, last_team_id = NULL
-               WHERE student_id = 's3'"""
-        )
+        db.execute("UPDATE course_state SET max_teams = 3, max_members_per_team = 2")
         db.commit()
 
     html = _student_client(course_env, "s3").get(
         "/dashboard"
     ).get_data(as_text=True)
 
-    assert "Waiting for Team Assignment" in html
+    assert "Join a Team" in html
     assert (
-        "You did not join a team for this session. "
-        "Please ask your instructor to assign you."
+        "Choose a team to join. After joining, you cannot switch teams "
+        "during this session."
     ) in html
+    assert html.count('onclick="joinTeam(') == 3
+    assert (
+        f'onclick="joinTeam({course_env["teams"]["Team 1"]})" disabled '
+        'title="Team is full"' in html
+    )
+    assert f'onclick="joinTeam({course_env["teams"]["Team 2"]})">' in html
+    assert f'data-team-id="{course_env["teams"]["Team 4"]}"' not in html
     assert 'data-team-rejoin="true"' not in html
 
 

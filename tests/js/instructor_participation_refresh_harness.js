@@ -678,8 +678,9 @@ async function main() {
     assert.match(confirmMessage, /team-based voting totals/i);
     assert.match(
         confirmMessage,
-        /unassigned student may only rejoin this session's team/i
+        /unassigned students may join when teams are unlocked/i
     );
+    assert.match(confirmMessage, /students who already joined may only rejoin that team/i);
     assert.strictEqual(events.filter(event => event === 'reload').length, 0);
     assert.strictEqual(mutationErrors.length, 0);
 

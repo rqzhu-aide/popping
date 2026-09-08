@@ -3587,12 +3587,9 @@ def join_team():
             return jsonify({'error': 'Teams are currently locked by the instructor'}), 403
 
         live_phase = state['phase'] in ('discussion', 'competition')
-        live_restoration = False
         if live_phase:
-            # Once a live phase begins, membership stays fixed except for an
-            # unassigned student restoring the exact team recorded before
-            # their removal. This repairs an accidental unassignment without
-            # reattributing saved feedback to a different team.
+            # Late arrivals may join once. Existing members may only restore
+            # their recorded team, so saved feedback keeps its attribution.
             if student['team_id'] == team_id:
                 roster_version = _current_roster_version(
                     db, state['course_id']
@@ -3603,7 +3600,8 @@ def join_team():
                     'roster_version': roster_version,
                 })
             if (not team_id or student['team_id'] is not None or
-                    student['last_team_id'] != team_id):
+                    (student['last_team_id'] is not None and
+                     student['last_team_id'] != team_id)):
                 db.rollback()
                 return jsonify({
                     'error': (
@@ -3611,7 +3609,6 @@ def join_team():
                         'you joined for this session'
                     )
                 }), 403
-            live_restoration = True
 
         # Leaving team (team_id = 0 means unassign).
         if not team_id:
@@ -3657,7 +3654,7 @@ def join_team():
             db.rollback()
             return jsonify({'error': 'That team is full'}), 409
 
-        if not live_restoration:
+        if not live_phase:
             freeze_guard = _session_roster_mutation_guard(
                 db, state['course_id'], state
             )

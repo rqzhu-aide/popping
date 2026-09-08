@@ -3,6 +3,20 @@
 All notable changes to Popping are recorded here. Releases use semantic
 versions as defined in `VERSIONING.md`.
 
+## [v1.3.2] - 2026-09-08
+
+### Fixed
+
+- Allowed students without a team to join an available team during Group
+  Discussion or Present and Challenge when the instructor unlocks teams.
+  Students already assigned cannot leave or switch teams, and returning
+  members can rejoin only their recorded team.
+- Updated the student team choices and instructor guidance for late arrivals,
+  and refreshed teammates' discussion cards when membership changes.
+  Earlier activity and finalized presentation membership remain unchanged.
+- Advanced the website to `v1.3.2`; the database schema and export format remain
+  at `v1.3.0`.
+
 ## [v1.3.1] - 2026-09-07
 
 ### Added

@@ -94,15 +94,13 @@ def test_clear_all_teams_clears_preserves_history_and_locks(course_env):
         "/api/join_team",
         json={"team_id": team_1},
     )
-    assert live_rejoin.status_code == 403
-    assert live_rejoin.get_json()["error"] == (
-        "During a live session, you can only rejoin the team you joined "
-        "for this session"
-    )
-    assert all(
-        team_id is None and last_team_id is None
-        for team_id, last_team_id in _roster_snapshot(course_env)[1].values()
-    )
+    assert live_rejoin.status_code == 200
+    assert _roster_snapshot(course_env)[1] == {
+        "s1": (team_1, team_1),
+        "s2": (None, None),
+        "s3": (None, None),
+        "s4": (None, None),
+    }
     assert _history_counts(course_env) == history_before
 
 

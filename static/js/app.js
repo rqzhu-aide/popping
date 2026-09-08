@@ -1944,6 +1944,23 @@ if (dashboard) {
         renderRosterGrid(document.getElementById('roster-table'), teams, dashboard.dataset.you);
         updateDiscussionCardIdentities(teams);
         updateTeamCapacityCards(teams);
+        if (dashboard.dataset.phase === 'discussion' && MY_TEAM_ID != null) {
+            const myTeam = teams.find(team => Number(team.id) === Number(MY_TEAM_ID));
+            if (Array.isArray(myTeam?.members)) {
+                // The discussion cards are server-rendered. Include the viewer
+                // explicitly because a solo team has no card table yet.
+                const renderedIds = new Set([String(dashboard.dataset.you)]);
+                document.querySelectorAll('.teammate-card[data-student-id]').forEach(card => {
+                    renderedIds.add(String(card.dataset.rosterStudentId || card.dataset.studentId));
+                });
+                const memberIds = new Set(myTeam.members.map(member => String(member.student_id)));
+                if (renderedIds.size !== memberIds.size ||
+                        [...memberIds].some(id => !renderedIds.has(id))) {
+                    queueDashboardReload(_lastState);
+                    completePendingDashboardReload();
+                }
+            }
+        }
     }
 
     async function syncRoster(version) {
@@ -4976,9 +4993,9 @@ window.setPhase = async function(phase) {
             const nextPhaseLabel = PHASE_LABELS[phase] || phase;
             const proceed = confirm(
                 `${count} enrolled ${studentLabel} unassigned. They will be ` +
-                'excluded from team activities and team-based voting totals. ' +
-                'During the live session, an unassigned student may only ' +
-                "rejoin this session's team while team rejoining is unlocked. " +
+                'excluded from team activities and team-based voting totals until they join. ' +
+                'Unassigned students may join when teams are unlocked. ' +
+                'Students who already joined may only rejoin that team. ' +
                 `Start ${nextPhaseLabel} with the assigned students?`
             );
             if (!proceed) return;

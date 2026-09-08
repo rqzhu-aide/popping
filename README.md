@@ -437,7 +437,10 @@ popping/
    optionally choose a display name. Leaving it blank keeps the saved display
    name. Student pages show one name only. Instructor pages show that name with
    the student ID.
-3. Select a team during **Setup**.
+3. Select a team during **Setup**. Late arrivals can also join during **Group
+   Discussion** or **Present and Challenge** when the instructor unlocks teams.
+   Once the session is live, students cannot leave or switch teams. Returning
+   members can rejoin only the team they previously joined for that session.
 4. Participate in discussion, peer grading, or team grading as phases change.
 
 ### Instructors
@@ -457,6 +460,11 @@ popping/
    presentation and selected challengers.
 5. **End Session** → Instructor exports Current Week Results and uploads the workbook
    to Canvas.
+
+Late joining leaves earlier feedback and completed presentation records
+unchanged. Missing individual responses stay blank in the results workbook.
+Team presentation participation is recorded for the members present when the
+instructor finalizes that presentation.
 
 ## Managing Courses
 

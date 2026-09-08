@@ -128,7 +128,7 @@
         <div class="phase-settings phase-settings-secondary">
             <button class="btn btn-sm {% if teams_locked %}btn-danger{% else %}btn-primary{% endif %}"
                     id="btn-toggle-lock" onclick="toggleLock(this)"
-                    title="{% if state.phase == 'setup' %}Control student team joining and changes{% else %}Control whether unassigned students may rejoin this session's team{% endif %}">
+                    title="{% if state.phase == 'setup' %}Control student team joining and changes{% else %}Control whether unassigned students may join or rejoin a team{% endif %}">
                 {% if teams_locked %}Unlock Teams{% else %}Lock Teams{% endif %}
             </button>
             {% if state.phase == 'setup' %}

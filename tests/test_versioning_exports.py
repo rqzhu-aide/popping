@@ -46,12 +46,12 @@ FEEDBACK_TABLES = (*BASELINE_FEEDBACK_TABLES, "presentation_participants")
 
 
 def test_v1_versions_and_public_form_are_aligned():
-    assert APP_VERSION == "1.3.1"
+    assert APP_VERSION == "1.3.2"
     assert SCHEMA_VERSION == "1.3.0"
     assert EXPORT_FORMAT_VERSION == "1.3.0"
     assert BASELINE_SCHEMA_VERSION == "1.0.0"
     assert BASELINE_DATA_VERSION == "1.0.0"
-    assert public_version() == "v1.3.1"
+    assert public_version() == "v1.3.2"
     assert public_version(SCHEMA_VERSION) == "v1.3.0"
     assert parse_version(SCHEMA_VERSION)[2] == 0
 

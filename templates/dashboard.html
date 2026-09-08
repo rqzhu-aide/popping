@@ -131,8 +131,8 @@
         {% endif %}
         {% elif state.phase in ['discussion', 'competition'] %}
         {% if teams_locked %}
-        <h2>Team Rejoining Locked</h2>
-        <p class="hint">The instructor has temporarily locked team rejoining.</p>
+        <h2>Team Joining Locked</h2>
+        <p class="hint">The instructor has temporarily locked team joining and rejoining.</p>
         {% elif student.last_team_id %}
         <h2>Rejoin Your Team</h2>
         <p class="hint">Team rejoining is unlocked. You may return only to the team you joined for this session.</p>
@@ -157,8 +157,20 @@
         <p class="hint text-warning">The team you joined for this session is not currently available. Please ask your instructor for help.</p>
         {% endif %}
         {% else %}
-        <h2>Waiting for Team Assignment</h2>
-        <p class="hint">You did not join a team for this session. Please ask your instructor to assign you.</p>
+        <h2>Join a Team</h2>
+        <p class="hint">Choose a team to join. After joining, you cannot switch teams during this session.</p>
+        <div class="team-grid">
+            {% for t in teams %}
+            {% set is_full = max_members and t.member_count >= max_members %}
+            <button class="team-card" data-team-id="{{ t.id }}"
+                    style="--team-color: {{ t.color }}"
+                    onclick="joinTeam({{ t.id }})"{% if is_full %} disabled title="Team is full"{% endif %}>
+                <span class="team-dot" style="background: {{ t.color }}"></span>
+                <span class="team-name">{{ t.name }}</span>
+                <span class="team-capacity">{{ t.member_count }}/{{ max_members }}{% if is_full %} · Full{% endif %}</span>
+            </button>
+            {% endfor %}
+        </div>
         {% endif %}
         {% else %}
         <h2>Waiting for Team Assignment</h2>
