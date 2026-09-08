@@ -21,6 +21,8 @@ versions as defined in `VERSIONING.md`.
   later than the currently selected week.
 - Showed average presentation turns per team member to two decimal places
   in the Present and Challenge team selector.
+- Kept completed-question marks for the selected lecture week when returning
+  to Setup or starting another session in that week.
 - Kept the website at `v1.3.3`. Unknown-week and unsupported records remain
   available separately through Download Legacy Data.
 

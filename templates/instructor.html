@@ -55,6 +55,7 @@
      data-presentation-remaining="{{ state.presentation_remaining if state.presentation_remaining is not none else '' }}"
      data-presentation-time-cap="{{ state.presentation_time_cap or 300 }}"
      data-presentation-history="{{ state.presentation_history or '[]' }}"
+     data-completed-question-ids="{{ presented_question_ids | tojson | forceescape }}"
      data-poll-active="{{ 1 if state.poll_active else 0 }}"
      data-poll-started="{{ state.poll_started_at or '' }}"
      data-poll-remaining="{{ state.poll_remaining or 0 }}"

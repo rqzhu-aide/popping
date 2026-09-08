@@ -710,6 +710,7 @@ function testCapacityStatusUsesOnlineCounts() {
 }
 
 function testPresentationTransitionsReconcileInPlace() {
+    let completedQuestionIds;
     const instructor = {
         dataset: {
             phase: 'competition',
@@ -737,7 +738,7 @@ function testPresentationTransitionsReconcileInPlace() {
         stopCountdownTimer() {},
         stopPollGlide() {},
         setTimerExpired() {},
-        markPresentedCompQuestionOptions() {},
+        markPresentedCompQuestionOptions(ids) { completedQuestionIds = ids; },
     };
     vm.createContext(sandbox);
     vm.runInContext(
@@ -796,11 +797,78 @@ function testPresentationTransitionsReconcileInPlace() {
         active_team: null,
         active_question: null,
         presentation_history: [],
+        completed_question_ids: [11],
     };
     vm.runInContext('reconcilePresentationBlocks(nextState)', sandbox);
     assert.strictEqual(instructor.dataset.pollQuestionKey, '');
     assert.strictEqual(elements['presentation-active'].style.display, 'none');
     assert.strictEqual(elements['presentation-idle'].style.display, '');
+    assert.deepStrictEqual(completedQuestionIds, [11]);
+}
+
+function testQuestionCompletionUsesSelectedWeekAcrossSessions() {
+    const options = [
+        { value: '11', dataset: { completed: '1' }, textContent: '#1: One (completed)' },
+        { value: '12', dataset: { completed: '0' }, textContent: '#2: Two' },
+    ];
+    const select = {
+        value: '', options, innerHTML: '',
+        querySelectorAll() { return options; },
+    };
+    const instructor = { dataset: { presentationHistory: '[]' } };
+    const sandbox = {
+        instructor,
+        document: {
+            getElementById(id) { return id === 'comp-question' ? select : null; },
+            querySelector() { return instructor; },
+        },
+        escapeAttrValue: String,
+        escapeHtmlValue: String,
+        discussionQuestionNumber: (_question, position) => position + 1,
+        discussionQuestionKey: question => question.key,
+    };
+    vm.createContext(sandbox);
+    vm.runInContext(sourceSlice(
+        'function markPresentedCompQuestionOptions(',
+        'function updateCapacityStatus(state) {'
+    ), sandbox);
+    vm.runInContext(sourceSlice(
+        'function competitionQuestionLabel(',
+        '// Populate Setup controls'
+    ), sandbox);
+
+    vm.runInContext('markPresentedCompQuestionOptions([12])', sandbox);
+    assert.strictEqual(options[0].textContent, '#1: One');
+    assert.strictEqual(options[0].dataset.completed, '0');
+    assert.strictEqual(options[1].textContent, '#2: Two (completed)');
+    assert.strictEqual(options[1].dataset.completed, '1');
+    assert.strictEqual(instructor.dataset.completedQuestionIds, '[12]');
+    vm.runInContext('markPresentedCompQuestionOptions(undefined)', sandbox);
+    assert.strictEqual(options[1].dataset.completed, '1',
+        'an older poll without completion metadata must preserve known markers');
+
+    sandbox.questionData = { questions: [
+        { question_id: 11, key: 'one', title: 'One revised' },
+        { question_id: 12, key: 'two', title: 'Two revised' },
+    ] };
+    options[1].dataset.completed = '0';
+    vm.runInContext('rebuildCompetitionQuestionOptions(questionData)', sandbox);
+    assert.match(select.innerHTML, /#2: Two revised \(completed\)/,
+        'question refresh must retain earlier-session completion from the week metadata');
+    assert.doesNotMatch(select.innerHTML, /#1: One revised \(completed\)/);
+
+    options[1].dataset.completed = '1';
+    vm.runInContext('markPresentedCompQuestionOptions([])', sandbox);
+    assert.strictEqual(options[1].dataset.completed, '0',
+        'an authoritative empty list must clear obsolete completion');
+    vm.runInContext('rebuildCompetitionQuestionOptions(questionData)', sandbox);
+    assert.doesNotMatch(select.innerHTML, /\(completed\)/);
+
+    delete instructor.dataset.completedQuestionIds;
+    options[1].dataset.completed = '1';
+    vm.runInContext('rebuildCompetitionQuestionOptions(questionData)', sandbox);
+    assert.match(select.innerHTML, /#2: Two revised \(completed\)/,
+        'an older page without week metadata must retain its rendered markers');
 }
 
 function testInstructorVisibilityRecovery() {
@@ -1338,6 +1406,7 @@ function testContextualRosterBadgesAndTeamLabels() {
     testPermanentTeamFilterAccessibility();
     testCapacityStatusUsesOnlineCounts();
     testPresentationTransitionsReconcileInPlace();
+    testQuestionCompletionUsesSelectedWeekAcrossSessions();
     testInstructorVisibilityRecovery();
     testMarkdownPreservesMultilineDisplayMath();
     testIndividualTeamPickerKeyboardContract();

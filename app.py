@@ -409,6 +409,28 @@ def _compatible_rating_weeks(db, course_id):
     }
 
 
+def _completed_question_ids_for_week(db, course_id, week_num, history):
+    """Mark finalized questions across all sessions of the selected week."""
+    if not isinstance(history, list) or not history:
+        return []
+    question_weeks = {
+        row['id']: row['week_num']
+        for row in db.execute(
+            '''SELECT id, COALESCE(week_num, 1) AS week_num FROM questions
+               WHERE course_id = ? AND COALESCE(week_num, 1) = ?''',
+            [course_id, week_num],
+        )
+    }
+    return sorted({
+        item['question_id'] for item in history
+        if (_history_item_is_compatible(item)
+            and type(item.get('question_id')) is int
+            and item['question_id'] in question_weeks
+            and _resolve_history_week(item, question_weeks=question_weeks)
+                == week_num)
+    })
+
+
 def _presentation_guard(data, state):
     """Validate that an instructor action still targets the displayed presentation."""
     expected_key = str(data.get('presentation_key') or '').strip()
@@ -2451,6 +2473,7 @@ def instructor_course(slug):
         (state['discussion_week'] if state else None) or 1, state,
     )
     poll_duration = get_poll_duration(slug)
+    full_history = []
     if state:
         state = dict(state)
         now = _utcnow()
@@ -2461,6 +2484,8 @@ def instructor_course(slug):
         try:
             full_history = json.loads(state.get('presentation_history') or '[]')
         except (TypeError, ValueError):
+            full_history = []
+        if not isinstance(full_history, list):
             full_history = []
         state['presentation_history'] = json.dumps([
             item for item in full_history
@@ -2600,16 +2625,9 @@ def instructor_course(slug):
             ],
         }
 
-    # Track which questions have already been presented
-    presented_question_ids = set()
-    if state and state['presentation_history']:
-        try:
-            for h in json.loads(state['presentation_history']):
-                if (h.get('session_key', 0) == (state['session_key'] or 0)
-                        and 'question_id' in h):
-                    presented_question_ids.add(h['question_id'])
-        except Exception:
-            pass
+    presented_question_ids = _completed_question_ids_for_week(
+        course_db, course['id'], selected_week, full_history,
+    )
 
     return render_template(
         'instructor.html',
@@ -2623,7 +2641,7 @@ def instructor_course(slug):
         session_started_at=state['session_started_at'] if state and 'session_started_at' in state.keys() else None,
         end_stats=end_stats,
         available_result_weeks=available_result_weeks,
-        presented_question_ids=list(presented_question_ids),
+        presented_question_ids=presented_question_ids,
         POLL_DURATION=poll_duration
     )
 
@@ -3145,6 +3163,12 @@ def _compute_state(slug, include_poll_count=True, known_question_id=None,
     if include_poll_count:
         result['poll_count'] = poll_count or 0
         cid = state['course_id'] if state else None
+        result['completed_question_ids'] = (
+            _completed_question_ids_for_week(
+                get_db(slug), cid, state.get('discussion_week') or 1,
+                all_history,
+            ) if cid else []
+        )
         if cid:
             if state.get('phase') == 'setup':
                 presence_rows = query_db(

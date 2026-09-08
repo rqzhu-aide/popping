@@ -4403,27 +4403,30 @@ if (instructor) {
             lastRenderedQuestionKey = null;
             _instrKnownQuestionId = null;
             _instrKnownQuestionRevision = null;
-            markPresentedCompQuestionOptions(state.presentation_history);
+            markPresentedCompQuestionOptions(state.completed_question_ids);
         }
         return true;
     }
 
-    // Mirror the server-rendered completed suffix once a presentation moves
-    // into the history.
-    function markPresentedCompQuestionOptions(history) {
+    // Mirror the server-rendered completed suffix for the selected week,
+    // independently of the current session's history.
+    function markPresentedCompQuestionOptions(questionIds) {
+        if (!Array.isArray(questionIds)) return;
+        const signature = JSON.stringify(questionIds);
+        if (instructor.dataset.completedQuestionIds === signature) return;
+        instructor.dataset.completedQuestionIds = signature;
         const select = document.getElementById('comp-question');
-        if (!select || !Array.isArray(history)) return;
-        const presented = new Set(
-            history.map(item => String(item?.question_id ?? ''))
-        );
+        if (!select) return;
+        const presented = new Set(questionIds.map(String));
         select.querySelectorAll('option[value]').forEach(option => {
-            if (!option.value || !presented.has(option.value)) return;
+            if (!option.value) return;
+            const completed = presented.has(option.value);
             const suffix = ' (completed)';
             const baseLabel = option.dataset.baseLabel ||
                 option.textContent.trim().replace(/ \(completed\)$/, '');
             option.dataset.baseLabel = baseLabel;
-            option.dataset.completed = '1';
-            option.textContent = `${baseLabel}${suffix}`;
+            option.dataset.completed = completed ? '1' : '0';
+            option.textContent = `${baseLabel}${completed ? suffix : ''}`;
         });
     }
 
@@ -4689,6 +4692,7 @@ if (instructor) {
                 }
             }
 
+            markPresentedCompQuestionOptions(state.completed_question_ids);
             const completed = document.getElementById('completed-presentations');
             if (completed && state.completed_presentation_count != null) {
                 const count = Number(state.completed_presentation_count) || 0;
@@ -5616,20 +5620,22 @@ function rebuildCompetitionQuestionOptions(data) {
         .filter(option => option.dataset.questionKey)
         .map(option => [option.dataset.questionKey, option]));
     const selectedValue = String(select.value || '');
-    const history = (() => {
+    const knownCompletedIds = (() => {
         try {
-            return JSON.parse(instructor?.dataset?.presentationHistory || '[]');
+            const ids = JSON.parse(instructor?.dataset?.completedQuestionIds || 'null');
+            return Array.isArray(ids) ? ids : null;
         } catch (error) {
-            return [];
+            return null;
         }
     })();
-    const completedIds = new Set(history.map(item =>
-        String(item?.question_id ?? '')).filter(Boolean));
-    existing.forEach(option => {
-        if (option.dataset.completed === '1') {
-            completedIds.add(String(option.value));
-        }
-    });
+    const completedIds = new Set((knownCompletedIds || []).map(String));
+    if (knownCompletedIds === null) {
+        existing.forEach(option => {
+            if (option.dataset.completed === '1') {
+                completedIds.add(String(option.value));
+            }
+        });
+    }
 
     let hasMissingIds = false;
     const renderedIds = new Set();
