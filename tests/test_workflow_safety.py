@@ -6020,8 +6020,8 @@ def test_competition_selectors_show_prior_turns_and_completed_questions(
     ).get_data(as_text=True)
 
     assert 'data-total-turns="2"' in html
-    assert "Team 1 · 1/2 · 2 turns</option>" in html
-    assert "Team 2 · 0/1 · 0 turns</option>" in html
+    assert "Team 1 · 1/2 · 1.00 avg turns</option>" in html
+    assert "Team 2 · 0/1 · 0.00 avg turns</option>" in html
     assert 'data-completed="1">#1: Question One (completed)</option>' in html
     assert "previously presented" not in html
 

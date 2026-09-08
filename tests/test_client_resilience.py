@@ -147,7 +147,7 @@ def test_instructor_setup_and_presentation_controls_are_contextual_and_compact()
         in source
     )
     assert (
-        "` · ${totalTurns} ${turnWord}${completionLabel}`" in source
+        "` · ${averageTurns} avg turns${completionLabel}`" in source
     )
     assert "previously presented" not in template
     assert "previously presented" not in source

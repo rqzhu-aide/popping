@@ -3761,9 +3761,9 @@ function updateCompetitionTeamOptionLabel(option) {
         option.textContent = `${teamName} (empty)`;
         return;
     }
-    const turnWord = totalTurns === 1 ? 'turn' : 'turns';
+    const averageTurns = (totalTurns / memberCount).toFixed(2);
     const completionLabel = option.dataset.completed === '1' ? ' (completed)' : '';
-    const turnSummary = ` · ${totalTurns} ${turnWord}${completionLabel}`;
+    const turnSummary = ` · ${averageTurns} avg turns${completionLabel}`;
     option.textContent = `${teamName} · ${priorCount}/${memberCount}${turnSummary}`;
 }
 

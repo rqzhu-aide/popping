@@ -1289,21 +1289,21 @@ function testContextualRosterBadgesAndTeamLabels() {
     vm.runInContext('updateCompetitionTeamOptionLabel(option)', sandbox);
     assert.strictEqual(
         option.textContent,
-        'Team 1 · 3/4 · 7 turns (completed)'
+        'Team 1 · 3/4 · 1.75 avg turns (completed)'
     );
 
     option.dataset.totalTurns = '1';
     vm.runInContext('updateCompetitionTeamOptionLabel(option)', sandbox);
     assert.strictEqual(
         option.textContent,
-        'Team 1 · 3/4 · 1 turn (completed)'
+        'Team 1 · 3/4 · 0.25 avg turns (completed)'
     );
 
     option.dataset.neverCount = '4';
     option.dataset.totalTurns = '0';
     option.dataset.completed = '0';
     vm.runInContext('updateCompetitionTeamOptionLabel(option)', sandbox);
-    assert.strictEqual(option.textContent, 'Team 1 · 0/4 · 0 turns');
+    assert.strictEqual(option.textContent, 'Team 1 · 0/4 · 0.00 avg turns');
 
     const members = ['2', '1', '0', '0'].map(presentationCount => ({
         dataset: { presentationCount },
@@ -1320,7 +1320,7 @@ function testContextualRosterBadgesAndTeamLabels() {
     assert.strictEqual(option.dataset.memberCount, '4');
     assert.strictEqual(option.dataset.neverCount, '2');
     assert.strictEqual(option.dataset.totalTurns, '3');
-    assert.strictEqual(option.textContent, 'Team 1 · 2/4 · 3 turns');
+    assert.strictEqual(option.textContent, 'Team 1 · 2/4 · 0.75 avg turns');
     assert.strictEqual(
         summary.textContent,
         '2 of 4 members have no completed team turns.'

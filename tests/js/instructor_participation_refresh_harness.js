@@ -277,7 +277,7 @@ async function main() {
     assert.match(teamSections[1].list.innerHTML, /data-student-id="s2"/);
     assert.strictEqual(teamOptions[1].disabled, false);
     assert.strictEqual(teamOptions[1].dataset.memberCount, '1');
-    assert.strictEqual(teamOptions[1].textContent, 'Team 1 · 0/1 · 0 turns');
+    assert.strictEqual(teamOptions[1].textContent, 'Team 1 · 0/1 · 0.00 avg turns');
     assert.strictEqual(teamSections[0].hidden, true);
     assert.strictEqual(teamSections[1].hidden, false);
     assert.strictEqual(authoritativePreview.dataset.visibleTeamId, '2');
@@ -318,7 +318,7 @@ async function main() {
     assert.strictEqual(teamOptions[2].dataset.totalTurns, '3');
     assert.strictEqual(
         teamOptions[2].textContent,
-        'Team 2 · 1/2 · 3 turns (completed)'
+        'Team 2 · 1/2 · 1.50 avg turns (completed)'
     );
     assert.strictEqual(teamSections[0].summary.textContent, 'No members.');
     assert.strictEqual(

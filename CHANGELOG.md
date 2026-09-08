@@ -19,6 +19,8 @@ versions as defined in `VERSIONING.md`.
   Original record versions and historical membership are preserved.
 - Listed every week with saved results in Download Results, including weeks
   later than the currently selected week.
+- Showed average presentation turns per team member to two decimal places
+  in the Present and Challenge team selector.
 - Kept the website at `v1.3.3`. Unknown-week and unsupported records remain
   available separately through Download Legacy Data.
 

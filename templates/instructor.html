@@ -429,7 +429,7 @@
                                 data-member-count="{{ presentation_members | length }}"
                                 data-never-count="{{ participation.never }}"
                                 data-total-turns="{{ participation.total_turns }}"
-                                {% if not presentation_members %}disabled{% endif %}>{{ t.name }}{% if not presentation_members %} (empty){% else %} · {{ (presentation_members | length) - participation.never }}/{{ presentation_members | length }} · {{ participation.total_turns }} turn{{ 's' if participation.total_turns != 1 else '' }}{% endif %}</option>
+                                {% if not presentation_members %}disabled{% endif %}>{{ t.name }}{% if not presentation_members %} (empty){% else %} · {{ (presentation_members | length) - participation.never }}/{{ presentation_members | length }} · {{ '%.2f' | format(participation.total_turns / (presentation_members | length)) }} avg turns{% endif %}</option>
                         {% endfor %}
                     </select>
                 </div>
