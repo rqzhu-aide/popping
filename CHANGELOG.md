@@ -14,6 +14,10 @@ versions as defined in `VERSIONING.md`.
 
 ### Changed
 
+- Added course-specific wording for the existing two presentation ratings.
+  STAT 546 now evaluates the research-paper explanation and investigation;
+  other courses retain their prompts. Database and scoring are unchanged.
+  Export metadata distinguishes current prompts from historical ratings.
 - Unified saved activity from supported `v1.0.x` through `v1.3.x` releases in
   course-wide turn counts, weekly results, and normal Weekly Hero calculation.
   Original record versions and historical membership are preserved.

@@ -1744,6 +1744,25 @@ def instructor_login_required(f):
     return decorated
 
 
+DEFAULT_PRESENTATION_RATING_QUESTIONS = (
+    "Was the team's answer well-developed and convincing?",
+    "Was the team's explanation easy to follow?",
+)
+
+
+def _presentation_rating_questions(course_config):
+    """Resolve the two course-specific prompts without changing score storage."""
+    questions = (
+        course_config.get('presentation_rating_questions')
+        if isinstance(course_config, dict) else None
+    )
+    if (not isinstance(questions, list) or len(questions) != 2
+            or any(not isinstance(question, str) or not question.strip()
+                   for question in questions)):
+        return list(DEFAULT_PRESENTATION_RATING_QUESTIONS)
+    return [question.strip() for question in questions]
+
+
 def _course_with_config_metadata(course, course_config):
     """Overlay current display metadata without rewriting durable DB history."""
     if not course:
@@ -2445,6 +2464,9 @@ def dashboard():
         student=student, team=team, teams=teams,
         state=state, course=course, phases=PHASES,
         teams_locked=teams_locked, teammates=teammates,
+        presentation_rating_questions=_presentation_rating_questions(
+            _course_availability(slug).get('config')
+        ),
         max_teams=max_teams,
         max_members=get_max_members_per_team(slug, course['id'])
     )
@@ -8553,9 +8575,9 @@ def export_data(slug):
             snapshot_open = False
             flash('Course not found.', 'error')
             return redirect(url_for('index'))
-        course = _course_with_config_metadata(
-            course, _course_availability(slug).get('config')
-        )
+        course_config = _course_availability(slug).get('config')
+        course = _course_with_config_metadata(course, course_config)
+        export_rating_questions = _presentation_rating_questions(course_config)
 
         cid = course['id']
         state_row = query_db(
@@ -9033,7 +9055,7 @@ def export_data(slug):
         r = len(info_rows) + 2
         ws1.cell(row=r, column=1, value='Team Leaderboard').font = bold_font
         r += 1
-        lb_headers = ['Rank', 'Team', 'Members', 'Presentations', 'Avg Developed (1-5)', 'Avg Easy (1-5)', 'Combined Avg']
+        lb_headers = ['Rank', 'Team', 'Members', 'Presentations', 'Avg Q1 (1-5)', 'Avg Q2 (1-5)', 'Combined Avg']
         for col, h in enumerate(lb_headers, 1):
             cell = ws1.cell(row=r, column=col, value=h)
             cell.font = header_font; cell.fill = header_fill; cell.alignment = header_align
@@ -9448,6 +9470,15 @@ def export_data(slug):
             'data_compatibility': data_compatibility,
             'data_versions': public_data_versions,
             'exported_at_utc': exported_at,
+            'current_presentation_evaluation': {
+                'scope': (
+                    'Course settings at export time. Saved ratings do not '
+                    'record historical prompt wording.'
+                ),
+                'questions': export_rating_questions,
+                'score_columns': ['developed_1to5', 'easy_1to5'],
+                'scale': '1 to 5 stars for each question; equal weighting',
+            },
         }
         manifest_bytes = (
             json.dumps(manifest, indent=2, sort_keys=True) + '\n'

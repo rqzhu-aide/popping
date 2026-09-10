@@ -6374,7 +6374,7 @@ window.submitRating = async function() {
 function showCurrentRating(values) {
     const status = document.getElementById('rating-status');
     if (!status) return;
-    status.textContent = `Your current rating: ${values.q1}/5 developed · ${values.q2}/5 clear`;
+    status.textContent = `Your current rating: Q1 ${values.q1}/5 · Q2 ${values.q2}/5`;
     status.style.color = 'var(--success-text)';
     status.style.display = 'block';
 }

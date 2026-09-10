@@ -110,6 +110,20 @@ data/432fall2026/
     └── week-01-questions.md
 ```
 
+### Presentation evaluation wording
+
+A course can override the two presentation evaluation prompts in `course.yaml`
+with `presentation_rating_questions`, a list of exactly two nonempty strings.
+Courses without this setting retain the default answer-quality and clarity
+questions. STAT 546 uses its research-paper explanation and investigation
+prompts. Students should refresh their dashboard after a wording update.
+
+The two 1-to-5 scores, equal-weight scoring, and database schema are unchanged.
+The existing export columns `developed_1to5` and `easy_1to5` continue to store
+Q1 and Q2 respectively. The ZIP manifest records the current prompts as
+settings at export time; it does not claim those prompts were used for older
+ratings, which do not store historical wording.
+
 ### Weekly Question File
 
 For each week, provide one UTF-8 Markdown file named

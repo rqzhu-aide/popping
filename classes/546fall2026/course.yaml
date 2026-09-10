@@ -7,6 +7,9 @@ active: true
 team_pool_size: 20
 max_teams: 6
 max_members_per_team: 10
+presentation_rating_questions:
+- "Did the team explain the paper’s research problem, main method, and contribution accurately and clearly?"
+- "Did the team conduct a convincing investigation, using numerical experiments or other appropriate approaches, to evaluate the method?"
 teams:
 - color: '#ef4444'
 - color: '#3b82f6'

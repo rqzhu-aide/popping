@@ -875,7 +875,7 @@ async function main() {
         false,
         'returning to the saved values must clear the draft warning'
     );
-    assert.match(ratingStatus.textContent, /Your current rating/);
+    assert.strictEqual(ratingStatus.textContent, 'Your current rating: Q1 4/5 · Q2 3/5');
 
     console.log('vote submission behavior: ok');
 }
