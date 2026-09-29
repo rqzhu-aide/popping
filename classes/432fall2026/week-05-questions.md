@@ -87,3 +87,12 @@ title: "Can Repeated Measurements Help KNN?"
 Suppose ten sensors measure the same response-relevant latent feature, with independent measurement errors, while one sensor measures a second, equally predictive latent feature. All eleven observed predictors are standardized before KNN. After standardization, does Euclidean distance give the first feature too much influence? Give an example under which this type of procedure can still be better than just measuring each feature once.
 
 This question is adapted from a related question contributed by calebsg3.
+
+---
+id: w05-pool-11-package-switch-defaults
+title: "Can Switching KNN Packages Change the Prediction?"
+---
+
+After a package error, an AI agent replaces `kknn::kknn(y ~ ., train = train, test = test, k = 3)` with `FNN::knn.reg(train = X, test = X0, y = y, k = 3)`. Here `X` and `X0` contain the same training and test predictors as `train` and `test`. The agent claims the fits are equivalent because both use Euclidean 3NN. With all other arguments at their defaults, what two package differences could change the predictions? Which difference can change the nearest neighbors, and which can change a prediction even when the same three neighbors are selected? How would you make the two fits comparable?
+
+This question is adapted from a related question contributed by jyan36.
