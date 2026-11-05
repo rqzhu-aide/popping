@@ -49,7 +49,7 @@ def test_present_and_challenge_phase_label_is_shared_across_surfaces():
         "Present and Challenge"
     )
     assert "competition: 'Present and Challenge'" in client
-    assert "<h2>🎯 Present and Challenge</h2>" in instructor
+    assert f"<h2>{app_module.PHASE_LABELS['competition']}</h2>" in instructor
     assert "<h3>Present and Challenge</h3>" in demo
     assert "Group Presentation" not in server
     assert "Group Presentation" not in client

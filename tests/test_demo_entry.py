@@ -162,6 +162,15 @@ class TestPrivateDemoEntry:
         ).data
         role_page = instructor.get(f'/demo/{slug}')
         assert b'onsubmit="return confirmDemoReset(this)"' in role_page.data
+        assert b'js/public.js' in role_page.data
+        assert b'js/app.js' not in role_page.data
+        assert b'MathJax-script' not in role_page.data
+        assert f'href="/instructor/{slug}"'.encode() in role_page.data
+        assert b'id="tools-dropdown"' not in role_page.data
+        classroom_page = instructor.get(f'/instructor/{slug}')
+        assert classroom_page.status_code == 200
+        assert b'id="tools-dropdown"' in classroom_page.data
+        assert b'js/app.js' in classroom_page.data
 
         _enter_student(student_one, slug, 1)
         _enter_student(student_two, slug, 2)

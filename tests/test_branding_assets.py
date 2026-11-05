@@ -66,9 +66,9 @@ def test_templates_use_the_new_brand_and_tagline():
         "Discuss, Present and Challenge - An Interactive Course Platform"
     )
 
-    assert "images/favicon.ico" in templates["base.html"]
+    assert "images/favicon.ico" not in templates["base.html"]
     assert "images/favicon-32x32.png" in templates["base.html"]
-    assert templates["base.html"].count("rev='rounded'") == 2
+    assert templates["base.html"].count("rev='rounded'") == 1
     assert tagline in templates["base.html"]
     assert tagline in templates["index.html"]
     assert all("images/popping-brand.webp" in text for text in templates.values())

@@ -36,10 +36,48 @@ function makeElement(id) {
         get innerHTML() { return htmlValue; },
         set innerHTML(value) { htmlValue = value == null ? '' : String(value); },
         appendedChildren: [],
+        parentElement: null,
+        ownerDocument: null,
+        insertions: 0,
+        get children() { return this.appendedChildren; },
+        get nextElementSibling() {
+            const siblings = this.parentElement?.children || [];
+            return siblings[siblings.indexOf(this) + 1] || null;
+        },
+        contains(target) {
+            return this === target || this.children.some(child => child.contains(target));
+        },
         hidden: false,
         disabled: false,
+        open: true,
+        scrollCalls: 0,
+        focusCalls: 0,
+        scrollIntoView() { this.scrollCalls += 1; },
+        focus() {
+            this.focusCalls += 1;
+            if (this.ownerDocument) this.ownerDocument.activeElement = this;
+        },
         title: '',
-        appendChild(child) { this.appendedChildren.push(child); },
+        appendChild(child) { return this.insertBefore(child, null); },
+        insertBefore(child, anchor) {
+            if (child.parentElement) {
+                // Match the native DOM's focus loss when a focused ancestor
+                // is detached. A restore-focus workaround cannot hide it.
+                if (child.contains(child.ownerDocument?.activeElement)) {
+                    child.ownerDocument.activeElement = child.ownerDocument.body;
+                    child.ownerDocument.focusDetachments += 1;
+                }
+                const siblings = child.parentElement.children;
+                siblings.splice(siblings.indexOf(child), 1);
+            }
+            const index = anchor === null ? this.children.length : this.children.indexOf(anchor);
+            assert(index >= 0, 'insertBefore anchor must belong to its parent');
+            this.children.splice(index, 0, child);
+            child.parentElement = this;
+            child.ownerDocument = this.ownerDocument;
+            this.insertions += 1;
+            return child;
+        },
         setAttribute() {},
         removeAttribute() {},
         querySelector() { return null; },
@@ -74,6 +112,10 @@ function makeSession(routes, options = {}) {
         'roster-table': makeElement('roster-table'),
         'team-section': makeElement('team-section'),
         'team-grading-section': makeElement('team-grading-section'),
+        'student-live-activity': makeElement('student-live-activity'),
+        'question-display': makeElement('question-display'),
+        'active-question-text': makeElement('active-question-text'),
+        'rating-window-state': makeElement('rating-window-state'),
         'poll-section': makeElement('poll-section'),
         'challenge-section': makeElement('challenge-section'),
         'poll-pulse': makeElement('poll-pulse'),
@@ -81,6 +123,11 @@ function makeSession(routes, options = {}) {
         'rating-status': makeElement('rating-status'),
         'btn-submit-rating': makeElement('btn-submit-rating'),
     };
+    const questionSummary = makeElement('question-summary');
+    elementsById['question-summary'] = questionSummary;
+    elementsById['question-display'].querySelector = selector =>
+        selector === 'summary' ? questionSummary : null;
+    elementsById['challenge-question-link'] = makeElement('challenge-question-link');
     const teammateCards = (options.teammateIds || []).map(studentId => {
         const card = makeElement(`card-${studentId}`);
         card.dataset.studentId = studentId;
@@ -102,6 +149,8 @@ function makeSession(routes, options = {}) {
     // The poll loop schedules its next cycle through the global setTimeout;
     // capture those callbacks so the harness can drive cycles deterministically.
     const scheduledTimers = [];
+    const windowListeners = new Map();
+    let viewportWidth = options.width || 1280;
     let reloadCount = 0;
     const globalSetTimeout = (fn, delay) => {
         scheduledTimers.push({ fn, delay });
@@ -112,7 +161,14 @@ function makeSession(routes, options = {}) {
         clearTimeout() {},
         setInterval: noopTimer,
         clearInterval() {},
-        addEventListener() {},
+        addEventListener(type, handler) {
+            if (!windowListeners.has(type)) windowListeners.set(type, []);
+            windowListeners.get(type).push(handler);
+        },
+        matchMedia(query) {
+            const maximum = Number(query.match(/max-width:\s*(\d+)px/)?.[1]);
+            return { matches: viewportWidth <= maximum };
+        },
         location: {
             href: '',
             reload() { reloadCount += 1; },
@@ -121,6 +177,7 @@ function makeSession(routes, options = {}) {
     const documentStub = {
         hidden: false,
         body: makeElement('body'),
+        focusDetachments: 0,
         querySelector(sel) {
             if (sel === '.dashboard') return dashboardEl;
             return null;
@@ -133,6 +190,17 @@ function makeSession(routes, options = {}) {
         createElement() { return makeElement(); },
         addEventListener() {},
     };
+    documentStub.activeElement = documentStub.body;
+    for (const element of Object.values(elementsById)) element.ownerDocument = documentStub;
+    const activity = elementsById['student-live-activity'];
+    for (const id of ['team-section', 'team-grading-section', 'challenge-section']) {
+        activity.appendChild(elementsById[id]);
+    }
+    elementsById['team-section'].appendChild(elementsById['question-display']);
+    elementsById['question-display'].appendChild(questionSummary);
+    elementsById['team-grading-section'].appendChild(elementsById['poll-section']);
+    elementsById['poll-section'].appendChild(elementsById['btn-submit-rating']);
+    elementsById['challenge-section'].appendChild(elementsById['challenge-question-link']);
 
     const sandbox = {
         URLSearchParams,
@@ -201,6 +269,10 @@ function makeSession(routes, options = {}) {
         callCounts,
         elementsById,
         drain,
+        resize: width => {
+            viewportWidth = width;
+            for (const handler of windowListeners.get('resize') || []) handler();
+        },
         advance: (ms) => { nowMs += ms; },
         resolveDeferred: (label, response) => {
             const resolve = deferredFetches.get(label);
@@ -652,7 +724,7 @@ async function scenarioCompactPollClosePreservesDraftWarning() {
             ok({
                 changed: true,
                 state_version: 8,
-                state: competitionState,
+                state: { ...competitionState },
                 poll_interval: 1000,
             }),
             ok({
@@ -764,6 +836,291 @@ async function scenarioCompactPollClosePreservesDraftWarning() {
     console.error('PASS compact poll close draft preservation');
 }
 
+async function scenarioStudentRatingLayoutAndSavedClose() {
+    const session = makeSession([
+        ['/api/poll', [
+            ok({ changed: true, state_version: 1, state: { ...competitionState } }),
+            ok({ changed: true, state_version: 2, state: { ...competitionState } }),
+            ok({ changed: false, state_version: 2, poll_closed: true }),
+        ]],
+        ['/api/my_responses', [ok({
+            phase: 'competition', presentation_key: 'presentation-1',
+            rating: { q1_developed: 4, q2_easy: 3 },
+        })]],
+        ['/api/teams', [ok([])]],
+    ], { phase: 'competition', myTeamId: 1, width: 390 });
+    await session.drain();
+    const elements = session.elementsById;
+    const question = elements['question-display'];
+    assert.strictEqual(question.open, false,
+        'phone readers should reach the eligible rating before the full question');
+    assert.strictEqual(question.scrollCalls, 0,
+        'poll updates must not scroll to the question');
+    assert.strictEqual(elements['student-live-activity'].dataset.ratingVisible, 'true');
+    assert.strictEqual(elements['poll-section'].style.display, 'block');
+
+    session.sandbox.window.viewCurrentQuestion();
+    assert.strictEqual(question.open, true,
+        'one deliberate action should reveal the full question');
+    assert.strictEqual(question.scrollCalls, 1);
+    assert.strictEqual(elements['question-summary'].focusCalls, 1,
+        'an explicit reveal should put keyboard navigation at the question');
+    session.advance(1500);
+    await session.pollOnce();
+    assert.strictEqual(question.open, true,
+        'a subsequent state refresh must preserve the reader\'s disclosure choice');
+    assert.strictEqual(question.scrollCalls, 1,
+        'refreshing the open question must not move the viewport');
+    assert.strictEqual(elements['question-summary'].focusCalls, 1,
+        'live updates must not move keyboard focus again');
+
+    session.advance(1500);
+    await session.pollOnce();
+    assert.strictEqual(elements['team-grading-section'].style.display, 'block');
+    assert.strictEqual(elements['poll-section'].style.display, 'block',
+        'a saved response should stay visible after its window closes');
+    assert.strictEqual(elements['btn-submit-rating'].disabled, true);
+    assert.match(elements['rating-status'].textContent, /Q1 4\/5.*Q2 3\/5/);
+    assert.match(elements['rating-window-state'].textContent, /closed/);
+    console.error('PASS student disclosure and saved rating close');
+}
+
+async function scenarioStudentRatingWaitingAndEligibility() {
+    for (const { myTeamId, activeTeamId, eligible, width } of [
+        { myTeamId: 1, activeTeamId: 2, eligible: true, width: 390 },
+        { myTeamId: 1, activeTeamId: 1, eligible: false, width: 390 },
+        { myTeamId: null, activeTeamId: 2, eligible: false, width: 390 },
+        { myTeamId: 1, activeTeamId: 2, eligible: true, width: 1280 },
+    ]) {
+        const state = {
+            ...competitionState,
+            my_team: myTeamId ? { id: myTeamId } : null,
+            active_team: { id: activeTeamId, name: 'Presenting team' },
+            poll_active: false,
+            poll_remaining: 0,
+        };
+        const session = makeSession([
+            ['/api/poll', [ok({ changed: true, state_version: 1, state })]],
+            ['/api/my_responses', [ok({
+                phase: 'competition', presentation_key: 'presentation-1', rating: null,
+            })]],
+            ['/api/teams', [ok([])]],
+        ], { phase: 'competition', myTeamId, width });
+        await session.drain();
+        const elements = session.elementsById;
+        assert.strictEqual(elements['team-grading-section'].style.display,
+            eligible ? 'block' : 'none');
+        assert.strictEqual(elements['poll-section'].style.display, 'none');
+        assert.strictEqual(elements['btn-submit-rating'].disabled, true);
+        assert.strictEqual(elements['question-display'].open, true,
+            'the current question stays open before any rating action is available');
+        assert.strictEqual(elements['student-live-activity'].dataset.ratingFirst, 'false');
+        if (eligible) assert.match(elements['rating-window-state'].textContent, /Waiting/);
+    }
+    console.error('PASS student waiting and rating eligibility');
+}
+
+async function scenarioStudentActionPriorityTransitions() {
+    for (const deliberatelyOpen of [false, true]) {
+        const session = makeSession([
+            ['/api/poll', [
+                ok({ changed: true, state_version: 1,
+                    state: { ...competitionState, poll_active: false, poll_remaining: 0 } }),
+                ok({ changed: true, state_version: 2, state: { ...competitionState } }),
+            ]],
+            ['/api/my_responses', [ok({
+                phase: 'competition', presentation_key: 'presentation-1', rating: null,
+            })]],
+            ['/api/teams', [ok([])]],
+        ], { phase: 'competition', myTeamId: 1, width: 390 });
+        await session.drain();
+        const elements = session.elementsById;
+        assert.strictEqual(elements['question-display'].open, true);
+        if (deliberatelyOpen) session.sandbox.window.viewCurrentQuestion();
+        session.advance(1500);
+        await session.pollOnce();
+        assert.strictEqual(elements['student-live-activity'].dataset.ratingFirst, 'true');
+        assert.strictEqual(elements['question-display'].open, deliberatelyOpen,
+            'opening a real poll should prioritize voting and retain an explicit reader choice');
+        assert.strictEqual(elements['question-display'].focusCalls, 0);
+        assert.strictEqual(elements['question-summary'].focusCalls, deliberatelyOpen ? 1 : 0);
+        assert.strictEqual(elements['question-display'].scrollCalls, deliberatelyOpen ? 1 : 0);
+    }
+    for (const challengerTeam of [1, 3]) {
+        const state = {
+            ...competitionState, poll_active: false, poll_remaining: 0,
+            challenge_ratings_open: true,
+            active_challenges: [{ challenge_key: 'ch1', challenge_num: 1,
+                challenger_team_id: challengerTeam, challenger_id: 'S3' }],
+        };
+        const session = makeSession([
+            ['/api/poll', [
+                ok({ changed: true, state_version: 1, state }),
+                ok({ changed: false, state_version: 1, poll_closed: true }),
+            ]],
+            ['/api/my_responses', [ok({
+                phase: 'competition', presentation_key: 'presentation-1', rating: null,
+            })]],
+            ['/api/teams', [ok([])]],
+        ], { phase: 'competition', myTeamId: 1, width: 390 });
+        await session.drain();
+        const activity = session.elementsById['student-live-activity'];
+        assert.strictEqual(activity.dataset.ratingFirst, 'false');
+        assert.strictEqual(activity.dataset.challengeFirst, String(challengerTeam !== 1),
+            'an eligible challenge-only rating should be reachable before the question');
+        if (challengerTeam !== 1) {
+            vm.runInContext("challengeRatingDrafts.add('ch1')", session.sandbox);
+            session.advance(1500);
+            await session.pollOnce();
+            assert.strictEqual(vm.runInContext('activeChallengeRatingsOpen', session.sandbox), false);
+            assert.strictEqual(activity.dataset.challengeFirst, 'true',
+                'a challenge draft should keep its closed-window explanation accessible');
+        }
+    }
+    console.error('PASS student action priority transitions');
+}
+
+async function scenarioStudentNaturalSectionOrder() {
+    const questionFirst = ['team-section', 'team-grading-section', 'challenge-section'];
+    const ratingFirst = ['team-grading-section', 'team-section', 'challenge-section'];
+    const bothFirst = ['team-grading-section', 'challenge-section', 'team-section'];
+    const challengeFirst = ['challenge-section', 'team-section', 'team-grading-section'];
+    const challenge = { challenge_key: 'ch1', challenge_num: 1,
+        challenger_team_id: 3, challenger_id: 'S3' };
+    const cases = [
+        { name: 'before ratings', order: questionFirst },
+        { name: 'presentation open', pollOpen: true, order: ratingFirst },
+        { name: 'both open', pollOpen: true, challengeOpen: true,
+            challenges: [challenge], order: bothFirst },
+        { name: 'challenge only', challengeOpen: true,
+            challenges: [challenge], order: challengeFirst },
+        { name: 'closed without responses', closed: true, order: questionFirst },
+        { name: 'closed saved presentation', closed: true,
+            rating: { q1_developed: 4, q2_easy: 3 }, order: ratingFirst },
+        { name: 'closed saved challenge', closed: true, challenges: [challenge],
+            challengeRatings: { ch1: 5 }, order: challengeFirst },
+        { name: 'closed saved both', closed: true, challenges: [challenge],
+            rating: { q1_developed: 4, q2_easy: 3 },
+            challengeRatings: { ch1: 5 }, order: bothFirst },
+        { name: 'presenting team', myTeamId: 2, pollOpen: true,
+            challengeOpen: true, challenges: [challenge], order: questionFirst },
+        { name: 'unassigned student', myTeamId: null, pollOpen: true,
+            challengeOpen: true, challenges: [challenge], order: questionFirst },
+        { name: 'own challenger team', challengeOpen: true,
+            challenges: [{ ...challenge, challenger_team_id: 1 }], order: questionFirst },
+        { name: 'between presentations', noPresentation: true, order: questionFirst },
+    ];
+    for (const width of [390, 959, 960, 1280]) {
+        for (const example of cases) {
+            const myTeamId = 'myTeamId' in example ? example.myTeamId : 1;
+            const state = { ...competitionState,
+                my_team: myTeamId ? { id: myTeamId } : null,
+                poll_active: Boolean(example.pollOpen),
+                poll_remaining: example.pollOpen ? 20 : 0,
+                poll_started_at: example.closed ? 100 : null,
+                challenge_ratings_open: Boolean(example.challengeOpen),
+                active_challenges: example.challenges || [],
+            };
+            if (example.noPresentation) Object.assign(state, {
+                active_team: null, active_question: null, poll_question_key: null,
+            });
+            const session = makeSession([
+                ['/api/poll', [
+                    ok({ changed: true, state_version: 1, state }),
+                    ok({ changed: true, state_version: 2, state }),
+                ]],
+                ['/api/my_responses', [ok({ phase: 'competition',
+                    presentation_key: 'presentation-1', rating: example.rating || null,
+                    challenge_ratings: example.challengeRatings || {},
+                })]],
+                ['/api/teams', [ok([])]],
+            ], { phase: 'competition', myTeamId, width });
+            await session.drain();
+            const activity = session.elementsById['student-live-activity'];
+            assert.deepStrictEqual(activity.children.map(section => section.id),
+                width < 960 ? example.order : questionFirst,
+                `${example.name} at ${width}px must have natural reading and Tab order`);
+            const insertions = activity.insertions;
+            session.advance(1500);
+            await session.pollOnce();
+            assert.strictEqual(activity.insertions, insertions,
+                'a routine refresh must leave already ordered sections attached');
+        }
+    }
+    console.error('PASS natural student order across 48 state/viewport combinations');
+}
+
+async function scenarioStudentOrderPreservesFocusedControls() {
+    const challenge = { challenge_key: 'ch1', challenge_num: 1,
+        challenger_team_id: 3, challenger_id: 'S3' };
+    const waiting = { ...competitionState, poll_active: false, poll_remaining: 0,
+        challenge_ratings_open: false, active_challenges: [challenge] };
+    const open = { ...waiting, poll_active: true, poll_remaining: 20,
+        challenge_ratings_open: true };
+    for (const focusedId of ['btn-submit-rating', 'question-summary', 'challenge-question-link']) {
+        const session = makeSession([
+            ['/api/poll', [
+                ok({ changed: true, state_version: 1, state: waiting }),
+                ok({ changed: true, state_version: 2, state: open }),
+                ok({ changed: true, state_version: 3, state: open }),
+                ok({ changed: false, state_version: 3, poll_closed: true }),
+            ]],
+            ['/api/my_responses', [ok({ phase: 'competition',
+                presentation_key: 'presentation-1', rating: null,
+            })]],
+            ['/api/teams', [ok([])]],
+        ], { phase: 'competition', myTeamId: 1, width: 390 });
+        await session.drain();
+        const elements = session.elementsById;
+        const activity = elements['student-live-activity'];
+        const originalSections = activity.children.slice();
+        const focused = elements[focusedId];
+        focused.focus();
+        vm.runInContext(
+            "ratingDraftDirty = true; pollSelections = { q1: 2, q2: 3 };" +
+            "savedPollSelections = { q1: 4, q2: 3 };" +
+            "challengeRatings = { ch1: 2 }; savedChallengeRatings = { ch1: 5 };" +
+            "challengeRatingDrafts.add('ch1');", session.sandbox);
+        session.advance(1500);
+        await session.pollOnce();
+        assert.deepStrictEqual(activity.children.map(section => section.id),
+            ['team-grading-section', 'challenge-section', 'team-section']);
+        if (focusedId === 'question-summary') {
+            assert.strictEqual(elements['question-display'].open, true,
+                'prioritizing a new vote must not collapse the focused question');
+        }
+        const insertions = activity.insertions;
+        session.advance(1500);
+        await session.pollOnce();
+        assert.strictEqual(activity.insertions, insertions,
+            'a background update must not remount the rating controls');
+        session.advance(1500);
+        await session.pollOnce();
+        for (const width of [960, 1280, 959, 390, 390]) {
+            session.resize(width);
+            assert.deepStrictEqual(activity.children.map(section => section.id),
+                width < 960
+                    ? ['team-grading-section', 'challenge-section', 'team-section']
+                    : ['team-section', 'team-grading-section', 'challenge-section']);
+            assert.strictEqual(session.sandbox.document.activeElement, focused,
+                `${focusedId} must stay focused through priority changes and resize`);
+        }
+        assert.strictEqual(session.sandbox.document.focusDetachments, 0,
+            'the focused section must never be detached and refocused');
+        assert.strictEqual(focused.focusCalls, 1,
+            'background updates must not call focus to repair an avoidable blur');
+        for (const section of originalSections) assert(activity.children.includes(section));
+        assert.strictEqual(elements['poll-section'].children[0], elements['btn-submit-rating']);
+        assert.strictEqual(vm.runInContext('pollSelections.q1', session.sandbox), 2);
+        assert.strictEqual(vm.runInContext('savedPollSelections.q1', session.sandbox), 4);
+        assert.strictEqual(vm.runInContext('ratingDraftDirty', session.sandbox), true);
+        assert.strictEqual(vm.runInContext('challengeRatings.ch1', session.sandbox), 2);
+        assert.strictEqual(vm.runInContext('savedChallengeRatings.ch1', session.sandbox), 5);
+        assert.strictEqual(vm.runInContext("challengeRatingDrafts.has('ch1')", session.sandbox), true);
+    }
+    console.error('PASS focused controls, drafts, and saved values survive section reordering');
+}
+
 async function scenarioPresentationEndClearsChallengePanel() {
     const waitingState = {
         ...competitionState,
@@ -780,7 +1137,7 @@ async function scenarioPresentationEndClearsChallengePanel() {
             ok({
                 changed: true,
                 state_version: 10,
-                state: competitionState,
+                state: { ...competitionState },
                 poll_interval: 1000,
             }),
             ok({
@@ -870,6 +1227,11 @@ async function scenarioIntentionalDemoNavigationStopsStalePoll() {
     await scenarioDelayedSyncsDoNotOverlapOrBlockPolling();
     await scenarioStaleDiscussionResultCannotOverwriteNewContext();
     await scenarioCompactPollClosePreservesDraftWarning();
+    await scenarioStudentRatingLayoutAndSavedClose();
+    await scenarioStudentRatingWaitingAndEligibility();
+    await scenarioStudentActionPriorityTransitions();
+    await scenarioStudentNaturalSectionOrder();
+    await scenarioStudentOrderPreservesFocusedControls();
     await scenarioPresentationEndClearsChallengePanel();
     await scenarioIntentionalDemoNavigationStopsStalePoll();
     console.error('All poll-retry scenarios passed.');

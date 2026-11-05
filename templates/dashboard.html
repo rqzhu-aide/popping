@@ -33,16 +33,12 @@
         </div>
     </section>
 
-    <!-- Now Presenting: visible to ALL students during competition -->
+    <div class="student-live-activity" id="student-live-activity">
+    <!-- Current question stays beside the rating on wide screens. -->
     <section class="card team-grading" id="team-section" style="display:none;">
         <h2>Now Presenting</h2>
         <div class="presenting-banner" id="presenting-banner">
-            <span class="presenting-label">🎯 Now Presenting:</span>
             <span class="presenting-name" id="presenting-name">---</span>
-        </div>
-        <div class="question-display" id="question-display" style="display:none; margin: 12px 0; padding: 12px; background: var(--accent-bg); border-radius: 8px;">
-            <span style="font-size:0.8rem; color: var(--text-muted); display:block; margin-bottom:4px;">Question:</span>
-            <div id="active-question-text" class="markdown-content" style="font-weight:600;"></div>
         </div>
         <div class="student-timer" id="student-timer" style="display:none;">
             <span class="timer-label">⏱ Time Remaining</span>
@@ -51,12 +47,21 @@
         <div class="you-are-up" id="you-are-up" style="display:none;">
             🎉 Your team is up! Good luck!
         </div>
+        <details class="question-display student-question" id="question-display" open style="display:none;">
+            <summary>Current question</summary>
+            <div id="active-question-text" class="markdown-content"></div>
+        </details>
     </section>
-
     <!-- Rate the Presentation: visible to all non-presenting students -->
     <section class="card team-grading" id="team-grading-section" style="display:none;">
-        <h2>Rate the Presentation</h2>
+        <div class="student-rating-heading">
+            <h2>Rate the Presentation</h2>
+            <button type="button" class="btn btn-secondary student-question-link"
+                    id="btn-view-current-question" aria-controls="question-display"
+                    onclick="viewCurrentQuestion()">View current question</button>
+        </div>
         <p id="rating-prompt" class="hint" style="margin-bottom:12px;"></p>
+        <p id="rating-window-state" class="hint" role="status" hidden></p>
         <div class="poll-pulse" id="poll-pulse" style="display:none;">
             <span class="pulse-dot"></span>
             <span id="poll-pulse-text">⏱ Rating open</span>
@@ -91,13 +96,18 @@
 
     <!-- Challenge section: visible during competition when there are active challenges -->
     <section class="card challenge-section" id="challenge-section" style="display:none;">
-        <h2>🗣 Challenge</h2>
+        <div class="student-rating-heading">
+            <h2>🗣 Challenge</h2>
+            <button type="button" class="btn btn-secondary student-question-link"
+                    aria-controls="question-display" onclick="viewCurrentQuestion()">View current question</button>
+        </div>
         <div id="challenge-raise-hand" style="display:none; margin-bottom: 16px;">
             <button class="btn btn-primary" id="btn-raise-hand" onclick="toggleRaiseHand()">🙋 Raise Hand to Challenge</button>
             <p id="raise-hand-status" class="hint" style="margin-top:8px;"></p>
         </div>
         <div id="challenge-cards"></div>
     </section>
+    </div>
     <!-- Session Results (shown when phase == 'ended') -->
     <section class="card session-results" id="session-results" style="display:none;">
         <h2>🏆 Final Results</h2>
@@ -201,7 +211,7 @@
                 {% elif state.phase == 'discussion' %}
                 {% if teammates %}
                 <div class="team-instructions">
-                    <p>Drag members to arrange seating.</p>
+                    <p class="seating-instruction">Drag members to arrange seating.</p>
                     <p>Give a <strong>👍</strong> to the significant contributor(s) in your group.</p>
                 </div>
                 {% else %}
@@ -211,7 +221,7 @@
             </div>
             {% if teammates and state.phase == 'discussion' %}
             <div class="team-table-wrapper">
-                <button class="btn btn-sm btn-primary" onclick="resetCardPositions()">Reset Positions</button>
+                <button class="btn btn-sm btn-primary reset-seating" onclick="resetCardPositions()">Reset Positions</button>
                 <div class="team-table" id="team-table" data-team-color="{{ team.color }}">
                     {% for m in teammates %}
                     <div class="teammate-card" draggable="true"
@@ -219,11 +229,11 @@
                          id="card-{{ m.student_id }}">
                         <div class="card-circle" style="border-color:{{ team.color }}">
                             <span class="card-name" title="{{ m | display_name }}">{{ m | display_name }}</span>
-                            <button class="thumb-btn thumb-up"
-                                    aria-label="Thumbs up to {{ m | display_name }}"
-                                    aria-pressed="false"
-                                    onclick="gradeTeammate(this, this.closest('.teammate-card').dataset.studentId)">👍</button>
                         </div>
+                        <button type="button" class="thumb-btn thumb-up" draggable="false"
+                                aria-label="Thumbs up to {{ m | display_name }}"
+                                aria-pressed="false"
+                                onclick="gradeTeammate(this, this.closest('.teammate-card').dataset.studentId)">👍</button>
                     </div>
                     {% endfor %}
                     <div class="teammate-card" draggable="true" data-student-id="you"

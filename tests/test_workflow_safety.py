@@ -5732,22 +5732,31 @@ def test_session_ended_notice_renders_on_landing(course_env):
     assert "flash-success" in html
 
 
-def test_mathjax_loads_only_on_pages_with_question_math(course_env):
-    """MathJax is heavy; login/landing pages render no math and must not load
-    it, while the student dashboard (question math) still does."""
+def test_classroom_assets_load_only_on_classroom_pages(course_env):
+    """Public pages keep site controls without downloading classroom assets."""
     client = app_module.app.test_client()
+    classroom_assets = (
+        "js/app.js", "marked.min.js", "purify.min.js", "highlight.min.js",
+        "atom-one-dark.min.css", "MathJax-script",
+    )
+    for path in (
+        "/", "/demo", f"/login/{course_env['slug']}",
+        f"/instructor_login/{course_env['slug']}",
+    ):
+        response = client.get(path)
+        assert response.status_code == 200
+        html = response.get_data(as_text=True)
+        assert "js/public.js" in html
+        assert all(asset not in html for asset in classroom_assets)
 
-    login_page = client.get(f"/login/{course_env['slug']}")
-    assert login_page.status_code == 200
-    assert "MathJax-script" not in login_page.get_data(as_text=True)
-
-    landing = client.get("/")
-    assert landing.status_code == 200
-    assert "MathJax-script" not in landing.get_data(as_text=True)
-
-    dashboard = _student_client(course_env).get("/dashboard")
-    assert dashboard.status_code == 200
-    assert "MathJax-script" in dashboard.get_data(as_text=True)
+    for response in (
+        _student_client(course_env).get("/dashboard"),
+        _instructor_client(course_env).get(f"/instructor/{course_env['slug']}"),
+    ):
+        assert response.status_code == 200
+        html = response.get_data(as_text=True)
+        assert "js/public.js" not in html
+        assert all(asset in html for asset in classroom_assets)
 
 
 def test_student_search_escapes_like_wildcards(course_env):

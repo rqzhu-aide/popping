@@ -1398,8 +1398,108 @@ if (dashboard) {
     let _responsesSyncInFlight = null;
     let _lastResponsesSyncAt = 0;
     const RESPONSE_RECONCILE_INTERVAL_MS = 15000;
+    let studentQuestionLayoutKey = null;
+    let studentQuestionPresentationKey = null;
+    let studentQuestionChoice = null;
+
+    function orderStudentActivitySections(activity, sections) {
+        // Keep native keyboard and screen-reader order in the same sequence
+        // as the phone layout. Move existing sections, never recreate forms.
+        const focusedSection = sections.find(section =>
+            section.contains?.(document.activeElement));
+        let nextSection = null;
+        for (let index = sections.length - 1; index >= 0; index -= 1) {
+            const section = sections[index];
+            // Detaching an ancestor blurs its focused control in browsers.
+            // Moving its siblings around it reaches the same order safely.
+            if (section !== focusedSection &&
+                    section.nextElementSibling !== nextSection) {
+                activity.insertBefore(section, nextSection);
+            }
+            nextSection = section;
+        }
+    }
+
+    function updateStudentRatingLayout(state) {
+        const hasPresentation = state?.phase === 'competition' &&
+            state.active_team && state.active_question;
+        const eligible = Boolean(hasPresentation && MY_TEAM_ID &&
+            state.active_team.id !== MY_TEAM_ID);
+        const ratingFirst = eligible && Boolean(
+            activePollOpen || ratingDraftDirty || savedPollSelections);
+        const challengeFirst = eligible && (state.active_challenges || []).some(challenge =>
+            challenge.challenger_team_id !== MY_TEAM_ID &&
+            (state.challenge_ratings_open !== false ||
+                challengeRatingDrafts.has(String(challenge.challenge_key)) ||
+                savedChallengeRatings[challenge.challenge_key]));
+        const grading = document.getElementById('team-grading-section');
+        const poll = document.getElementById('poll-section');
+        const activity = document.getElementById('student-live-activity');
+        const narrow = window.matchMedia?.('(max-width: 959px)')?.matches === true;
+        if (grading) grading.style.display = eligible ? 'block' : 'none';
+        if (poll) poll.style.display = eligible &&
+            (activePollOpen || ratingDraftDirty || savedPollSelections)
+            ? 'block' : 'none';
+        if (activity) {
+            activity.dataset.ratingVisible = String(eligible);
+            activity.dataset.ratingFirst = String(ratingFirst);
+            activity.dataset.challengeFirst = String(challengeFirst);
+            const sections = [
+                { element: document.getElementById('team-section'), priority: 0 },
+                { element: grading, priority: ratingFirst ? -2 : 1 },
+                { element: document.getElementById('challenge-section'),
+                    priority: challengeFirst ? -1 : 2 }
+            ];
+            // Wide screens read from the left question to the right rating
+            // column. On phones, the next available rating comes first.
+            if (narrow) sections.sort((a, b) => a.priority - b.priority);
+            orderStudentActivitySections(activity,
+                sections.map(section => section.element).filter(Boolean));
+        }
+
+        const windowState = document.getElementById('rating-window-state');
+        if (windowState) {
+            const message = activePollOpen || !eligible ? ''
+                : state.poll_started_at || savedPollSelections || ratingDraftDirty
+                ? 'Rating window closed.'
+                : 'Waiting for the instructor to open ratings.';
+            if (windowState.textContent !== message) windowState.textContent = message;
+            windowState.hidden = !message;
+        }
+        const question = document.getElementById('question-display');
+        if (question && hasPresentation) {
+            const presentationKey = state.poll_question_key || state.active_question.id;
+            if (studentQuestionPresentationKey !== presentationKey) {
+                studentQuestionChoice = null;
+                studentQuestionPresentationKey = presentationKey;
+            }
+            const priority = ratingFirst || challengeFirst;
+            const layoutKey = `${presentationKey}:${narrow}:${priority}`;
+            if (studentQuestionLayoutKey !== layoutKey) {
+                question.open = !narrow || (studentQuestionChoice ?? !priority) ||
+                    question.contains?.(document.activeElement) === true;
+                studentQuestionLayoutKey = layoutKey;
+            }
+        }
+    }
+
+    window.viewCurrentQuestion = function() {
+        const question = document.getElementById('question-display');
+        if (!question) return;
+        studentQuestionChoice = true;
+        question.open = true;
+        question.querySelector('summary')?.focus({ preventScroll: true });
+        question.scrollIntoView({ block: 'start', behavior: 'auto' });
+    };
+    window.addEventListener('resize', () => {
+        if (_lastState) updateStudentRatingLayout(_lastState);
+    });
 
     function initDashboard() {
+        const question = document.getElementById('question-display');
+        question?.querySelector('summary')?.addEventListener('click', () => {
+            studentQuestionChoice = !question.open;
+        });
         initStarRows();
         updateRatingControlAvailability();
         // Thumb buttons are only rendered during the discussion phase; the
@@ -1705,16 +1805,11 @@ if (dashboard) {
             _lastState.challenge_ratings_open = false;
         }
 
-        const draftLostWithWindow =
-            ratingDraftDirty && !!lastRatedPresentationKey;
-        const gradingSection = document.getElementById('team-grading-section');
-        const pollSection = document.getElementById('poll-section');
-        if (gradingSection) {
-            gradingSection.style.display = draftLostWithWindow ? 'block' : 'none';
+        if (lastReceivedState) {
+            lastReceivedState.poll_active = false;
+            updateStudentRatingLayout(lastReceivedState);
         }
-        if (pollSection) {
-            pollSection.style.display = draftLostWithWindow ? 'block' : 'none';
-        }
+        const draftLostWithWindow = ratingDraftDirty && !!lastRatedPresentationKey;
         if (draftLostWithWindow) {
             showRatingWindowClosed();
         } else {
@@ -2178,6 +2273,7 @@ if (dashboard) {
                 }
             }
             applySavedChallengeResponses(data, presentationKey);
+            updateStudentRatingLayout(state);
         }
         return true;
     }
@@ -2235,7 +2331,6 @@ if (dashboard) {
         }
 
         const teamSec = document.getElementById('team-section');
-        const teamGradeSec = document.getElementById('team-grading-section');
         if (teamSec) {
             const show = PHASES_WITH_TEAM.includes(state.phase);
             teamSec.style.display = show ? 'block' : 'none';
@@ -2252,7 +2347,7 @@ if (dashboard) {
             // Update rating prompt with the presenting team's name
             const ratingPrompt = document.getElementById('rating-prompt');
             if (ratingPrompt) {
-                if (canRate && state.active_team) {
+                if (hasActivePresentation && !amPresenting && MY_TEAM_ID) {
                     ratingPrompt.textContent = 'Please rate ';
                     const teamName = document.createElement('strong');
                     teamName.textContent = state.active_team.name || '';
@@ -2283,7 +2378,7 @@ if (dashboard) {
                 // Reset submit button
                 const sBtn = document.getElementById('btn-submit-rating');
                 if (sBtn) {
-                    sBtn.disabled = false;
+                    sBtn.disabled = !canRate;
                     sBtn.textContent = 'Submit Rating';
                 }
                 // Clear submitted-rating status
@@ -2296,9 +2391,7 @@ if (dashboard) {
             // false, so updateRatingControlAvailability already disabled them)
             // and explain instead of letting the UI vanish mid-tap.
             const draftLostWithWindow = !canRate && ratingDraftDirty && !!lastRatedPresentationKey;
-            if (teamGradeSec) {
-                teamGradeSec.style.display = (canRate || draftLostWithWindow) ? 'block' : 'none';
-            }
+            updateStudentRatingLayout(state);
             if (draftLostWithWindow) {
                 showRatingWindowClosed();
             } else {
@@ -2382,11 +2475,6 @@ if (dashboard) {
                 // --- Grading + poll highlight ---
                 // "You are up!" banner — presenting team does not grade
                 if (youAreUp) youAreUp.style.display = amPresenting ? 'block' : 'none';
-                if (pollSection) {
-                    pollSection.style.display =
-                        (canRate || draftLostWithWindow) ? 'block' : 'none';
-                }
-
                 // Pulsing configured poll countdown (non-presenting teams only)
                 if (canRate && Number(state.poll_remaining) > 0) {
                     startPollPulse(state.poll_remaining);
@@ -2429,6 +2517,10 @@ if (dashboard) {
     };
 
     // --- teammate cards: circle layout + free drag ---
+    // Defaults follow the available space. Only deliberate seat moves become
+    // saved coordinates; legacy saved maps keep their custom-layout meaning.
+    let customSeatPositions = null;
+
     function cardPositionStorageKey() {
         const scope = [
             dashboard.dataset.courseSlug || '',
@@ -2445,6 +2537,86 @@ if (dashboard) {
             left >= 0 && left <= 100 && top >= 0 && top <= 100;
     }
 
+    function compactSeating() {
+        return window.matchMedia?.('(max-width: 700px)')?.matches === true;
+    }
+
+    function containSeatPosition(card, table, left, top) {
+        const insetX = Math.min(50, ((card.offsetWidth / 2 + 8) / table.clientWidth) * 100);
+        const insetY = Math.min(50, ((card.offsetHeight / 2 + 8) / table.clientHeight) * 100);
+        return {
+            left: Math.min(100 - insetX, Math.max(insetX, left)),
+            top: Math.min(100 - insetY, Math.max(insetY, top))
+        };
+    }
+
+    function getCardPositions(cards) {
+        return Object.fromEntries(cards.map(card => [card.dataset.studentId, {
+            left: Number.parseFloat(card.style.left),
+            top: Number.parseFloat(card.style.top)
+        }]));
+    }
+
+    function updateSeatingLayout(reset = false) {
+        if (reset) customSeatPositions = null;
+        const table = document.getElementById('team-table');
+        // The compact list has different card dimensions. Measure only after
+        // the desktop layout is active, including when arriving from a phone.
+        if (!table || compactSeating() || !table.clientWidth) return;
+        const cards = [...table.querySelectorAll('.teammate-card')];
+        const teammates = cards.filter(card => card.id !== 'card-you');
+        const seatWidth = Math.max(128, ...cards.map(card => card.offsetWidth));
+        const seatHeight = Math.max(100, ...cards.map(card => card.offsetHeight));
+        const cardsPerRow = Math.max(1, Math.min(6,
+            Math.floor((table.clientWidth - 8) / (seatWidth + 24))));
+        const rowCount = Math.ceil(teammates.length / cardsPerRow);
+        const useRows = teammates.length > Math.min(4, cardsPerRow) ||
+            (teammates.length === 4 && table.clientWidth < seatWidth * 5 + 128);
+        table.style.minHeight = `${useRows
+            ? Math.max(360, (rowCount + 1) * (seatHeight + 24) + 24)
+            : Math.max(320, seatHeight * 3 + 32)}px`;
+
+        const positions = {};
+        if (!customSeatPositions) {
+            const edge = ((seatWidth / 2 + 16) / table.clientWidth) * 100;
+            teammates.forEach((card, index) => {
+                if (useRows) {
+                    const row = Math.floor(index / cardsPerRow);
+                    const column = index % cardsPerRow;
+                    const count = Math.min(cardsPerRow, teammates.length - row * cardsPerRow);
+                    positions[card.dataset.studentId] = {
+                        left: count === 1 ? 50 : edge + (column / (count - 1)) * (100 - 2 * edge),
+                        top: ((seatHeight / 2 + 16 + row * (seatHeight + 24)) / table.clientHeight) * 100
+                    };
+                } else {
+                    const angle = Math.PI - (index / Math.max(teammates.length - 1, 1)) * Math.PI;
+                    positions[card.dataset.studentId] = {
+                        left: 50 + (50 - edge) * Math.cos(angle),
+                        top: 50 - 28 * Math.sin(angle)
+                    };
+                }
+            });
+            positions.you = {
+                left: 50,
+                top: useRows
+                    ? ((seatHeight / 2 + 16 + rowCount * (seatHeight + 24)) / table.clientHeight) * 100
+                    : 85
+            };
+        }
+
+        // Saved centers from an older canvas are still useful, but their full
+        // cards must fit after names, font metrics, or available space change.
+        // Clamp only the rendered copy so widening restores desired centers.
+        cards.forEach(card => {
+            const position = (customSeatPositions || positions)[card.dataset.studentId];
+            const contained = containSeatPosition(
+                card, table, position.left, position.top);
+            card.style.left = contained.left + '%';
+            card.style.top = contained.top + '%';
+            card.style.transform = 'translate(-50%, -50%)';
+        });
+    }
+
     function initTeammateCards() {
         const table = document.getElementById('team-table');
         if (!table) return;
@@ -2454,33 +2626,91 @@ if (dashboard) {
         try { positions = JSON.parse(localStorage.getItem(storageKey)) || {}; } catch(e) {}
 
         const cards = [...table.querySelectorAll('.teammate-card')];
-        const teammateCount = cards.filter(card => card.id !== 'card-you').length;
-        const cardsPerRow = table.clientWidth < 450 ? 4 : 6;
-        const rowCount = Math.ceil(teammateCount / cardsPerRow);
-        table.style.minHeight = teammateCount > 6
-            ? `${Math.max(360, 180 + rowCount * 100)}px`
-            : '280px';
         const hasCompleteSaved = cards.length > 0 &&
             cards.every(card => isValidCardPosition(positions[card.dataset.studentId]));
 
-        if (!hasCompleteSaved) {
-            window.resetCardPositions();
-        } else {
-            cards.forEach(card => {
-                const pos = positions[card.dataset.studentId];
-                card.style.left = Number(pos.left) + '%';
-                card.style.top = Number(pos.top) + '%';
-                card.style.transform = 'translate(-50%, -50%)';
+        if (hasCompleteSaved) {
+            customSeatPositions = Object.fromEntries(cards.map(card => {
+                const position = positions[card.dataset.studentId];
+                return [card.dataset.studentId, {
+                    left: Number(position.left), top: Number(position.top)
+                }];
+            }));
+        }
+        updateSeatingLayout();
+
+        let layoutFrame = null;
+        function scheduleSeatingLayout() {
+            if (layoutFrame !== null) return;
+            layoutFrame = window.requestAnimationFrame(() => {
+                layoutFrame = null;
+                updateSeatingLayout();
             });
+        }
+        window.addEventListener('resize', scheduleSeatingLayout);
+        if (typeof ResizeObserver !== 'undefined') {
+            const observer = new ResizeObserver(scheduleSeatingLayout);
+            observer.observe(table);
+            cards.forEach(card => observer.observe(card));
         }
 
         // Drag to reposition
         let dragCard = null, startX, startY, startLeft, startTop;
+        let dragTouchId = null;
+        let dragSeatMoved = false;
+        let thumbPointer = null;
+        let suppressThumbClick = null;
         const tbl = table;
 
+        function finishSeatDrag() {
+            if (!dragCard) return;
+            dragCard.classList.remove('dragging');
+            dragCard = null;
+            dragTouchId = null;
+            if (dragSeatMoved && customSeatPositions) saveCardPositions(customSeatPositions);
+            dragSeatMoved = false;
+        }
+
+        function moveDraggedSeat(left, top) {
+            if (Number.parseFloat(dragCard.style.left) === left &&
+                    Number.parseFloat(dragCard.style.top) === top) return;
+            if (!customSeatPositions) customSeatPositions = getCardPositions(cards);
+            customSeatPositions[dragCard.dataset.studentId] = { left, top };
+            dragSeatMoved = true;
+            dragCard.style.left = left + '%';
+            dragCard.style.top = top + '%';
+        }
+
         cards.forEach(card => {
+            // A native dragstart targets the draggable ancestor, not the
+            // pressed button. Retain the actual origin before that happens.
+            card.addEventListener('pointerdown', function(e) {
+                if (e.button !== 0 || thumbPointer) return;
+                const button = e.target.closest('.thumb-btn');
+                if (!button) return;
+                thumbPointer = { button, id: e.pointerId, x: e.clientX, y: e.clientY, moved: false };
+                suppressThumbClick = null;
+            });
+            card.addEventListener('click', function(e) {
+                const button = e.target.closest('.thumb-btn');
+                // Keyboard and assistive activation have no pointer gesture.
+                if (e.detail === 0 || !button) return;
+                if (suppressThumbClick === button ||
+                        (thumbPointer?.button === button && thumbPointer.moved)) {
+                    e.preventDefault();
+                    e.stopImmediatePropagation();
+                    suppressThumbClick = null;
+                }
+            }, true);
             card.addEventListener('dragstart', function(e) {
+                if (compactSeating() || e.target.closest('.thumb-btn') ||
+                        thumbPointer?.button.closest('.teammate-card') === this) {
+                    e.preventDefault();
+                    if (thumbPointer) thumbPointer.moved = true;
+                    return;
+                }
                 dragCard = this;
+                dragSeatMoved = false;
                 this.classList.add('dragging');
                 e.dataTransfer.effectAllowed = 'move';
                 e.dataTransfer.setData('text/plain', this.dataset.studentId);
@@ -2489,17 +2719,16 @@ if (dashboard) {
                 e.dataTransfer.setDragImage(img, 0, 0);
             });
 
-            card.addEventListener('dragend', function() {
-                this.classList.remove('dragging');
-                dragCard = null;
-                saveCardPositions(getAllPositions());
-            });
+            card.addEventListener('dragend', finishSeatDrag);
 
             // Touch support
             card.addEventListener('touchstart', function(e) {
-                if (e.target.closest('.thumb-btn')) return;
+                if (compactSeating() || e.target.closest('.thumb-btn') ||
+                        dragCard || e.touches.length !== 1) return;
                 dragCard = this;
+                dragSeatMoved = false;
                 const t = e.touches[0];
+                dragTouchId = t.identifier;
                 startX = t.clientX;
                 startY = t.clientY;
                 startLeft = parseFloat(this.style.left) || 0;
@@ -2508,18 +2737,36 @@ if (dashboard) {
             });
         });
 
+        window.addEventListener('pointermove', function(e) {
+            if (!thumbPointer || thumbPointer.id !== e.pointerId) return;
+            if (Math.hypot(e.clientX - thumbPointer.x, e.clientY - thumbPointer.y) > 6) {
+                thumbPointer.moved = true;
+            }
+        });
+        function finishThumbPointer(e) {
+            if (!thumbPointer || thumbPointer.id !== e.pointerId) return;
+            if (thumbPointer.moved || e.type === 'pointercancel') {
+                suppressThumbClick = thumbPointer.button;
+            }
+            thumbPointer = null;
+        }
+        window.addEventListener('pointerup', finishThumbPointer);
+        window.addEventListener('pointercancel', finishThumbPointer);
+        window.addEventListener('blur', () => {
+            thumbPointer = null;
+            suppressThumbClick = null;
+            finishSeatDrag();
+        });
+
         tbl.addEventListener('dragover', function(e) {
             e.preventDefault();
             if (!dragCard) return;
             const rect = tbl.getBoundingClientRect();
-            const left = Math.min(92, Math.max(8,
-                ((e.clientX - rect.left) / rect.width) * 100
-            ));
-            const top = Math.min(92, Math.max(8,
-                ((e.clientY - rect.top) / rect.height) * 100
-            ));
-            dragCard.style.left = left + '%';
-            dragCard.style.top = top + '%';
+            const { left, top } = containSeatPosition(dragCard, tbl,
+                ((e.clientX - rect.left - tbl.clientLeft) / tbl.clientWidth) * 100,
+                ((e.clientY - rect.top - tbl.clientTop) / tbl.clientHeight) * 100
+            );
+            moveDraggedSeat(left, top);
         });
 
         tbl.addEventListener('drop', function(e) {
@@ -2529,39 +2776,22 @@ if (dashboard) {
         // Touch move/end on the table
         tbl.addEventListener('touchmove', function(e) {
             if (!dragCard) return;
+            const t = [...e.touches].find(touch => touch.identifier === dragTouchId);
+            if (!t) return;
             e.preventDefault();
-            const t = e.touches[0];
-            const rect = tbl.getBoundingClientRect();
             const dx = t.clientX - startX;
             const dy = t.clientY - startY;
-            const left = Math.min(92, Math.max(8,
-                startLeft + (dx / rect.width) * 100
-            ));
-            const top = Math.min(92, Math.max(8,
-                startTop + (dy / rect.height) * 100
-            ));
-            dragCard.style.left = left + '%';
-            dragCard.style.top = top + '%';
+            const { left, top } = containSeatPosition(dragCard, tbl,
+                startLeft + (dx / tbl.clientWidth) * 100,
+                startTop + (dy / tbl.clientHeight) * 100
+            );
+            moveDraggedSeat(left, top);
         }, { passive: false });
 
-        tbl.addEventListener('touchend', function() {
-            if (dragCard) {
-                dragCard.classList.remove('dragging');
-                saveCardPositions(getAllPositions());
-                dragCard = null;
-            }
+        tbl.addEventListener('touchend', function(e) {
+            if ([...e.changedTouches].some(touch => touch.identifier === dragTouchId)) finishSeatDrag();
         });
-
-        function getAllPositions() {
-            const pos = {};
-            cards.forEach(c => {
-                pos[c.dataset.studentId] = {
-                    left: parseFloat(c.style.left) || 50,
-                    top: parseFloat(c.style.top) || 50
-                };
-            });
-            return pos;
-        }
+        tbl.addEventListener('touchcancel', finishSeatDrag);
     }
 
     window.toggleRoster = function() {
@@ -2577,56 +2807,7 @@ if (dashboard) {
 
     window.resetCardPositions = function() {
         try { localStorage.removeItem(cardPositionStorageKey()); } catch(e) {}
-        const table = document.getElementById('team-table');
-        if (!table) return;
-        const cards = [...table.querySelectorAll('.teammate-card')].filter(c => c.id !== 'card-you');
-        const youCard = document.getElementById('card-you');
-        const positions = {};
-        // On narrow tables the ellipse spread squeezes cards together
-        // horizontally, so fall back to the row layout even for few cards.
-        const useRowLayout = cards.length > 6 || table.clientWidth < 450;
-        if (!useRowLayout) {
-            const cx = 50, cy = 55, rx = 42, ry = 32;
-            cards.forEach((card, i) => {
-                const angle = Math.PI -
-                    (i / Math.max(cards.length - 1, 1)) * Math.PI;
-                const left = cx + rx * Math.cos(angle);
-                const top = cy - ry * Math.sin(angle);
-                card.style.left = left + '%';
-                card.style.top = top + '%';
-                card.style.transform = 'translate(-50%, -50%)';
-                positions[card.dataset.studentId] = { left, top };
-            });
-        } else {
-            const cardsPerRow = table.clientWidth < 450 ? 4 : 6;
-            const rowCount = Math.ceil(cards.length / cardsPerRow);
-            table.style.minHeight = `${Math.max(360, 180 + rowCount * 100)}px`;
-            let cardIndex = 0;
-            for (let row = 0; row < rowCount; row++) {
-                const remaining = cards.length - cardIndex;
-                const rowsLeft = rowCount - row;
-                const count = Math.ceil(remaining / rowsLeft);
-                const top = 12 + (row / Math.max(rowCount - 1, 1)) * 55;
-                for (let column = 0; column < count; column++) {
-                    const card = cards[cardIndex++];
-                    const left = count === 1
-                        ? 50
-                        : 10 + (column / (count - 1)) * 80;
-                    card.style.left = left + '%';
-                    card.style.top = top + '%';
-                    card.style.transform = 'translate(-50%, -50%)';
-                    positions[card.dataset.studentId] = { left, top };
-                }
-            }
-        }
-        // You at bottom center
-        if (youCard) {
-            youCard.style.left = '50%';
-            youCard.style.top = useRowLayout ? '90%' : '85%';
-            youCard.style.transform = 'translate(-50%, -50%)';
-            positions['you'] = { left: 50, top: useRowLayout ? 90 : 85 };
-        }
-        saveCardPositions(positions);
+        updateSeatingLayout(true);
     };
 
     function saveCardPositions(positions) {
@@ -2818,6 +2999,16 @@ const instructor = document.querySelector('.instructor[data-slug]');
 const isDemoInstructor = instructor?.dataset.demo === '1';
 let ratingsSettling = false;
 let ratingsSettlingStatusTimer = null;
+
+window.toggleProjectorView = function() {
+    if (!instructor) return;
+    const enabled = instructor.classList.toggle('is-projector-view');
+    const button = document.getElementById('btn-projector-view');
+    if (button) {
+        button.setAttribute('aria-pressed', String(enabled));
+        button.textContent = enabled ? 'Exit projector view' : 'Projector view';
+    }
+};
 
 /* ===== INSTRUCTOR QUICK ROLL ===== */
 const QUICK_ROLL_MAXIMUM = 1000000;
@@ -6390,7 +6581,9 @@ function showRatingDraftStatus() {
 function showRatingWindowClosed() {
     const status = document.getElementById('rating-status');
     if (!status) return;
-    status.textContent = 'Rating window closed — your rating was not saved.';
+    status.textContent = savedPollSelections
+        ? `Rating window closed. Your changes were not submitted. Saved: Q1 ${savedPollSelections.q1}/5 · Q2 ${savedPollSelections.q2}/5.`
+        : 'Rating window closed. Your rating was not saved.';
     status.style.color = 'var(--error-text)';
     status.style.display = 'block';
     status.dataset.windowClosed = '1';

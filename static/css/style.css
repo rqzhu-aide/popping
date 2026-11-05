@@ -136,9 +136,24 @@ a:visited:hover { color: var(--primary-hover); }
     height: auto;
     object-fit: contain;
 }
-.brand-logo-nav {
+html:not(.light) .brand-logo-landing,
+html:not(.light) .brand-logo-login,
+html:not(.light) .brand-logo-demo {
+    background: #eef2f6;
+    border-radius: var(--radius);
+    padding: 8px;
+}
+.brand-mark {
     flex: 0 0 auto;
-    width: 62px;
+    width: 44px;
+    height: 40px;
+    overflow: hidden;
+    border-radius: 10px;
+}
+.brand-mark .brand-logo-nav {
+    width: 132px;
+    max-width: none;
+    transform: translate(-42px, -18px);
 }
 .brand-tagline {
     min-width: 0;
@@ -368,7 +383,6 @@ a:visited:hover { color: var(--primary-hover); }
         padding: 0 8px;
     }
     .nav-links { gap: 8px; }
-    .brand-logo-nav { width: 48px; }
 }
 
 .container {
@@ -491,6 +505,50 @@ a:visited:hover { color: var(--primary-hover); }
     flex-wrap: wrap;
     justify-content: flex-end;
     gap: 16px;
+}
+
+.phase-control-compact {
+    padding: 10px 16px;
+    margin-bottom: 14px;
+}
+.class-controls > summary {
+    align-items: center;
+    cursor: pointer;
+    display: flex;
+    flex-wrap: wrap;
+    font-size: 0.9rem;
+    font-weight: 600;
+    gap: 10px;
+    list-style: none;
+    min-height: 40px;
+}
+.class-controls > summary::-webkit-details-marker { display: none; }
+.class-controls > summary::before {
+    border-right: 2px solid currentColor;
+    border-bottom: 2px solid currentColor;
+    content: '';
+    height: 7px;
+    margin: 0 3px 3px 0;
+    transform: rotate(-45deg);
+    width: 7px;
+}
+.class-controls[open] > summary::before { transform: rotate(45deg); }
+.class-controls > summary:focus-visible {
+    border-radius: 4px;
+    outline: 3px solid var(--primary);
+    outline-offset: 3px;
+}
+.class-controls .phase-buttons {
+    gap: 8px;
+    margin-top: 10px;
+}
+.class-controls .phase-settings-secondary {
+    margin-top: 10px;
+    padding-top: 10px;
+}
+.phase-control-compact > .connection-status:not([hidden]) {
+    display: block;
+    margin-top: 6px;
 }
 
 .session-timer {
@@ -618,6 +676,76 @@ input:focus, textarea:focus {
     gap: 10px;
 }
 .dash-header h1 { margin: 0; font-size: 1.6rem; }
+.dashboard .dash-header > div:first-child { min-width: 0; }
+.dashboard :is(.dash-header h1, .course-name-sm, .team-name, .team-name-large,
+               .presenting-name, .result-team) { overflow-wrap: anywhere; }
+.student-live-activity {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    align-items: start;
+    gap: 20px;
+}
+.student-live-activity > .card { min-width: 0; margin-bottom: 0; }
+.dashboard[data-phase="competition"] .student-live-activity { margin-bottom: 20px; }
+.student-live-activity #challenge-section { grid-column: 1 / -1; }
+.student-live-activity .challenge-section { margin-top: 0; }
+.student-rating-heading h2 { margin-bottom: 4px; }
+.student-question-link {
+    min-height: 44px;
+    margin: 0 0 8px;
+    padding: 6px 0;
+    border: 0;
+    background: transparent;
+    color: var(--primary);
+    text-decoration: underline;
+    text-underline-offset: 3px;
+}
+.student-question-link:not(:disabled):hover { background: transparent; }
+.student-question {
+    margin-top: 12px;
+    scroll-margin-top: 80px;
+}
+.student-question > summary {
+    min-height: 44px;
+    padding: 10px 0;
+    color: var(--primary);
+    cursor: pointer;
+    font-weight: 600;
+}
+.student-question .markdown-content { overflow-wrap: anywhere; }
+.student-question .markdown-content > :first-child { margin-top: 6px; }
+.student-question-link:focus-visible,
+.student-question > summary:focus-visible {
+    outline: 3px solid var(--primary);
+    outline-offset: 3px;
+    border-radius: 4px;
+}
+@media (min-width: 960px) {
+    .student-live-activity[data-rating-visible="true"] {
+        grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr);
+        grid-template-rows: min-content 1fr;
+        gap: 20px;
+    }
+    .student-live-activity #team-section { grid-column: 1; grid-row: 1; }
+    .student-live-activity #team-grading-section { grid-column: 2; grid-row: 1; }
+    .student-live-activity #challenge-section { grid-row: 2; }
+    .student-live-activity[data-rating-visible="true"] #team-section { grid-row: 1 / span 2; }
+    .student-live-activity[data-rating-visible="true"] #challenge-section { grid-column: 2; }
+    .student-question-link { display: none; }
+}
+@media (max-width: 639px) {
+    .dashboard .dash-header { margin-bottom: 16px; gap: 8px; }
+    .dashboard .dash-header h1 { font-size: 1.25rem; }
+    .dashboard .dashboard-state { align-items: flex-start; }
+    .dashboard .phase-badge { padding: 5px 10px; font-size: 0.78rem; }
+    .student-live-activity > .card { padding: 16px; }
+    .student-live-activity .poll-section { margin-top: 10px; }
+    .student-live-activity .poll-card { padding: 8px; }
+    .student-live-activity .challenge-card { padding: 10px 8px; }
+    .student-live-activity .star-row { gap: 0; }
+    .student-live-activity #btn-submit-rating { min-height: 44px; width: 100%; }
+    .dashboard .roster-grid { grid-template-columns: minmax(0, 1fr); }
+}
 .dashboard-state {
     display: flex;
     flex-direction: column;
@@ -716,6 +844,7 @@ input:focus, textarea:focus {
     padding: 12px 18px;
     border-radius: var(--radius);
     border-left: 4px solid var(--team-color);
+    max-width: 100%;
 }
 
 .roster-grid {
@@ -1164,6 +1293,10 @@ input:focus, textarea:focus {
 }
 
 /* ===== LANDING PAGE ===== */
+.landing {
+    display: flex;
+    flex-direction: column;
+}
 .intro-card {
     padding: 32px;
 }
@@ -1199,6 +1332,16 @@ input:focus, textarea:focus {
     flex-wrap: wrap;
 }
 @media (max-width: 600px) {
+    .landing .course-grid {
+        grid-template-columns: 1fr;
+        gap: 12px;
+    }
+    .landing .course-card {
+        padding: 16px;
+    }
+    .landing .course-actions .btn {
+        min-height: 44px;
+    }
     .intro-content {
         flex-direction: column;
         text-align: center;
@@ -1296,6 +1439,103 @@ input:focus, textarea:focus {
     display: flex;
     flex-direction: column;
     gap: 16px;
+}
+
+.instructor[data-phase="competition"] .dash-header {
+    margin-bottom: 12px;
+}
+.presentation-card { padding: 20px; }
+.presentation-card-heading {
+    align-items: center;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px 16px;
+    justify-content: space-between;
+    margin-bottom: 14px;
+}
+.presentation-card .presentation-card-heading h2 { margin: 0; }
+.presentation-card .timer-box {
+    gap: 12px;
+    margin-bottom: 12px;
+    padding: 10px 14px;
+}
+.presentation-card .timer-controls {
+    margin-left: auto;
+}
+.presentation-card .timer-controls .btn {
+    min-width: 80px;
+}
+.presentation-card .poll-btn {
+    min-height: 44px;
+    min-width: 160px;
+}
+.presentation-card .poll-btn.gliding {
+    background: var(--warning-soft);
+    color: var(--warning-text);
+    opacity: 1;
+}
+.presentation-card .active-info { padding: 12px; }
+.presentation-card .presentation-finish-actions {
+    margin-top: 12px;
+}
+.presentation-card .presentation-finish-actions .btn {
+    flex: 0 1 auto;
+    min-height: 44px;
+}
+.presentation-card .participation-count { margin: 10px 0 0; }
+.instructor.is-projector-view #active-team-name {
+    font-size: 2rem;
+    line-height: 1.3;
+}
+.instructor.is-projector-view #active-question-text {
+    font-size: 1.75rem;
+    font-weight: 400;
+    line-height: 1.5;
+}
+.instructor.is-projector-view .active-info .info-row {
+    align-items: baseline;
+}
+.instructor.is-projector-view #team-participation-preview,
+.instructor.is-projector-view #history-panel,
+.instructor.is-projector-view #competition-appendix-form {
+    display: none;
+}
+@media (max-width: 640px) {
+    .class-controls > summary { min-height: 44px; }
+    .class-controls .phase-buttons .phase-btn { min-height: 44px; }
+    .class-controls #btn-toggle-lock { min-height: 44px; }
+    .presentation-card { padding: 16px; }
+    .presentation-card-heading .btn { min-height: 44px; }
+    .presentation-card .timer-box {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+        gap: 10px;
+        padding: 10px;
+    }
+    .presentation-card .timer-display { justify-content: flex-start; }
+    .presentation-card .timer-controls {
+        grid-column: 1 / -1;
+        grid-row: 2;
+        margin-left: 0;
+    }
+    .presentation-card .timer-controls .btn {
+        flex: 1;
+        min-height: 44px;
+        min-width: 0;
+        padding: 8px;
+    }
+    .presentation-card .poll-btn {
+        grid-column: 2;
+        grid-row: 1;
+        min-width: 0;
+        padding: 10px;
+    }
+    .presentation-card .timer-box.timer-time-up::after { grid-column: 1 / -1; }
+    .presentation-card .active-info .info-row { flex-wrap: wrap; }
+    .presentation-card .active-info #active-question-text { flex-basis: 100%; }
+    .presentation-card .presentation-finish-actions .btn { flex: 1 1 180px; }
+    .instructor.is-projector-view #active-team-name { font-size: 1.75rem; }
+    .instructor.is-projector-view #active-question-text { font-size: 1.5rem; }
 }
 
 .form-row {
@@ -1603,11 +1843,12 @@ input:focus, textarea:focus {
     display: flex;
     gap: 24px;
     align-items: flex-start;
+    flex-wrap: wrap;
 }
 .team-info {
-    flex: 1 1 auto;
+    flex: 1 1 100%;
     min-width: 160px;
-    max-width: 35%;
+    max-width: 100%;
 }
 .team-instructions {
     margin-top: 14px;
@@ -1616,7 +1857,7 @@ input:focus, textarea:focus {
     line-height: 1.5;
 }
 .team-table-wrapper {
-    flex: 0 0 60%;
+    flex: 1 1 100%;
     min-width: 0;
     display: flex;
     flex-direction: column;
@@ -1652,6 +1893,32 @@ input:focus, textarea:focus {
     .team-table-wrapper > .btn {
         align-self: flex-end;
     }
+    .team-instructions .seating-instruction,
+    .team-table-wrapper > .reset-seating { display: none; }
+    .team-table-wrapper .team-table {
+        display: grid;
+        gap: 10px;
+        min-height: 0 !important;
+        padding: 12px;
+    }
+    .team-table .teammate-card {
+        position: static;
+        flex-direction: row;
+        justify-content: space-between;
+        gap: 12px;
+        width: 100%;
+        max-width: none;
+        padding: 0;
+        background: transparent;
+        box-shadow: none;
+        transform: none !important;
+        cursor: default;
+        touch-action: pan-y;
+    }
+    .team-table .card-circle { flex: 1; min-width: 0; }
+    .team-table .card-name { text-align: left; width: 100%; }
+    .team-table #card-you { justify-content: flex-start; }
+    .team-table .card-you-marker { width: 44px; text-align: center; }
 }
 
 .teammate-card {
@@ -1659,7 +1926,7 @@ input:focus, textarea:focus {
     display: flex;
     flex-direction: column;
     align-items: center;
-    gap: 3px;
+    gap: 6px;
     cursor: grab;
     user-select: none;
     touch-action: none;
@@ -1669,7 +1936,8 @@ input:focus, textarea:focus {
     box-shadow: 0 1px 4px rgba(0,0,0,0.06);
     transition: box-shadow 0.15s;
     z-index: 1;
-    min-width: 70px;
+    width: 128px;
+    max-width: calc(100% - 24px);
 }
 .teammate-card:active {
     cursor: grabbing;
@@ -1682,27 +1950,25 @@ input:focus, textarea:focus {
 }
 
 .card-circle {
-    width: 64px;
-    height: 64px;
-    border-radius: 50%;
-    border: 3px solid var(--border);
+    width: 100%;
+    min-height: 44px;
+    border-radius: 8px;
+    border: 2px solid var(--border);
     display: flex;
     flex-direction: column;
     align-items: center;
     justify-content: center;
     background: var(--surface);
     position: relative;
-    padding: 4px;
+    padding: 7px 6px;
 }
 
 .card-name {
-    font-size: 0.78rem;
+    font-size: 0.85rem;
     font-weight: 700;
-    line-height: 1.1;
+    line-height: 1.3;
     text-align: center;
-    max-width: 56px;
-    max-height: 2.2em;
-    overflow: hidden;
+    max-width: 100%;
     overflow-wrap: anywhere;
     white-space: normal;
 }
@@ -1728,16 +1994,15 @@ input:focus, textarea:focus {
 }
 
 .thumb-btn {
-    position: absolute;
-    bottom: -8px;
-    right: -8px;
-    width: 26px;
-    height: 26px;
+    position: static;
+    width: 44px;
+    height: 44px;
+    flex-shrink: 0;
     border: 2px solid var(--border);
-    border-radius: 50%;
+    border-radius: 8px;
     background: var(--surface);
     cursor: pointer;
-    font-size: 0.85rem;
+    font-size: 1.1rem;
     display: flex;
     align-items: center;
     justify-content: center;
@@ -1746,7 +2011,7 @@ input:focus, textarea:focus {
     box-shadow: 0 1px 3px rgba(0,0,0,0.1);
 }
 .thumb-btn:hover {
-    transform: scale(1.3);
+    border-color: var(--success-text);
 }
 .thumb-btn:disabled {
     cursor: not-allowed;
@@ -2148,7 +2413,7 @@ html.light .poll-pulse {
     background: linear-gradient(90deg, #fef3c7, #fde68a);
     color: #92400e;
 }
-html.light .student-timer {
+html.light .student-timer:not(.timer-expired):not(.timer-time-up) {
     background: rgba(99, 102, 241, 0.06);
 }
 
@@ -2666,18 +2931,12 @@ body.modal-open { overflow: hidden; }
 /* ===== Presentation timer reached zero ===== */
 .timer-value.timer-expired {
     color: var(--danger);
-    animation: timer-expired-pulse 1s ease-in-out infinite alternate;
 }
 .timer-box.timer-expired,
 .student-timer.timer-expired {
     border-color: var(--danger);
     background: var(--error-soft);
 }
-@keyframes timer-expired-pulse {
-    from { opacity: 0.55; }
-    to   { opacity: 1; }
-}
-
 /* Time is up but a rating poll is still open: informational, not an alarm. */
 .timer-value.timer-time-up {
     color: var(--warning-text);
@@ -2697,9 +2956,9 @@ body.modal-open { overflow: hidden; }
 }
 
 /* ===== Rating window: final-seconds urgency (student) ===== */
-.poll-pulse.urgent {
-    background: linear-gradient(90deg, #fee2e2, #fecaca);
-    color: #991b1b;
+.dashboard .poll-pulse.urgent {
+    background: var(--error-soft);
+    color: var(--error-text);
     animation-duration: 0.4s;
 }
 .poll-pulse.urgent .pulse-dot { background: var(--danger); }
@@ -2741,9 +3000,18 @@ body.modal-open { overflow: hidden; }
     gap: 8px;
     flex-wrap: wrap;
 }
+.dashboard .challenge-card-header :is(strong, .hint) {
+    min-width: 0;
+    overflow-wrap: anywhere;
+}
+.dashboard .challenge-rating-row { gap: 8px 4px; }
+.dashboard .challenge-stars { gap: 2px; }
+.dashboard .challenge-submit-btn,
+.dashboard #btn-raise-hand { min-height: 44px; }
+.dashboard .challenge-submit-btn { margin-left: 0 !important; }
 .challenge-badge {
     display: inline-block;
-    background: var(--primary, #4f46e5);
+    background: var(--primary-solid);
     color: white;
     font-size: 0.75rem;
     font-weight: 700;

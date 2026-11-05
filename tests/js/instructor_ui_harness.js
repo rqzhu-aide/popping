@@ -709,6 +709,53 @@ function testCapacityStatusUsesOnlineCounts() {
     assert.match(status.textContent, /No students are currently online/);
 }
 
+function testProjectorViewDoesNotChangeThePresentation() {
+    const classes = new Set();
+    const instructor = {
+        dataset: { activeTeamId: '2', activeQuestionId: '10' },
+        classList: {
+            toggle(name) {
+                if (classes.has(name)) {
+                    classes.delete(name);
+                    return false;
+                }
+                classes.add(name);
+                return true;
+            },
+        },
+    };
+    const button = {
+        textContent: 'Projector view',
+        attributes: {},
+        setAttribute(name, value) { this.attributes[name] = value; },
+    };
+    const sandbox = {
+        instructor,
+        window: {},
+        document: {
+            getElementById(id) {
+                return id === 'btn-projector-view' ? button : null;
+            },
+        },
+    };
+    vm.createContext(sandbox);
+    vm.runInContext(sourceSlice(
+        'window.toggleProjectorView = function()',
+        '/* ===== INSTRUCTOR QUICK ROLL ===== */'
+    ), sandbox);
+    sandbox.window.toggleProjectorView();
+    assert(classes.has('is-projector-view'));
+    assert.strictEqual(button.attributes['aria-pressed'], 'true');
+    assert.strictEqual(button.textContent, 'Exit projector view');
+    sandbox.window.toggleProjectorView();
+    assert(!classes.has('is-projector-view'));
+    assert.strictEqual(button.attributes['aria-pressed'], 'false');
+    assert.strictEqual(button.textContent, 'Projector view');
+    assert.deepStrictEqual(instructor.dataset, {
+        activeTeamId: '2', activeQuestionId: '10',
+    });
+}
+
 function testPresentationTransitionsReconcileInPlace() {
     let completedQuestionIds;
     const instructor = {
@@ -1405,6 +1452,7 @@ function testContextualRosterBadgesAndTeamLabels() {
     await testQuestionLoaderRecoversInitialFailure();
     testPermanentTeamFilterAccessibility();
     testCapacityStatusUsesOnlineCounts();
+    testProjectorViewDoesNotChangeThePresentation();
     testPresentationTransitionsReconcileInPlace();
     testQuestionCompletionUsesSelectedWeekAcrossSessions();
     testInstructorVisibilityRecovery();

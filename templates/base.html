@@ -1,4 +1,5 @@
 <!DOCTYPE html>
+{% set classroom_page = request.endpoint in ['dashboard', 'instructor_course'] %}
 <html lang="en">
 <head>
     <meta charset="UTF-8">
@@ -12,13 +13,14 @@
     <meta name="twitter:card" content="summary">
     <meta name="twitter:title" content="Popping - An Interactive Course Platform">
     <meta name="twitter:description" content="Discuss, Present and Challenge - An Interactive Course Platform">
-    <link rel="icon" href="{{ url_for('static', filename='images/favicon.ico', v=app_version, rev='rounded') }}" sizes="any">
     <link rel="icon" type="image/png" sizes="32x32" href="{{ url_for('static', filename='images/favicon-32x32.png', v=app_version, rev='rounded') }}">
     <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    {% if classroom_page %}
     <link rel="stylesheet" href="{{ url_for('static', filename='vendor/atom-one-dark.min.css') }}">
     <script defer src="{{ url_for('static', filename='vendor/marked.min.js') }}"></script>
     <script defer src="{{ url_for('static', filename='vendor/purify.min.js') }}"></script>
     <script defer src="{{ url_for('static', filename='vendor/highlight.min.js') }}"></script>
+    {% endif %}
     <script>
         // Theme restore must run before paint to avoid a FOUC flash.
         (function() {
@@ -35,6 +37,7 @@
         })();
     </script>
     {% block mathjax %}
+    {% if classroom_page %}
     <script>
         MathJax = {
             tex: { inlineMath: [['$', '$'], ['\\(', '\\)']], displayMath: [['$$', '$$'], ['\\[', '\\]']] },
@@ -60,15 +63,16 @@
         }
     </script>
     <script id="MathJax-script" async src="https://cdn.jsdelivr.net/npm/mathjax@3.2.2/es5/tex-mml-chtml.js" integrity="sha384-Wuix6BuhrWbjDBs24bXrjf4ZQ5aFeFWBuKkFekO2t8xFU0iNaLQfp2K6/1Nxveei" crossorigin="anonymous" onerror="showMathJaxLoadWarning()"></script>
+    {% endif %}
     {% endblock %}
 </head>
 <body>
     <nav class="navbar">
         <div class="nav-brand">
             <a href="{{ url_for('index') }}" class="nav-home" aria-label="Popping home">
-                <img class="brand-logo brand-logo-nav"
+                <span class="brand-mark" aria-hidden="true"><img class="brand-logo brand-logo-nav"
                      src="{{ url_for('static', filename='images/popping-brand.webp') }}"
-                     width="640" height="536" alt="" decoding="async">
+                     width="640" height="536" alt="" decoding="async"></span>
                 <span class="brand-tagline">Discuss, Present and Challenge - An Interactive Course Platform</span>
             </a>
         </div>
@@ -87,6 +91,7 @@
                     <button type="submit" class="nav-link nav-link-btn logout">Logout · <span class="nav-user-name" data-current-student-display title="{{ session | display_name }}">{{ session | display_name }}</span></button>
                 </form>
             {% elif session.instructor_id and session.slug %}
+                {% if classroom_page %}
                 <div class="nav-dropdown" id="tools-dropdown">
                     <button class="nav-link nav-dropdown-btn" id="tools-dropdown-trigger"
                             type="button" aria-haspopup="true" aria-expanded="false"
@@ -147,6 +152,9 @@
                         {% endif %}
                     </div>
                 </div>
+                {% else %}
+                <a href="{{ url_for('instructor_course', slug=session.slug) }}" class="nav-link">Dashboard</a>
+                {% endif %}
                 <form method="post" action="{{ url_for('logout') }}" class="nav-logout-form">
                     <button type="submit" class="nav-link nav-link-btn logout">Logout <span class="nav-user-name">({{ session.instructor_name }})</span></button>
                 </form>
@@ -171,7 +179,7 @@
     </div>
     {% endif %}
 
-    {% if session.instructor_id and not session.get('is_demo') %}
+    {% if classroom_page and session.instructor_id and not session.get('is_demo') %}
     <div class="modal-backdrop" id="roster-preview-dialog" role="dialog" aria-modal="true"
          tabindex="-1"
          aria-labelledby="roster-preview-title" hidden>
@@ -220,7 +228,11 @@
         <span>AGPLv3</span>
     </footer>
 
+    {% if classroom_page %}
     <script defer src="{{ url_for('static', filename='js/app.js') }}"></script>
+    {% else %}
+    <script defer src="{{ url_for('static', filename='js/public.js') }}"></script>
+    {% endif %}
     {% block scripts %}{% endblock %}
 </body>
 </html>

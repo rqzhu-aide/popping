@@ -70,7 +70,14 @@
     </header>
 
     <!-- Phase Control -->
-    <section class="card">
+    <section class="card phase-control-card{% if state.phase == 'competition' %} phase-control-compact{% endif %}">
+        {% if state.phase == 'competition' %}
+        <details class="class-controls" id="class-controls">
+            <summary>
+                <span>Class controls</span>
+                <span class="phase-badge phase-{{ state.phase }}">{{ state.phase | phase_label }}</span>
+            </summary>
+        {% else %}
         <div class="phase-header">
             <h2>Phase Control</h2>
             <div class="phase-header-right">
@@ -90,6 +97,7 @@
                 <span class="phase-badge phase-{{ state.phase }}">Current: {{ state.phase | phase_label }}</span>
             </div>
         </div>
+        {% endif %}
         <div class="phase-buttons">
             {% for p in phases %}
             <button type="button"
@@ -136,6 +144,11 @@
             <button class="btn btn-sm btn-secondary" onclick="unassignAll(this)">Clear All Teams</button>
             {% endif %}
         </div>
+        {% endif %}
+        {% if state.phase == 'competition' %}
+        </details>
+            <span class="connection-status" id="instructor-connection-status"
+                  role="status" aria-live="polite" hidden></span>
         {% endif %}
     </section>
 
@@ -333,8 +346,13 @@
     <!-- ===== COMPETITION PHASE ===== -->
     {% elif state.phase == 'competition' %}
 
-    <section class="card">
-        <h2>🎯 Present and Challenge</h2>
+    <section class="card presentation-card" id="presentation-card">
+        <div class="presentation-card-heading">
+            <h2>Present and Challenge</h2>
+            <button type="button" class="btn btn-sm btn-secondary" id="btn-projector-view"
+                    aria-pressed="false" aria-controls="presentation-card"
+                    onclick="toggleProjectorView()">Projector view</button>
+        </div>
         <p id="question-readiness-warning" class="hint question-readiness-warning"
            role="status" aria-live="polite"{% if state.presentation_catalog_ready %} hidden{% endif %}>
             {% if not state.presentation_catalog_ready %}Week {{ state.discussion_week or 1 }} has no validated weekly question set. Appendix questions remain available.{% endif %}
@@ -352,10 +370,14 @@
                     <span class="timer-value" id="timer-value">--:--</span>
                 </div>
                 <div class="timer-controls">
-                    <button class="btn btn-warning" id="btn-pause" onclick="stopPresentation()">⏸ Pause</button>
-                    <button class="btn btn-primary" id="btn-resume" onclick="resumePresentation()" style="display:none">▶ Resume</button>
+                    <button class="btn btn-secondary" id="btn-pause" onclick="stopPresentation()">⏸ Pause</button>
+                    <button class="btn btn-secondary" id="btn-resume" onclick="resumePresentation()" style="display:none">▶ Resume</button>
                     <button class="btn btn-secondary" id="btn-reset" onclick="resetTimer()">↻ Reset</button>
                 </div>
+                <button class="btn btn-primary poll-btn" id="btn-start-poll" onclick="startPoll()">
+                    <span class="btn-glide" aria-hidden="true"></span>
+                    <span class="btn-label">⭐ Start Poll</span>
+                </button>
             </div>
             <div class="active-info" id="active-info">
                 <div class="info-row">
@@ -381,12 +403,8 @@
                 </div>
             </div>
 
-            <div class="comp-actions">
-                <button class="btn btn-secondary poll-btn" id="btn-start-poll" onclick="startPoll()">
-                    <span class="btn-glide"></span>
-                    <span class="btn-label">⭐ Start Poll</span>
-                </button>
-                <button class="btn btn-danger" id="btn-next" onclick="nextPresentation()">⏭ Next</button>
+            <div class="comp-actions presentation-finish-actions">
+                <button class="btn btn-secondary" id="btn-next" onclick="nextPresentation()">Finish and record turns</button>
                 <button class="btn btn-secondary" id="btn-cancel-presentation" onclick="cancelPresentation()">Cancel Mistake</button>
             </div>
 

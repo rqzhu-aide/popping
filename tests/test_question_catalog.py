@@ -271,10 +271,13 @@ def test_checked_in_course_uses_each_week_file_for_both_phases():
 
     report = validate_question_catalog(course_dir)
 
-    assert tuple(week.week for week in report.weeks) == (1, 2, 3)
+    assert set(range(1, 11)) <= {week.week for week in report.weeks}
+    published_files = set(course_dir.glob("week-*-questions.md"))
+    assert {Path(week.discussion.path) for week in report.weeks} == published_files
     assert report.ready is True
     for week in report.weeks:
         assert week.ready is True
+        assert Path(week.discussion.path).name == f"week-{week.week:02d}-questions.md"
         assert week.discussion == week.presentation
 
 

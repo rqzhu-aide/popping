@@ -34,9 +34,10 @@ def test_rating_window_close_preserves_unsaved_draft_ui():
     )
 
     assert "function showRatingWindowClosed()" in source
-    assert "Rating window closed — your rating was not saved." in source
+    assert "Rating window closed. Your rating was not saved." in source
+    assert "Your changes were not submitted. Saved: Q1" in source
     assert "draftLostWithWindow = !canRate && ratingDraftDirty" in source
-    assert "(canRate || draftLostWithWindow) ? 'block' : 'none'" in source
+    assert "activePollOpen || ratingDraftDirty || savedPollSelections" in source
 
 
 def test_discussion_question_cards_use_stable_keys():
@@ -436,19 +437,17 @@ def test_star_touch_targets_and_disabled_state():
 
 
 def test_drag_area_allows_touch_dragging():
-    """Teammate cards opt out of browser touch gestures so touch dragging
-    works reliably, and narrow tables use the row layout by default."""
-    source = (PROJECT_ROOT / "static" / "js" / "app.js").read_text(
-        encoding="utf-8"
-    )
+    """Wide seating cards allow touch dragging; compact name lists allow
+    ordinary page scrolling without turning a swipe into a seat move."""
     css = (PROJECT_ROOT / "static" / "css" / "style.css").read_text(
         encoding="utf-8"
     )
 
-    card_start = css.index(".teammate-card {")
-    card_end = css.index("}", card_start)
-    assert "touch-action: none" in css[card_start:card_end]
-    assert "table.clientWidth < 450" in source
+    card_rule = re.search(r"^\.teammate-card\s*\{(.*?)\}", css, re.M | re.S)
+    compact_rule = re.search(r"\.team-table \.teammate-card\s*\{(.*?)\}", css, re.S)
+    assert card_rule and "touch-action: none" in card_rule.group(1)
+    assert compact_rule and "touch-action: pan-y" in compact_rule.group(1)
+    # Gesture behavior is exercised by test_seating_behavior.py and its JS harness.
 
 
 def test_expired_timer_distinguishes_open_rating_poll():
