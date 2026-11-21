@@ -2581,7 +2581,9 @@ html.light .student-timer:not(.timer-expired):not(.timer-time-up) {
 .quick-roll-trigger:focus-visible,
 .quick-roll-close:focus-visible,
 .quick-roll-input:focus-visible,
-.quick-roll-submit:focus-visible {
+.quick-roll-submit:focus-visible,
+.quick-roll-mode:focus-visible,
+.quick-roll-apply:focus-visible {
     outline: 3px solid var(--primary);
     outline-offset: 3px;
 }
@@ -2617,7 +2619,7 @@ html.light .student-timer:not(.timer-expired):not(.timer-time-up) {
     overflow-y: auto;
     position: absolute;
     transform-origin: bottom left;
-    width: min(320px, calc(100vw - 36px));
+    width: min(390px, calc(100vw - 36px));
 }
 .quick-roll-panel[hidden] {
     display: none;
@@ -2686,36 +2688,59 @@ html.light .student-timer:not(.timer-expired):not(.timer-time-up) {
     color: var(--text);
 }
 
+.quick-roll-modes {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 11px;
+    display: grid;
+    gap: 4px;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    margin: 0 16px 12px;
+    padding: 4px;
+}
+.quick-roll-mode {
+    appearance: none;
+    background: transparent;
+    border: 0;
+    border-radius: 8px;
+    color: var(--text-muted);
+    cursor: pointer;
+    font: inherit;
+    font-size: 0.71rem;
+    font-weight: 750;
+    line-height: 1.2;
+    min-height: 38px;
+    padding: 6px 5px;
+}
+.quick-roll-mode:hover {
+    color: var(--text);
+}
+.quick-roll-mode.is-active {
+    background: var(--surface);
+    box-shadow: 0 1px 3px rgba(15, 23, 42, 0.14);
+    color: var(--primary);
+}
+
 .quick-roll-form {
     padding: 0 16px 14px;
 }
-.quick-roll-form > label {
-    color: var(--text-muted);
-    display: block;
-    font-size: 0.78rem;
-    font-weight: 700;
-    letter-spacing: 0.02em;
-    margin-bottom: 6px;
+.quick-roll-mode-panel[hidden] {
+    display: none;
 }
 .quick-roll-controls {
-    align-items: center;
-    background: var(--bg);
-    border: 1px solid var(--border);
-    border-radius: 10px;
     display: grid;
-    gap: 8px;
-    grid-template-columns: auto minmax(0, 1fr) auto;
-    padding: 5px;
+    gap: 10px;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
 }
-.quick-roll-prefix {
+.quick-roll-controls label {
     color: var(--text-muted);
-    font-size: 0.82rem;
+    display: grid;
+    font-size: 0.78rem;
     font-weight: 700;
-    padding-left: 7px;
-    white-space: nowrap;
+    gap: 5px;
+    min-width: 0;
 }
 .quick-roll-input {
-    appearance: textfield;
     background: var(--surface);
     border: 1px solid var(--border);
     border-radius: 7px;
@@ -2726,12 +2751,7 @@ html.light .student-timer:not(.timer-expired):not(.timer-time-up) {
     height: 40px;
     min-width: 0;
     padding: 7px 9px;
-    text-align: center;
     width: 100%;
-}
-.quick-roll-input::-webkit-inner-spin-button,
-.quick-roll-input::-webkit-outer-spin-button {
-    margin: 0;
 }
 .quick-roll-input[aria-invalid="true"] {
     border-color: var(--danger);
@@ -2747,10 +2767,35 @@ html.light .student-timer:not(.timer-expired):not(.timer-time-up) {
     font-size: 0.86rem;
     font-weight: 800;
     height: 40px;
+    margin-top: 12px;
     padding: 0 15px;
+    width: 100%;
 }
 .quick-roll-submit:hover {
     background: var(--primary-solid-hover);
+}
+.quick-roll-submit:disabled {
+    cursor: not-allowed;
+    opacity: 0.48;
+}
+.quick-roll-pool-summary {
+    color: var(--text);
+    font-size: 0.9rem;
+    font-weight: 800;
+    margin: 2px 0 7px;
+}
+.quick-roll-pool-items {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 9px;
+    color: var(--text-muted);
+    font-size: 0.76rem;
+    line-height: 1.45;
+    margin: 0;
+    max-height: 116px;
+    overflow-wrap: anywhere;
+    overflow-y: auto;
+    padding: 9px 10px;
 }
 .quick-roll-error {
     color: var(--error-text);
@@ -2764,12 +2809,10 @@ html.light .student-timer:not(.timer-expired):not(.timer-time-up) {
 }
 
 .quick-roll-result {
-    background:
-        radial-gradient(circle at 85% 10%, rgba(99, 102, 241, 0.16), transparent 42%),
-        var(--accent-bg-soft);
+    background: var(--accent-bg-soft);
     border: 1px solid var(--border);
     border-radius: 11px;
-    margin: 0 16px 10px;
+    margin: 0 16px 16px;
     overflow: hidden;
     padding: 13px 16px 15px;
     position: relative;
@@ -2793,11 +2836,23 @@ html.light .student-timer:not(.timer-expired):not(.timer-time-up) {
     letter-spacing: -0.05em;
     line-height: 1.05;
     margin: 3px 0;
+    overflow-wrap: anywhere;
+}
+.quick-roll-result[data-result-kind="teams"] .quick-roll-result-number,
+.quick-roll-result[data-result-kind="students"] .quick-roll-result-number {
+    font-size: clamp(1.25rem, 5vw, 1.7rem);
+    letter-spacing: -0.02em;
+    line-height: 1.2;
+    margin: 8px 0 6px;
+}
+.quick-roll-result.has-long-result .quick-roll-result-number {
+    font-size: clamp(1rem, 5vw, 1.75rem);
 }
 .quick-roll-result-range {
     color: var(--text-muted);
     font-size: 0.78rem;
     font-weight: 650;
+    overflow-wrap: anywhere;
 }
 .quick-roll-result.is-rolling .quick-roll-result-number {
     animation: quick-roll-number-pop 0.32s cubic-bezier(0.2, 0.9, 0.3, 1.25);
@@ -2807,13 +2862,34 @@ html.light .student-timer:not(.timer-expired):not(.timer-time-up) {
     70% { opacity: 1; transform: rotate(2deg) scale(1.08); }
     100% { transform: rotate(0) scale(1); }
 }
-.quick-roll-privacy {
+.quick-roll-apply {
+    appearance: none;
+    background: transparent;
+    border: 1px solid var(--primary);
+    border-radius: 8px;
+    color: var(--primary);
+    cursor: pointer;
+    font: inherit;
+    font-size: 0.78rem;
+    font-weight: 800;
+    margin-top: 11px;
+    min-height: 36px;
+    padding: 7px 12px;
+}
+.quick-roll-apply:hover {
+    background: var(--accent-bg);
+}
+.quick-roll-apply:disabled {
+    cursor: not-allowed;
+    opacity: 0.52;
+}
+.quick-roll-apply[hidden] {
+    display: none;
+}
+.quick-roll-apply-note {
     color: var(--text-muted);
-    font-size: 0.7rem;
-    font-weight: 650;
-    margin: 0;
-    padding: 0 16px 14px;
-    text-align: center;
+    font-size: 0.78rem;
+    margin: 6px 0 0;
 }
 
 /* Keep the 52px launcher in the navbar until the 1200px course page
@@ -2834,10 +2910,16 @@ html.light .student-timer:not(.timer-expired):not(.timer-time-up) {
         bottom: auto;
         left: auto;
         right: max(12px, env(safe-area-inset-right));
-        width: min(320px, calc(100vw - 24px - env(safe-area-inset-left) - env(safe-area-inset-right)));
+        width: min(390px, calc(100vw - 24px - env(safe-area-inset-left) - env(safe-area-inset-right)));
         max-height: calc(100vh - 76px - env(safe-area-inset-bottom));
         max-height: calc(100dvh - 76px - env(safe-area-inset-bottom));
         transform-origin: top right;
+    }
+}
+
+@media (max-width: 390px) {
+    .quick-roll-mode {
+        min-height: 34px;
     }
 }
 

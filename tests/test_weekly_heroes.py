@@ -1031,6 +1031,21 @@ def test_badges_are_instructor_only_and_competition_only(hero_env):
         poll_question_key="week-2-live",
         active_challenges_json=json.dumps([active_challenge]),
     )
+    with _connect(hero_env) as db:
+        db.execute(
+            """INSERT INTO challenge_hands
+               (course_id, session_key, presentation_key, student_id,
+                student_name, student_team_id, student_team_name)
+               VALUES (?, ?, 'week-2-live', ?, 'Alice Historical', ?,
+                       'Team 5')""",
+            (
+                hero_env["course_id"],
+                SESSION_KEY,
+                hero_env["students"]["s1"],
+                hero_env["teams"]["Team 5"],
+            ),
+        )
+        db.commit()
     instructor_teams = instructor.get("/api/teams").get_json()
     member_by_identifier = {
         member["student_id"]: member
@@ -1040,6 +1055,9 @@ def test_badges_are_instructor_only_and_competition_only(hero_env):
     assert member_by_identifier["s2"]["hero_badges"] == {}
 
     instructor_state = instructor.get("/api/state").get_json()
+    assert instructor_state["challenge_hands"][0]["hero_badges"] == {
+        "gold": 1
+    }
     assert instructor_state["active_challenges"][0]["hero_badges"] == {
         "bolt": 1
     }
@@ -1057,7 +1075,7 @@ def test_badges_are_instructor_only_and_competition_only(hero_env):
     assert "hero_badges" not in json.dumps(student_state)
 
 
-def test_badge_markup_is_scoped_to_selected_team_and_active_challenger():
+def test_badge_markup_is_scoped_to_competition_challenger_surfaces():
     template = (PROJECT_ROOT / "templates" / "instructor.html").read_text(
         encoding="utf-8"
     )
@@ -1076,7 +1094,7 @@ def test_badge_markup_is_scoped_to_selected_team_and_active_challenger():
 
     hands_start = script.index("// Render raised hands")
     active_start = script.index("// Render active challengers", hands_start)
-    assert "weeklyHeroBadgesHtml" not in script[hands_start:active_start]
+    assert "weeklyHeroBadgesHtml(h)" in script[hands_start:active_start]
     active_end = script.index("window.selectChallenger", active_start)
     assert "weeklyHeroBadgesHtml(ch)" in script[active_start:active_end]
 

@@ -3011,33 +3011,59 @@ window.toggleProjectorView = function() {
 };
 
 /* ===== INSTRUCTOR QUICK ROLL ===== */
-const QUICK_ROLL_MAXIMUM = 1000000;
+const QUICK_ROLL_MODE_IDS = ['numbers', 'teams', 'students'];
+const QUICK_ROLL_DESCRIPTIONS = {
+    numbers: 'Draw a whole number, including either limit.',
+    teams: 'Draw from teams that can still present this week.',
+    students: 'Draw from all students assigned to a team.',
+};
 
-function parseQuickRollMaximum(rawValue) {
+function parseQuickRollBound(rawValue) {
     const normalized = String(rawValue ?? '').trim();
-    if (!/^[0-9]+$/.test(normalized)) return null;
-    const maximum = Number(normalized);
-    if (!Number.isSafeInteger(maximum) ||
-            maximum < 1 || maximum > QUICK_ROLL_MAXIMUM) return null;
-    return maximum;
+    if (!/^[+-]?\d+$/.test(normalized)) return null;
+    const bound = Number(normalized);
+    return Number.isSafeInteger(bound) ? BigInt(bound) : null;
 }
 
-function secureQuickRoll(maximum, cryptoApi) {
-    if (!Number.isSafeInteger(maximum) ||
-            maximum < 1 || maximum > QUICK_ROLL_MAXIMUM) {
-        throw new RangeError('Quick Roll maximum is out of range');
-    }
+function secureQuickRollOffset(count, cryptoApi) {
     if (!cryptoApi || typeof cryptoApi.getRandomValues !== 'function') {
         throw new Error('Secure random numbers are unavailable');
     }
 
-    const range = 0x100000000;
-    const limit = range - (range % maximum);
-    const sample = new Uint32Array(1);
+    // The inclusive range of two safe integers can contain more than 2^53 values.
+    const sample = new Uint32Array(count <= 0x100000000n ? 1 : 2);
+    const range = 1n << BigInt(32 * sample.length);
+    const limit = range - range % count;
+    let value;
     do {
         cryptoApi.getRandomValues(sample);
-    } while (sample[0] >= limit);
-    return (sample[0] % maximum) + 1;
+        value = BigInt(sample[0]);
+        if (sample.length === 2) value = (value << 32n) | BigInt(sample[1]);
+    } while (value >= limit);
+    return value % count;
+}
+
+function quickRollDatasetArray(rawValue) {
+    if (rawValue == null) return null;
+    try {
+        const values = JSON.parse(rawValue);
+        return Array.isArray(values) ? values : null;
+    } catch {
+        return null;
+    }
+}
+
+function quickRollTeamCandidates(select, activeTeamId, completedTeams) {
+    return Array.from(select.options).filter(option => {
+        const value = String(option.value || '');
+        const completed = completedTeams?.has(value) ?? (option.dataset.completed === '1');
+        return value && !option.disabled && value !== activeTeamId && !completed &&
+            Number(option.dataset.memberCount) > 0;
+    }).map(option => ({
+        value: String(option.value),
+        label: String(option.dataset.teamName || option.dataset.baseLabel ||
+            option.textContent || option.value).trim().replace(/ \(completed\)$/, ''),
+    }));
 }
 
 function initInstructorQuickRoll() {
@@ -3048,27 +3074,166 @@ function initInstructorQuickRoll() {
     const trigger = document.getElementById('quick-roll-trigger');
     const closeButton = document.getElementById('quick-roll-close');
     const form = document.getElementById('quick-roll-form');
-    const input = document.getElementById('quick-roll-maximum');
+    const instructorRoot = document.querySelector('.instructor[data-slug]');
+    const lowerInput = document.getElementById('quick-roll-minimum');
+    const upperInput = document.getElementById('quick-roll-maximum');
+    const description = document.getElementById('quick-roll-description');
+    const submitButton = document.getElementById('quick-roll-submit');
+    const teamSummary = document.getElementById('quick-roll-teams-summary');
+    const teamList = document.getElementById('quick-roll-teams-list');
+    const studentSummary = document.getElementById('quick-roll-students-summary');
     const error = document.getElementById('quick-roll-error');
     const result = document.getElementById('quick-roll-result');
     const resultNumber = document.getElementById('quick-roll-result-number');
     const resultRange = document.getElementById('quick-roll-result-range');
     const announcement = document.getElementById('quick-roll-announcement');
-    if (!panel || !trigger || !closeButton || !form || !input || !error ||
-            !result || !resultNumber || !resultRange || !announcement) return;
+    const applyButton = document.getElementById('quick-roll-apply');
+    const applyNote = document.getElementById('quick-roll-apply-note');
+    const modeButtons = QUICK_ROLL_MODE_IDS.map(mode =>
+        document.getElementById(`quick-roll-mode-${mode}`)
+    );
+    const modePanels = QUICK_ROLL_MODE_IDS.map(mode =>
+        document.getElementById(`quick-roll-${mode}-panel`)
+    );
+    if (!panel || !trigger || !closeButton || !form || !instructorRoot ||
+            !lowerInput || !upperInput ||
+            !description || !submitButton ||
+            !teamSummary || !teamList || !studentSummary ||
+            !error || !result || !resultNumber || !resultRange ||
+            !announcement || !applyButton || !applyNote || modeButtons.some(button => !button) ||
+            modePanels.some(modePanel => !modePanel)) return;
 
-    function setError(message) {
-        const text = String(message || '');
-        error.textContent = text;
-        error.hidden = !text;
-        input.setAttribute('aria-invalid', text ? 'true' : 'false');
+    let currentMode = 'numbers';
+    let pools = {};
+    let lastRoll = null;
+
+    function setError(message, invalidInput) {
+        error.textContent = message;
+        error.hidden = !message;
+        lowerInput.setAttribute('aria-invalid', String(invalidInput === lowerInput));
+        upperInput.setAttribute('aria-invalid', String(invalidInput === upperInput));
     }
 
     function resetResult() {
-        result.classList.remove('is-rolling');
+        if (document.activeElement === applyButton && !panel.hidden) {
+            modeButtons[QUICK_ROLL_MODE_IDS.indexOf(currentMode)].focus();
+        }
+        result.classList.remove('is-rolling', 'has-long-result');
+        result.dataset.resultKind = '';
         resultNumber.textContent = '?';
-        resultRange.textContent = 'Choose N, then roll';
+        resultRange.textContent = 'No roll yet';
         announcement.textContent = 'No roll yet.';
+        applyButton.hidden = true;
+        applyButton.disabled = false;
+        applyButton.removeAttribute('aria-describedby');
+        applyNote.hidden = true;
+        lastRoll = null;
+    }
+
+    function hasActivePresentation() {
+        return Boolean(
+            instructorRoot.dataset.activeTeamId || instructorRoot.dataset.activeQuestionId
+        );
+    }
+
+    function setSubmitAvailability() {
+        const empty = currentMode !== 'numbers' && pools[currentMode].items.length === 0;
+        if (empty && document.activeElement === submitButton && !panel.hidden) {
+            modeButtons[QUICK_ROLL_MODE_IDS.indexOf(currentMode)].focus();
+        }
+        submitButton.disabled = empty;
+    }
+
+    function setPoolText(element, text) {
+        if (element.textContent !== text) element.textContent = text;
+    }
+
+    function updateApplyButton() {
+        const canSelectTeam = lastRoll?.mode === 'teams' && Boolean(pools.teams.select);
+        const presentationActive = hasActivePresentation();
+        if ((!canSelectTeam || presentationActive) && !panel.hidden && document.activeElement === applyButton) {
+            modeButtons[QUICK_ROLL_MODE_IDS.indexOf(currentMode)].focus();
+        }
+        applyButton.hidden = !canSelectTeam;
+        applyButton.disabled = canSelectTeam && presentationActive;
+        applyNote.hidden = !applyButton.disabled;
+        if (applyButton.disabled) applyButton.setAttribute('aria-describedby', applyNote.id);
+        else applyButton.removeAttribute('aria-describedby');
+    }
+
+    function displayDraw(choice, announceNewRoll = false) {
+        const detail = choice.team ? `${choice.team} · ${lastRoll.poolDescription}` : lastRoll.poolDescription;
+        setPoolText(resultNumber, choice.label);
+        setPoolText(resultRange, detail);
+        const message = `Drew ${choice.label}. ${detail}.`;
+        if (announceNewRoll || announcement.textContent !== message) announcement.textContent = message;
+    }
+
+    function refreshPools() {
+        const { activeTeamId = '' } = instructorRoot.dataset;
+        const completedIds = quickRollDatasetArray(instructorRoot.dataset.completedTeamIds);
+        const completedTeams = completedIds && new Set(completedIds.map(String));
+        const roster = quickRollDatasetArray(instructorRoot.dataset.quickRollRoster) || [];
+        const teamSelect = document.getElementById('comp-team');
+        pools = {
+            teams: {
+                select: teamSelect,
+                items: teamSelect
+                    ? quickRollTeamCandidates(teamSelect, activeTeamId, completedTeams)
+                    : roster.filter(team => team.members.length && String(team.id) !== activeTeamId &&
+                        !completedTeams?.has(String(team.id)))
+                        .map(team => ({ value: String(team.id), label: team.name })),
+            },
+            students: {
+                items: roster.flatMap(team => team.members.map(member => ({
+                    value: String(member.id),
+                    label: member.label,
+                    team: team.name,
+                }))),
+            },
+        };
+
+        const teams = pools.teams.items;
+        setPoolText(teamSummary, teams.length
+            ? `${teams.length} remaining team${teams.length === 1 ? '' : 's'}`
+            : 'No remaining teams are eligible.');
+        setPoolText(teamList, teams.length ? teams.map(team => team.label).join(', ')
+            : 'Completed, empty, and currently presenting teams are excluded.');
+        const studentCount = pools.students.items.length;
+        setPoolText(studentSummary, studentCount
+            ? `${studentCount} assigned student${studentCount === 1 ? '' : 's'}`
+            : 'No students are assigned to teams yet.');
+
+        if (lastRoll && lastRoll.mode !== 'numbers') {
+            const winner = pools[lastRoll.mode].items.find(item => item.value === lastRoll.value);
+            if (winner) {
+                displayDraw(winner);
+                updateApplyButton();
+            } else {
+                resetResult();
+            }
+        }
+        setSubmitAvailability();
+    }
+
+    function setMode(mode) {
+        if (!QUICK_ROLL_MODE_IDS.includes(mode)) return;
+        const changingMode = mode !== currentMode;
+        currentMode = mode;
+        modeButtons.forEach((button, index) => {
+            const selected = QUICK_ROLL_MODE_IDS[index] === mode;
+            button.classList.toggle('is-active', selected);
+            button.setAttribute('aria-selected', selected ? 'true' : 'false');
+            button.tabIndex = selected ? 0 : -1;
+            modePanels[index].hidden = !selected;
+        });
+        description.textContent = QUICK_ROLL_DESCRIPTIONS[mode];
+        if (changingMode) {
+            setError('');
+            resetResult();
+        }
+        refreshPools();
+        modeButtons[QUICK_ROLL_MODE_IDS.indexOf(mode)].focus();
     }
 
     function closeQuickRoll(returnFocus) {
@@ -3081,10 +3246,12 @@ function initInstructorQuickRoll() {
 
     function openQuickRoll() {
         panel.hidden = false;
+        panel.scrollTop = 0;
         trigger.setAttribute('aria-expanded', 'true');
         trigger.setAttribute('aria-label', 'Close Quick Roll');
-        input.focus({ preventScroll: true });
-        input.select();
+        refreshPools();
+        modeButtons[QUICK_ROLL_MODE_IDS.indexOf(currentMode)]
+            .focus({ preventScroll: true });
     }
 
     trigger.addEventListener('click', () => {
@@ -3092,41 +3259,121 @@ function initInstructorQuickRoll() {
         else closeQuickRoll(false);
     });
     closeButton.addEventListener('click', () => closeQuickRoll(true));
+    widget.addEventListener('focusout', event => {
+        if (event.relatedTarget && !widget.contains(event.relatedTarget)) {
+            closeQuickRoll(false);
+        }
+    });
 
-    input.addEventListener('input', () => {
-        setError('');
-        resetResult();
+    for (const input of [lowerInput, upperInput]) {
+        input.addEventListener('input', () => {
+            setError('');
+            resetResult();
+        });
+    }
+
+    modeButtons.forEach((button, index) => {
+        const mode = QUICK_ROLL_MODE_IDS[index];
+        button.addEventListener('click', () => setMode(mode));
+        button.addEventListener('keydown', event => {
+            const key = event.key;
+            if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(key)) return;
+            event.preventDefault();
+            let nextIndex = index;
+            if (key === 'Home') nextIndex = 0;
+            else if (key === 'End') nextIndex = modeButtons.length - 1;
+            else if (key === 'ArrowLeft') {
+                nextIndex = (index - 1 + modeButtons.length) % modeButtons.length;
+            } else {
+                nextIndex = (index + 1) % modeButtons.length;
+            }
+            setMode(QUICK_ROLL_MODE_IDS[nextIndex]);
+        });
     });
 
     form.addEventListener('submit', event => {
         event.preventDefault();
-        const maximum = parseQuickRollMaximum(input.value);
-        if (maximum === null) {
-            setError(
-                `Enter a whole number from 1 to ${QUICK_ROLL_MAXIMUM}.`
-            );
+        const isNumberDraw = currentMode === 'numbers';
+        let lower;
+        let upper;
+        if (isNumberDraw) {
+            lower = parseQuickRollBound(lowerInput.value);
+            upper = parseQuickRollBound(upperInput.value);
+            let invalidInput;
+            let message;
+            if (lower === null || upper === null) {
+                invalidInput = lower === null ? lowerInput : upperInput;
+                const name = lower === null ? 'lower' : 'upper';
+                message = `Enter a whole number for the ${name} bound, within ±9,007,199,254,740,991.`;
+            } else if (lower > upper) {
+                invalidInput = upperInput;
+                message = 'The upper bound must be at least the lower bound.';
+            }
+            if (invalidInput) {
+                resetResult();
+                setError(message, invalidInput);
+                invalidInput.focus();
+                invalidInput.select();
+                return;
+            }
+        } else {
+            refreshPools();
+        }
+
+        const candidates = pools[currentMode]?.items;
+        const count = isNumberDraw ? upper - lower + 1n : BigInt(candidates.length);
+        if (count === 0n) {
             resetResult();
-            input.focus({ preventScroll: true });
-            input.select();
             return;
         }
 
-        let rolled;
+        let offset;
         try {
-            rolled = secureQuickRoll(maximum, window.crypto);
-        } catch (rollError) {
-            setError('Secure random rolling is unavailable in this browser.');
+            offset = secureQuickRollOffset(count, window.crypto);
+        } catch {
             resetResult();
+            setError('Secure random rolling is unavailable in this browser.');
             return;
+        }
+
+        let choice;
+        let poolDescription;
+        if (isNumberDraw) {
+            const number = String(lower + offset);
+            choice = { value: number, label: number };
+            poolDescription = `${lower} to ${upper}`;
+        } else {
+            choice = candidates[Number(offset)];
+            const label = currentMode === 'students' ? 'assigned student' : 'remaining team';
+            poolDescription = `${count} ${label}${count === 1n ? '' : 's'}`;
         }
 
         setError('');
-        resultNumber.textContent = String(rolled);
-        resultRange.textContent = `1 through ${maximum}`;
-        announcement.textContent = `Rolled ${rolled} out of ${maximum}.`;
+        lastRoll = { mode: currentMode, value: choice.value, poolDescription };
+        result.dataset.resultKind = currentMode;
+        result.classList.toggle('has-long-result', isNumberDraw && choice.label.length > 9);
+        displayDraw(choice, true);
+        updateApplyButton();
         result.classList.remove('is-rolling');
         void result.offsetWidth;
         result.classList.add('is-rolling');
+        result.scrollIntoView({ block: 'nearest' });
+    });
+
+    applyButton.addEventListener('click', () => {
+        if (!lastRoll || applyButton.hidden) return;
+        const { mode, value } = lastRoll;
+        refreshPools();
+        const pool = pools[mode];
+        if (!pool.select || !pool.items.some(item => item.value === value)) {
+            setError('That result is no longer eligible. Roll again.');
+            return;
+        }
+        if (hasActivePresentation()) return;
+        pool.select.value = value;
+        pool.select.dispatchEvent(new Event('change', { bubbles: true }));
+        closeQuickRoll(false);
+        pool.select.focus();
     });
 
     document.addEventListener('click', event => {
@@ -3139,6 +3386,10 @@ function initInstructorQuickRoll() {
         event.preventDefault();
         closeQuickRoll(true);
     });
+
+    window.refreshInstructorQuickRollPools = refreshPools;
+    globalThis.refreshInstructorQuickRollPools = refreshPools;
+    refreshPools();
 }
 
 initInstructorQuickRoll();
@@ -4128,6 +4379,7 @@ function applyCompetitionParticipationRoster(teams) {
                 team || { members: [] }
             );
         });
+        globalThis.refreshInstructorQuickRollPools?.();
         return;
     }
 
@@ -4162,6 +4414,7 @@ function applyCompetitionParticipationRoster(teams) {
             );
         }
     });
+    globalThis.refreshInstructorQuickRollPools?.();
 }
 
 async function refreshCompetitionParticipationCounts() {
@@ -4362,6 +4615,7 @@ function renderInstructorChallenge(state) {
         const studentDisplay = instructorDisplayName(h);
         return {
             html: `<span>${escapeHtml(studentDisplay)} (${escapeHtml(h.student_team_name || '')})</span>
+                ${weeklyHeroBadgesHtml(h)}
                 <span class="participation-badge${challengeTurns === 0 ? ' is-zero' : ''}">Challenge turns: <strong>${challengeTurns}</strong></span>`,
             label: `Select ${studentDisplay} as challenger`,
             action: () => selectChallenger(h.student_id),
@@ -4641,6 +4895,7 @@ if (instructor) {
             _instrKnownQuestionRevision = null;
             markPresentedCompQuestionOptions(state.completed_question_ids);
         }
+        globalThis.refreshInstructorQuickRollPools?.();
         return true;
     }
 
@@ -4742,6 +4997,14 @@ if (instructor) {
                 return;
             }
 
+            if (Array.isArray(state?.completed_team_ids)) {
+                const weekTeams = JSON.stringify(state.completed_team_ids);
+                if (instructor.dataset.completedTeamIds !== weekTeams) {
+                    instructor.dataset.completedTeamIds = weekTeams;
+                    globalThis.refreshInstructorQuickRollPools?.();
+                }
+            }
+
             // Presentation start/next/cancel swap the two competition
             // blocks in place; reload only if the structure is missing.
             if (state && instructor.dataset.phase === 'competition' &&
@@ -4816,36 +5079,39 @@ if (instructor) {
                 'team-participation-preview'
             );
             if (_instrRosterVersion !== state.roster_version) {
-                if (!setupRosterGrid && !participationPreview) {
+                try {
+                    const { res: rosterResponse, data: rosterData } =
+                        await fetchJSONWithTimeout(
+                            `/api/teams?version=${encodeURIComponent(state.roster_version)}`
+                        );
+                    if (!rosterResponse.ok || !Array.isArray(rosterData)) {
+                        throw new Error('roster refresh failed');
+                    }
+                    instructor.dataset.quickRollRoster = JSON.stringify(rosterData
+                        .filter(team => team.members?.length)
+                        .map(team => ({
+                            id: team.id, name: team.name,
+                            members: team.members.map(member => ({
+                                id: member.id, label: instructorDisplayName(member),
+                            })),
+                        })));
+                    if (setupRosterGrid) {
+                        renderRosterGrid(
+                            setupRosterGrid, rosterData, null,
+                            { instructorSetup: true }
+                        );
+                    }
+                    if (participationPreview) {
+                        applyCompetitionParticipationRoster(rosterData);
+                    } else {
+                        globalThis.refreshInstructorQuickRollPools?.();
+                    }
                     _instrRosterVersion = state.roster_version;
                     instructor.dataset.rosterVersion = String(
                         state.roster_version || 0
                     );
-                } else {
-                    try {
-                        const { res: rosterResponse, data: rosterData } =
-                            await fetchJSONWithTimeout(
-                                `/api/teams?version=${encodeURIComponent(state.roster_version)}`
-                            );
-                        if (!rosterResponse.ok || !Array.isArray(rosterData)) {
-                            throw new Error('roster refresh failed');
-                        }
-                        if (setupRosterGrid) {
-                            renderRosterGrid(
-                                setupRosterGrid, rosterData, null,
-                                { instructorSetup: true }
-                            );
-                        }
-                        if (participationPreview) {
-                            applyCompetitionParticipationRoster(rosterData);
-                        }
-                        _instrRosterVersion = state.roster_version;
-                        instructor.dataset.rosterVersion = String(
-                            state.roster_version || 0
-                        );
-                    } catch (e) {
-                        // Retry on the next poll without blocking live controls.
-                    }
+                } catch (e) {
+                    // Retry on the next poll without blocking live controls.
                 }
             }
 
@@ -7348,6 +7614,7 @@ function renderHistory() {
         option.dataset.completed = completed ? '1' : '0';
         updateCompetitionTeamOptionLabel(option);
     });
+    globalThis.refreshInstructorQuickRollPools?.();
 
     if (!history.length) {
         container.innerHTML = '<p class="hint">No presentations yet.</p>';

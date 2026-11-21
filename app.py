@@ -389,22 +389,31 @@ def _resolve_history_week(item, question_weeks=None, rating_weeks=None):
         return None
     week_num = item.get('week_num')
     if week_num is None and question_weeks:
-        week_num = question_weeks.get(item.get('question_id'))
+        question_id = item.get('question_id')
+        if type(question_id) is int:
+            week_num = question_weeks.get(question_id)
     if week_num is None and rating_weeks:
-        week_num = rating_weeks.get(_history_presentation_key(item))
+        presentation_key = _history_presentation_key(item)
+        if isinstance(presentation_key, str):
+            week_num = rating_weeks.get(presentation_key)
     return _positive_lecture_week(week_num)
 
 
-def _compatible_rating_weeks(db, course_id):
+def _compatible_rating_weeks(db, course_id, *, presentation_key=None):
     """Map unambiguous presentation keys to compatible lecture weeks."""
+    key_clause = '' if presentation_key is None else 'AND question_key = ?'
+    params = [course_id, SCHEMA_VERSION]
+    if presentation_key is not None:
+        params.append(presentation_key)
     rows = db.execute(
-        '''SELECT question_key, MIN(week_num) AS week_num,
+        f'''SELECT question_key, MIN(week_num) AS week_num,
                   COUNT(DISTINCT week_num) AS week_count
            FROM presentation_ratings
            WHERE course_id = ? AND week_num IS NOT NULL
              AND popping_activity_supported(data_version, ?) = 1
+             {key_clause}
            GROUP BY question_key''',
-        [course_id, SCHEMA_VERSION],
+        params,
     ).fetchall()
     return {
         row['question_key']: row['week_num']
@@ -412,26 +421,53 @@ def _compatible_rating_weeks(db, course_id):
     }
 
 
-def _completed_question_ids_for_week(db, course_id, week_num, history):
-    """Mark finalized questions across all sessions of the selected week."""
+def _completed_presentation_ids_for_week(db, course_id, week_num, history):
+    """Return finalized question and team IDs for all sessions in the week."""
     if not isinstance(history, list) or not history:
-        return []
+        return [], []
     question_weeks = {
         row['id']: row['week_num']
         for row in db.execute(
             '''SELECT id, COALESCE(week_num, 1) AS week_num FROM questions
-               WHERE course_id = ? AND COALESCE(week_num, 1) = ?''',
-            [course_id, week_num],
+               WHERE course_id = ?''',
+            [course_id],
         )
     }
-    return sorted({
-        item['question_id'] for item in history
-        if (_history_item_is_compatible(item)
-            and type(item.get('question_id')) is int
-            and item['question_id'] in question_weeks
-            and _resolve_history_week(item, question_weeks=question_weeks)
-                == week_num)
-    })
+    teams_by_name = {
+        row['name']: row['id']
+        for row in db.execute(
+            'SELECT id, name FROM teams WHERE course_id = ?', [course_id],
+        )
+    }
+    team_ids = set(teams_by_name.values())
+    rating_weeks = {}
+    completed_questions = set()
+    completed_teams = set()
+    for item in history:
+        if not _history_item_is_compatible(item):
+            continue
+        team_id = item.get('team_id')
+        team_name = item.get('team')
+        if team_id is None and isinstance(team_name, str):
+            team_id = teams_by_name.get(team_name)
+        known_team = type(team_id) is int and team_id in team_ids
+
+        item_week = _resolve_history_week(item, question_weeks=question_weeks)
+        if item_week is None and item.get('week_num') is None and known_team:
+            key = _history_presentation_key(item)
+            if isinstance(key, str):
+                if key not in rating_weeks:
+                    weeks = _compatible_rating_weeks(db, course_id, presentation_key=key)
+                    rating_weeks[key] = weeks.get(key)
+                item_week = _positive_lecture_week(rating_weeks[key])
+        if item_week != week_num:
+            continue
+        question_id = item.get('question_id')
+        if type(question_id) is int and question_weeks.get(question_id) == week_num:
+            completed_questions.add(question_id)
+        if known_team:
+            completed_teams.add(team_id)
+    return sorted(completed_questions), sorted(completed_teams)
 
 
 def _presentation_guard(data, state):
@@ -2628,6 +2664,10 @@ def instructor_course(slug):
             before_week=selected_week,
             student_ids=student_db_ids,
         )
+    quick_roll_teams = {
+        team['id']: {'id': team['id'], 'name': team['name'], 'members': []}
+        for team in teams[:max_teams]
+    }
     students_enhanced = []
     for s in students:
         d = dict(s)
@@ -2642,6 +2682,10 @@ def instructor_course(slug):
         if state and state['phase'] == 'competition':
             d['hero_badges'] = weekly_hero_badges.get(s['id'], {})
         students_enhanced.append(d)
+        if s['team_id'] in quick_roll_teams:
+            quick_roll_teams[s['team_id']]['members'].append({
+                'id': s['id'], 'label': instructor_display_name_filter(d),
+            })
     online_student_count = sum(
         1 for student in students_enhanced if student['is_online']
     )
@@ -2693,13 +2737,16 @@ def instructor_course(slug):
             ],
         }
 
-    presented_question_ids = _completed_question_ids_for_week(
-        course_db, course['id'], selected_week, full_history,
+    presented_question_ids, presented_team_ids = (
+        _completed_presentation_ids_for_week(
+            course_db, course['id'], selected_week, full_history,
+        )
     )
 
     return render_template(
         'instructor.html',
         course=course, teams=teams, students=students_enhanced,
+        quick_roll_roster=[team for team in quick_roll_teams.values() if team['members']],
         state=state, phases=PHASES, questions=questions,
         max_teams=max_teams,
         max_members=get_max_members_per_team(slug, course['id']),
@@ -2710,6 +2757,7 @@ def instructor_course(slug):
         end_stats=end_stats,
         available_result_weeks=available_result_weeks,
         presented_question_ids=presented_question_ids,
+        presented_team_ids=presented_team_ids,
         POLL_DURATION=poll_duration
     )
 
@@ -3164,6 +3212,8 @@ def _compute_state(slug, include_poll_count=True, known_question_id=None,
             if needs_history and state and state['presentation_history'] else []
     except (TypeError, ValueError):
         all_history = []
+    if not isinstance(all_history, list):
+        all_history = []
     current_session_key = state.get('session_key', 0) if state else 0
     history = [
         item for item in all_history
@@ -3231,11 +3281,11 @@ def _compute_state(slug, include_poll_count=True, known_question_id=None,
     if include_poll_count:
         result['poll_count'] = poll_count or 0
         cid = state['course_id'] if state else None
-        result['completed_question_ids'] = (
-            _completed_question_ids_for_week(
+        result['completed_question_ids'], result['completed_team_ids'] = (
+            _completed_presentation_ids_for_week(
                 get_db(slug), cid, state.get('discussion_week') or 1,
                 all_history,
-            ) if cid else []
+            ) if cid else ([], [])
         )
         if cid:
             if state.get('phase') == 'setup':
@@ -3388,13 +3438,18 @@ def _compute_state(slug, include_poll_count=True, known_question_id=None,
                        ORDER BY hand.raised_at''',
                     [cid, pres_key])
                 active_challenges = result.get('active_challenges') or []
-                participation_ids = [hand['student_id'] for hand in hands]
                 active_challenger_ids = [
                     challenge.get('challenger_id')
                     for challenge in active_challenges
                     if isinstance(challenge, dict)
                 ]
-                participation_ids.extend(active_challenger_ids)
+                participation_ids = list(dict.fromkeys(
+                    [hand['student_id'] for hand in hands]
+                    + [
+                        student_id for student_id in active_challenger_ids
+                        if student_id is not None
+                    ]
+                ))
                 participation_counts = _participation_counts_by_student(
                     get_db(slug), cid, participation_ids
                 )
@@ -3402,7 +3457,7 @@ def _compute_state(slug, include_poll_count=True, known_question_id=None,
                     get_db(slug),
                     cid,
                     before_week=state.get('discussion_week') or 1,
-                    student_ids=active_challenger_ids,
+                    student_ids=participation_ids,
                 )
                 result['challenge_hands'] = [
                     {'student_id': h['student_id'],
@@ -3412,6 +3467,9 @@ def _compute_state(slug, include_poll_count=True, known_question_id=None,
                      'student_name': h['student_name'],
                      'student_team_id': h['student_team_id'],
                      'student_team_name': h['student_team_name'],
+                     'hero_badges': weekly_hero_badges.get(
+                         h['student_id'], {}
+                     ),
                      **participation_counts.get(h['student_id'], {
                          'presentation_count': 0,
                          'challenger_count': 0,

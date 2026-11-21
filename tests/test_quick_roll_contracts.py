@@ -33,9 +33,28 @@ def test_quick_roll_markup_is_instructor_only_and_accessible():
     assert 'aria-controls="quick-roll-panel"' in instructor
     assert 'id="quick-roll-form" novalidate' in instructor
     assert 'onsubmit="return false"' in instructor
-    assert 'type="number" min="1" max="1000000" step="1"' in instructor
+    assert '<label for="quick-roll-minimum">' in instructor
+    assert '<label for="quick-roll-maximum">' in instructor
+    assert 'value="1" aria-describedby="quick-roll-error"' in instructor
+    assert 'value="6" aria-describedby="quick-roll-error"' in instructor
+    tabs = _between(instructor, 'class="quick-roll-modes"', '</div>')
+    mode_labels = re.findall(
+        r'role="tab" data-mode="([^"]+)"[^>]*>\s*([^<]+?)\s*</button>', tabs
+    )
+    assert mode_labels == [
+        ("numbers", "Free Draw"),
+        ("teams", "Remaining Teams"),
+        ("students", "Random Student"),
+    ]
+    assert instructor.count('role="tabpanel"') == 3
+    assert tabs.count('tabindex="-1"') == 2
+    assert 'id="quick-roll-number-grid"' not in instructor
+    assert 'id="quick-roll-teams-summary"' in instructor
+    assert 'id="quick-roll-students-summary"' in instructor
+    assert 'id="quick-roll-apply"' in instructor
     assert 'role="status" aria-live="polite" aria-atomic="true"' in instructor
-    assert "nothing is saved" in instructor
+    assert '<label for="comp-question">Select Question</label>' in instructor
+    assert '<select id="comp-question">' in instructor
 
     for template_path in (PROJECT_ROOT / "templates").glob("*.html"):
         if template_path.name == "instructor.html":
@@ -45,7 +64,7 @@ def test_quick_roll_markup_is_instructor_only_and_accessible():
         )
 
 
-def test_quick_roll_logic_is_local_bounded_and_unbiased():
+def test_quick_roll_logic_uses_local_randomness_and_existing_controls():
     source = _read("static/js/app.js")
     block = _between(
         source,
@@ -53,11 +72,12 @@ def test_quick_roll_logic_is_local_bounded_and_unbiased():
         "/* ===== END INSTRUCTOR QUICK ROLL ===== */",
     )
 
-    assert "const QUICK_ROLL_MAXIMUM = 1000000;" in block
     assert "cryptoApi.getRandomValues(sample)" in block
-    assert "const limit = range - (range % maximum);" in block
-    assert "while (sample[0] >= limit);" in block
     assert "Math.random" not in block
+    assert "dataset.completedTeamIds" in block
+    assert "dataset.quickRollRoster" in block
+    assert "select.dispatchEvent(new Event('change', { bubbles: true }))" in block
+    assert "'comp-question'" not in block
     for forbidden in (
         "fetch(",
         "postJSON",
@@ -80,25 +100,35 @@ def test_quick_roll_logic_is_local_bounded_and_unbiased():
     assert "widget.contains(event.target)" in block
 
 
+def test_live_poll_updates_question_picker_and_team_draw_pool():
+    source = _read("static/js/app.js")
+    poll_block = _between(
+        source,
+        "async function instructorPollOnce()",
+        "// --- Challenge feature:",
+    )
+
+    question_update = (
+        "markPresentedCompQuestionOptions(state.completed_question_ids);"
+    )
+    assert question_update in poll_block
+    assert poll_block.index(question_update) < poll_block.index(
+        "renderHistory();"
+    )
+
+    assert re.search(
+        r"instructor\.dataset\.completedTeamIds = weekTeams;\s*"
+        r"globalThis\.refreshInstructorQuickRollPools\?\.\(\);",
+        poll_block,
+    )
+
+
 def test_quick_roll_visual_contract_avoids_existing_fixed_controls():
     css = _read("static/css/style.css")
     widget = _css_rule(css, ".quick-roll-widget")
     trigger = _css_rule(css, ".quick-roll-trigger")
     panel = _css_rule(css, ".quick-roll-panel")
     quick_roll_page = _css_rule(css, "main.instructor-container")
-    toolbar_rules = _between(
-        css, "@media (max-width: 1340px)", "/* ===== TOAST NOTIFICATIONS"
-    )
-    toolbar_widget = _css_rule(toolbar_rules, ".quick-roll-widget")
-    toolbar_panel = _css_rule(toolbar_rules, ".quick-roll-panel")
-    toolbar_template = _between(
-        _read("templates/instructor.html"),
-        "{% block instructor_launcher %}",
-        "{% endblock %}",
-    )
-    base_nav = _between(
-        _read("templates/base.html"), '<div class="nav-links">', '</nav>'
-    )
 
     assert "position: fixed;" in widget
     assert "left:" in widget
@@ -108,14 +138,16 @@ def test_quick_roll_visual_contract_avoids_existing_fixed_controls():
     assert "height: 52px;" in trigger
     assert "width: 52px;" in trigger
     assert "bottom: 64px;" in panel
-    assert "width: min(320px, calc(100vw - 36px));" in panel
+    assert "width: min(390px, calc(100vw - 36px));" in panel
     assert "max-height: calc(100dvh - 160px" in panel
     assert "overflow-y: auto;" in panel
     assert "padding-bottom: 108px;" in quick_roll_page
-    assert "position: static;" in toolbar_widget
-    assert "top: 100%;" in toolbar_panel
-    assert "bottom: auto;" in toolbar_panel
-    assert 'id="quick-roll-trigger"' in toolbar_template
-    assert "{% block instructor_launcher %}" in base_nav
+    mobile = css[css.index("@media (max-width: 1340px)", css.index("/* ===== Instructor Quick Roll")):]
+    assert "position: static;" in _css_rule(mobile, ".quick-roll-widget")
+    assert 'id="quick-roll-trigger"' in _between(
+        _read("templates/instructor.html"), "{% block instructor_launcher %}", "{% endblock %}"
+    )
     assert ".quick-roll-trigger:focus-visible" in css
+    assert 'grid-template-columns: repeat(2, minmax(0, 1fr));' in _css_rule(css, ".quick-roll-controls")
+    assert 'overflow-wrap: anywhere;' in css
     assert "env(safe-area-inset-bottom)" in css

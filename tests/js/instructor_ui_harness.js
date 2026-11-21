@@ -359,6 +359,12 @@ function testInstructorQuickRollIsLocalAccessibleAndUniform() {
             add(...names) { names.forEach(name => values.add(name)); },
             remove(...names) { names.forEach(name => values.delete(name)); },
             contains(name) { return values.has(name); },
+            toggle(name, force) {
+                const next = force === undefined ? !values.has(name) : Boolean(force);
+                if (next) values.add(name);
+                else values.delete(name);
+                return next;
+            },
         };
     }
 
@@ -368,12 +374,15 @@ function testInstructorQuickRollIsLocalAccessibleAndUniform() {
         return {
             id,
             hidden: false,
+            disabled: false,
             value: '',
             textContent: '',
             offsetWidth: 120,
+            dataset: {},
             classList: makeClassList(),
             focusCount: 0,
             selectCount: 0,
+            scrollCount: 0,
             addEventListener(type, handler) {
                 if (!listeners.has(type)) listeners.set(type, []);
                 listeners.get(type).push(handler);
@@ -381,15 +390,25 @@ function testInstructorQuickRollIsLocalAccessibleAndUniform() {
             dispatch(type, event = {}) {
                 for (const handler of listeners.get(type) || []) handler(event);
             },
+            dispatchEvent(event) {
+                this.dispatch(event.type, event);
+                return true;
+            },
             setAttribute(name, value) {
                 attributes.set(name, String(value));
             },
             getAttribute(name) { return attributes.get(name); },
-            focus() {
+            removeAttribute(name) { attributes.delete(name); },
+            focus(options) {
                 this.focusCount += 1;
+                this.focusOptions = options;
                 activeElement = this;
             },
             select() { this.selectCount += 1; },
+            scrollIntoView(options) {
+                assert.strictEqual(options.block, 'nearest');
+                this.scrollCount += 1;
+            },
         };
     }
 
@@ -399,12 +418,26 @@ function testInstructorQuickRollIsLocalAccessibleAndUniform() {
         'quick-roll-trigger',
         'quick-roll-close',
         'quick-roll-form',
+        'quick-roll-minimum',
         'quick-roll-maximum',
+        'quick-roll-description',
+        'quick-roll-submit',
+        'quick-roll-teams-summary',
+        'quick-roll-teams-list',
+        'quick-roll-students-summary',
+        'quick-roll-mode-numbers',
+        'quick-roll-mode-teams',
+        'quick-roll-mode-students',
+        'quick-roll-numbers-panel',
+        'quick-roll-teams-panel',
+        'quick-roll-students-panel',
         'quick-roll-error',
         'quick-roll-result',
         'quick-roll-result-number',
         'quick-roll-result-range',
         'quick-roll-announcement',
+        'quick-roll-apply',
+        'quick-roll-apply-note',
     ];
     const elements = Object.fromEntries(ids.map(id => [id, makeElement(id)]));
     const widgetElements = new Set(Object.values(elements));
@@ -412,8 +445,75 @@ function testInstructorQuickRollIsLocalAccessibleAndUniform() {
         element !== elements['quick-roll-widget'] &&
         element !== elements['quick-roll-trigger']
     ));
+    function makeOption(value, label, dataset = {}, disabled = false) {
+        return { value, textContent: label, dataset: { ...dataset }, disabled };
+    }
+    const instructorRoot = {
+        dataset: {
+            activeTeamId: '', activeQuestionId: '',
+            completedTeamIds: '[3]',
+            quickRollRoster: JSON.stringify([
+                { id: 1, name: 'Team 1', members: [{ id: 11, label: 'Avery' }] },
+                { id: 3, name: 'Team 3', members: [
+                    { id: 12, label: 'Blair' },
+                    { id: 13, label: 'Cameron' },
+                    { id: 14, label: 'Dakota' },
+                ] },
+                { id: 5, name: 'Team 5', members: [{ id: 15, label: 'Emery' }] },
+            ]),
+        },
+    };
+    const teamSelect = makeElement('comp-team');
+    teamSelect.options = [
+        makeOption('', '-- Choose team --'),
+        makeOption('1', 'Team 1 (completed)', {
+            teamName: 'Team 1', memberCount: '5', completed: '1',
+        }),
+        makeOption('2', 'Team 2 (empty)', {
+            teamName: 'Team 2', memberCount: '0', completed: '0',
+        }),
+        makeOption('3', 'Team 3', {
+            teamName: 'Team 3', memberCount: '4', completed: '0',
+        }),
+        makeOption('4', 'Team 4', {
+            teamName: 'Team 4', memberCount: '4', completed: '0',
+        }),
+        makeOption('5', 'Team 5', {
+            teamName: 'Team 5', memberCount: '3', completed: '0',
+        }),
+        makeOption('6', 'Team 6 unavailable', {
+            teamName: 'Team 6', memberCount: '2', completed: '1',
+        }, true),
+    ];
+    let teamChangeCount = 0;
+    teamSelect.addEventListener('change', () => { teamChangeCount += 1; });
+    const questionSelect = makeElement('comp-question');
+    questionSelect.options = [
+        makeOption('', '-- Choose question --'),
+        makeOption('11', '#1: Completed question (completed)', {
+            baseLabel: '#1: Completed question', completed: '1',
+        }),
+        makeOption('12', '#2: Current question', {
+            baseLabel: '#2: Current question', completed: '0',
+        }),
+        makeOption('13', '#3: Remaining question', {
+            baseLabel: '#3: Remaining question', completed: '0',
+        }),
+    ];
+    questionSelect.value = '13';
+    let questionChangeCount = 0;
+    questionSelect.addEventListener('change', () => {
+        questionChangeCount += 1;
+    });
+    elements['comp-team'] = teamSelect;
+    elements['comp-question'] = questionSelect;
     elements['quick-roll-panel'].hidden = true;
     elements['quick-roll-error'].hidden = true;
+    elements['quick-roll-apply'].hidden = true;
+    elements['quick-roll-teams-panel'].hidden = true;
+    elements['quick-roll-students-panel'].hidden = true;
+    elements['quick-roll-apply-note'].hidden = true;
+    elements['quick-roll-minimum'].value = '1';
     elements['quick-roll-maximum'].value = '6';
     elements['quick-roll-widget'].contains = target => widgetElements.has(target);
     elements['quick-roll-panel'].contains = target => panelElements.has(target);
@@ -422,6 +522,9 @@ function testInstructorQuickRollIsLocalAccessibleAndUniform() {
     const document = {
         get activeElement() { return activeElement; },
         getElementById(id) { return elements[id] || null; },
+        querySelector(selector) {
+            return selector === '.instructor[data-slug]' ? instructorRoot : null;
+        },
         addEventListener(type, handler) {
             if (!documentListeners.has(type)) documentListeners.set(type, []);
             documentListeners.get(type).push(handler);
@@ -437,7 +540,10 @@ function testInstructorQuickRollIsLocalAccessibleAndUniform() {
         getRandomValues(array) {
             draws += 1;
             assert(samples.length > 0, 'unexpected random draw');
-            array[0] = samples.shift();
+            const sample = samples.shift();
+            const words = Array.isArray(sample) ? sample : [sample];
+            assert.strictEqual(array.length, words.length);
+            array.set(words);
             return array;
         },
     };
@@ -451,6 +557,12 @@ function testInstructorQuickRollIsLocalAccessibleAndUniform() {
         console,
         document,
         window,
+        Event: class Event {
+            constructor(type, options = {}) {
+                this.type = type;
+                this.bubbles = Boolean(options.bubbles);
+            }
+        },
         fetch() { throw new Error('Quick Roll must not use fetch'); },
         postJSON() { throw new Error('Quick Roll must not use postJSON'); },
     };
@@ -461,24 +573,39 @@ function testInstructorQuickRollIsLocalAccessibleAndUniform() {
     ), sandbox, { filename: 'app-quick-roll.js' });
 
     const panel = elements['quick-roll-panel'];
+    const widget = elements['quick-roll-widget'];
     const trigger = elements['quick-roll-trigger'];
     const close = elements['quick-roll-close'];
     const form = elements['quick-roll-form'];
-    const input = elements['quick-roll-maximum'];
+    const lower = elements['quick-roll-minimum'];
+    const upper = elements['quick-roll-maximum'];
     const error = elements['quick-roll-error'];
     const result = elements['quick-roll-result'];
     const resultNumber = elements['quick-roll-result-number'];
     const resultRange = elements['quick-roll-result-range'];
     const announcement = elements['quick-roll-announcement'];
+    const apply = elements['quick-roll-apply'];
+    const submit = elements['quick-roll-submit'];
+    const numberTab = elements['quick-roll-mode-numbers'];
+    const teamTab = elements['quick-roll-mode-teams'];
+    const studentTab = elements['quick-roll-mode-students'];
     const event = () => ({ prevented: false, preventDefault() { this.prevented = true; } });
+    const setBounds = (first, last) => {
+        lower.value = first;
+        lower.dispatch('input');
+        upper.value = last;
+        upper.dispatch('input');
+    };
 
+    assert.strictEqual(lower.value, '1');
+    assert.strictEqual(upper.value, '6');
     trigger.dispatch('click');
     assert.strictEqual(panel.hidden, false);
     assert.strictEqual(trigger.getAttribute('aria-expanded'), 'true');
     assert.strictEqual(trigger.getAttribute('aria-label'), 'Close Quick Roll');
-    assert.strictEqual(input.focusCount, 1);
-    assert.strictEqual(input.selectCount, 1);
-    dispatchDocument('click', { target: input });
+    assert.strictEqual(activeElement, numberTab);
+    assert.strictEqual(lower.focusCount, 0, 'opening must not summon the mobile keyboard');
+    dispatchDocument('click', { target: lower });
     assert.strictEqual(panel.hidden, false, 'inside clicks must keep the panel open');
 
     trigger.dispatch('click');
@@ -497,11 +624,17 @@ function testInstructorQuickRollIsLocalAccessibleAndUniform() {
     assert.strictEqual(panel.hidden, true);
     assert.strictEqual(activeElement, outsideButton,
         'a focusable outside target must retain focus');
-    assert.strictEqual(trigger.focusCount, 1);
 
     trigger.dispatch('click');
-    const escapeEvent = { key: 'Escape', prevented: false,
-        preventDefault() { this.prevented = true; } };
+    widget.dispatch('focusout', { relatedTarget: lower });
+    assert.strictEqual(panel.hidden, false, 'moving focus inside must keep the panel open');
+    outsideButton.focus();
+    widget.dispatch('focusout', { relatedTarget: outsideButton });
+    assert.strictEqual(panel.hidden, true, 'keyboard navigation behind the panel must dismiss it');
+    assert.strictEqual(activeElement, outsideButton);
+
+    trigger.dispatch('click');
+    const escapeEvent = { key: 'Escape', ...event() };
     dispatchDocument('keydown', escapeEvent);
     assert.strictEqual(escapeEvent.prevented, true);
     assert.strictEqual(panel.hidden, true);
@@ -511,48 +644,208 @@ function testInstructorQuickRollIsLocalAccessibleAndUniform() {
     assert.strictEqual(panel.hidden, true);
     assert.strictEqual(trigger.focusCount, 3);
 
-    input.value = '6';
+    trigger.dispatch('click');
+    const nextTab = { key: 'ArrowRight', ...event() };
+    numberTab.dispatch('keydown', nextTab);
+    assert.strictEqual(nextTab.prevented, true);
+    assert.strictEqual(activeElement, teamTab);
+    assert.strictEqual(teamTab.getAttribute('aria-selected'), 'true');
+    teamTab.dispatch('keydown', { key: 'ArrowRight', ...event() });
+    assert.strictEqual(activeElement, studentTab);
+    studentTab.dispatch('keydown', { key: 'ArrowRight', ...event() });
+    assert.strictEqual(activeElement, numberTab);
+    numberTab.dispatch('keydown', { key: 'ArrowLeft', ...event() });
+    assert.strictEqual(activeElement, studentTab);
+    studentTab.dispatch('keydown', { key: 'Home', ...event() });
+    assert.strictEqual(activeElement, numberTab);
+    teamTab.dispatch('click');
+    assert.strictEqual(activeElement, teamTab, 'activating a tab must also move focus to it');
+    numberTab.dispatch('click');
+    numberTab.dispatch('keydown', { key: 'End', ...event() });
+    assert.strictEqual(activeElement, studentTab);
+    studentTab.dispatch('keydown', { key: 'Home', ...event() });
+    assert.strictEqual(activeElement, numberTab);
+    assert.strictEqual(numberTab.tabIndex, 0);
+    assert.strictEqual(teamTab.tabIndex, -1);
+    assert.strictEqual(studentTab.tabIndex, -1);
+
     samples.push(0xffffffff, 5);
     const submitSix = event();
     form.dispatch('submit', submitSix);
     assert.strictEqual(submitSix.prevented, true);
     assert.strictEqual(draws, 2, 'rejected samples must be redrawn');
     assert.strictEqual(resultNumber.textContent, '6');
-    assert.strictEqual(resultRange.textContent, '1 through 6');
-    assert.strictEqual(announcement.textContent, 'Rolled 6 out of 6.');
+    assert.strictEqual(resultRange.textContent, '1 to 6');
+    assert.strictEqual(announcement.textContent, 'Drew 6. 1 to 6.');
     assert.strictEqual(result.classList.contains('is-rolling'), true);
     assert.strictEqual(error.hidden, true);
+    assert.strictEqual(result.scrollCount, 1);
+    assert.strictEqual(apply.hidden, true);
+    numberTab.dispatch('click');
+    numberTab.dispatch('keydown', { key: 'Home', ...event() });
+    assert.strictEqual(resultNumber.textContent, '6', 'reselecting the current tab must keep the draw');
 
-    input.dispatch('input');
+    upper.dispatch('input');
     assert.strictEqual(resultNumber.textContent, '?');
     assert.strictEqual(announcement.textContent, 'No roll yet.');
     assert.strictEqual(result.classList.contains('is-rolling'), false);
 
-    input.value = '6';
-    samples.push(0);
+    setBounds('-4', '+2');
+    samples.push(0, 6);
     form.dispatch('submit', event());
-    assert.strictEqual(resultNumber.textContent, '1');
+    assert.strictEqual(resultNumber.textContent, '-4');
+    form.dispatch('submit', event());
+    assert.strictEqual(resultNumber.textContent, '2');
+    assert.strictEqual(resultRange.textContent, '-4 to 2');
 
-    input.value = '1';
-    input.dispatch('input');
+    setBounds('-9', '-9');
     samples.push(0xffffffff);
     form.dispatch('submit', event());
-    assert.strictEqual(resultNumber.textContent, '1');
-    assert.strictEqual(resultRange.textContent, '1 through 1');
+    assert.strictEqual(resultNumber.textContent, '-9');
 
-    for (const invalid of ['', '0', '-1', '2.5', '1000001', 'Infinity']) {
+    setBounds('-9007199254740991', '9007199254740991');
+    samples.push([0xffffffff, 0xffffffff], [0x3fffff, 0xfffffffe]);
+    const drawsBeforeLarge = draws;
+    form.dispatch('submit', event());
+    assert.strictEqual(draws, drawsBeforeLarge + 2, 'the two-word rejection limit must be respected');
+    assert.strictEqual(resultNumber.textContent, '9007199254740991');
+    assert.strictEqual(result.classList.contains('has-long-result'), true);
+
+    for (const invalid of ['', '2.5', '1e3', 'Infinity', '9007199254740992']) {
         const drawsBefore = draws;
-        input.value = invalid;
-        input.dispatch('input');
+        setBounds(invalid, '6');
         form.dispatch('submit', event());
-        assert.strictEqual(draws, drawsBefore, `invalid limit drew: ${invalid}`);
+        assert.strictEqual(draws, drawsBefore, `invalid lower bound drew: ${invalid}`);
         assert.strictEqual(error.hidden, false);
-        assert.strictEqual(input.getAttribute('aria-invalid'), 'true');
-        assert.strictEqual(resultNumber.textContent, '?');
+        assert.strictEqual(lower.getAttribute('aria-invalid'), 'true');
+        assert.strictEqual(upper.getAttribute('aria-invalid'), 'false');
+        assert.strictEqual(activeElement, lower);
     }
 
-    input.value = '4';
-    input.dispatch('input');
+    setBounds('4', '-1');
+    form.dispatch('submit', event());
+    assert.match(error.textContent, /upper bound must be at least/i);
+    assert.strictEqual(upper.getAttribute('aria-invalid'), 'true');
+    assert.strictEqual(activeElement, upper);
+    assert.strictEqual(resultNumber.textContent, '?');
+
+    instructorRoot.dataset.activeTeamId = '4';
+    teamTab.dispatch('click');
+    const teamSummary = elements['quick-roll-teams-summary'];
+    const teamList = elements['quick-roll-teams-list'];
+    assert.strictEqual(teamSummary.textContent, '2 remaining teams');
+    assert.match(teamList.textContent, /Team 1/,
+        'a previous week option flag cannot exclude this week’s team');
+    assert.match(teamList.textContent, /Team 5/);
+    assert.doesNotMatch(teamList.textContent, /Team 2|Team 3|Team 4|Team 6/);
+
+    samples.push(1);
+    form.dispatch('submit', event());
+    assert.strictEqual(resultNumber.textContent, 'Team 5');
+    assert.strictEqual(teamSelect.value, '');
+    assert.strictEqual(teamChangeCount, 0, 'rolling must leave the competition selection alone');
+    assert.strictEqual(apply.hidden, false);
+    assert.strictEqual(apply.disabled, true, 'applying waits for the active presentation to end');
+    assert.strictEqual(elements['quick-roll-apply-note'].hidden, false);
+    assert.strictEqual(apply.getAttribute('aria-describedby'), 'quick-roll-apply-note');
+
+    instructorRoot.dataset.activeTeamId = '';
+    instructorRoot.dataset.activeQuestionId = '12';
+    window.refreshInstructorQuickRollPools();
+    assert.strictEqual(apply.disabled, true, 'an active question also prevents team application');
+    instructorRoot.dataset.activeQuestionId = '';
+    window.refreshInstructorQuickRollPools();
+    assert.strictEqual(apply.disabled, false);
+    assert.strictEqual(elements['quick-roll-apply-note'].hidden, true);
+    assert.strictEqual(apply.getAttribute('aria-describedby'), undefined);
+    apply.focus();
+    instructorRoot.dataset.activeTeamId = '1';
+    window.refreshInstructorQuickRollPools();
+    assert.strictEqual(apply.disabled, true);
+    assert.strictEqual(activeElement, teamTab, 'a live presentation must keep focus inside Quick Roll');
+    instructorRoot.dataset.activeTeamId = '';
+    window.refreshInstructorQuickRollPools();
+    apply.dispatch('click');
+    assert.strictEqual(teamSelect.value, '5');
+    assert.strictEqual(teamChangeCount, 1);
+    assert.strictEqual(activeElement, teamSelect);
+    assert.strictEqual(teamSelect.focusOptions, undefined,
+        'applying from a scrolled page must reveal the competition selection');
+    assert.strictEqual(panel.hidden, true);
+
+    trigger.dispatch('click');
+    instructorRoot.dataset.completedTeamIds = '[3,5]';
+    apply.focus();
+    apply.dispatch('click');
+    assert.strictEqual(teamChangeCount, 1, 'applying must revalidate the authoritative pool');
+    assert.strictEqual(resultNumber.textContent, '?');
+    assert.match(error.textContent, /no longer eligible/i);
+    assert.strictEqual(activeElement, teamTab, 'invalidating a focused Apply button must restore tab focus');
+
+    delete elements['comp-team'];
+    instructorRoot.dataset.activeTeamId = '1';
+    instructorRoot.dataset.completedTeamIds = '[3]';
+    teamTab.dispatch('click');
+    assert.strictEqual(teamSummary.textContent, '1 remaining team');
+    samples.push(0);
+    form.dispatch('submit', event());
+    assert.strictEqual(resultNumber.textContent, 'Team 5');
+    assert.strictEqual(apply.hidden, true, 'weekly team is informational without the competition select');
+
+    studentTab.dispatch('click');
+    assert.strictEqual(elements['quick-roll-students-summary'].textContent, '5 assigned students');
+    for (const [index, label, team] of [
+        [0, 'Avery', 'Team 1'], [1, 'Blair', 'Team 3'], [2, 'Cameron', 'Team 3'],
+        [3, 'Dakota', 'Team 3'], [4, 'Emery', 'Team 5'],
+    ]) {
+        const drawsBefore = draws;
+        samples.push(index);
+        form.dispatch('submit', event());
+        assert.strictEqual(draws, drawsBefore + 1, 'one draw covers the whole student roster');
+        assert.strictEqual(resultNumber.textContent, label);
+        assert.strictEqual(resultRange.textContent, `${team} · 5 assigned students`);
+        assert.strictEqual(apply.hidden, true);
+    }
+
+    const drawsBeforeRosterEdit = draws;
+    instructorRoot.dataset.quickRollRoster = JSON.stringify([
+        { id: 1, name: 'Team 1', members: [{ id: 15, label: 'Emery Stone' }] },
+    ]);
+    window.refreshInstructorQuickRollPools();
+    assert.strictEqual(resultNumber.textContent, 'Emery Stone');
+    assert.strictEqual(resultRange.textContent, 'Team 1 · 5 assigned students');
+    assert.strictEqual(elements['quick-roll-students-summary'].textContent, '1 assigned student');
+    assert.strictEqual(elements['quick-roll-announcement'].textContent,
+        'Drew Emery Stone. Team 1 · 5 assigned students.');
+    assert.strictEqual(draws, drawsBeforeRosterEdit, 'a roster update must preserve the existing draw');
+
+    submit.focus();
+    instructorRoot.dataset.quickRollRoster = '[]';
+    window.refreshInstructorQuickRollPools();
+    assert.strictEqual(resultNumber.textContent, '?', 'roster edits invalidate a removed student');
+    assert.strictEqual(submit.disabled, true);
+    assert.strictEqual(activeElement, studentTab, 'an empty live pool must keep keyboard focus in the panel');
+    assert.strictEqual(elements['quick-roll-students-summary'].textContent, 'No students are assigned to teams yet.');
+    const drawsBeforeEmptyStudents = draws;
+    form.dispatch('submit', event());
+    assert.strictEqual(draws, drawsBeforeEmptyStudents);
+
+    teamTab.dispatch('click');
+    assert.strictEqual(teamSummary.textContent, 'No remaining teams are eligible.');
+    const drawsBeforeEmptyTeams = draws;
+    form.dispatch('submit', event());
+    assert.strictEqual(draws, drawsBeforeEmptyTeams, 'an empty team pool must not draw');
+
+    numberTab.dispatch('click');
+    setBounds('42', '43');
+    assert.strictEqual(submit.disabled, false);
+    samples.push(1);
+    form.dispatch('submit', event());
+    assert.strictEqual(resultNumber.textContent, '43',
+        'Free Draw must work without teams or a roster');
+    assert.strictEqual(questionSelect.value, '13', 'Quick Roll must preserve the selected question');
+    assert.strictEqual(questionChangeCount, 0, 'Quick Roll must leave the question picker alone');
+
     window.crypto = undefined;
     form.dispatch('submit', event());
     assert.match(error.textContent, /unavailable/i);

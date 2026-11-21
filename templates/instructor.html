@@ -47,6 +47,7 @@
      data-discussion-week="{{ state.discussion_week or 1 }}"
      data-teams-locked="{{ 1 if teams_locked else 0 }}"
      data-student-count="{{ students|length }}"
+     data-quick-roll-roster="{{ quick_roll_roster | tojson | forceescape }}"
      data-max-teams="{{ max_teams }}"
      data-max-members="{{ max_members }}"
      data-presentation-started="{{ state.presentation_started_at or '' }}"
@@ -55,6 +56,7 @@
      data-presentation-remaining="{{ state.presentation_remaining if state.presentation_remaining is not none else '' }}"
      data-presentation-time-cap="{{ state.presentation_time_cap or 300 }}"
      data-presentation-history="{{ state.presentation_history or '[]' }}"
+     data-completed-team-ids="{{ presented_team_ids | tojson | forceescape }}"
      data-completed-question-ids="{{ presented_question_ids | tojson | forceescape }}"
      data-poll-active="{{ 1 if state.poll_active else 0 }}"
      data-poll-started="{{ state.poll_started_at or '' }}"
@@ -578,7 +580,7 @@
 {% block instructor_launcher %}
     {% if session.instructor_id and session.slug %}
     <aside class="quick-roll-widget" id="quick-roll-widget"
-           aria-label="Quick Roll random number tool">
+           aria-label="Quick Roll selection tool">
         <section class="quick-roll-panel" id="quick-roll-panel"
                  role="dialog" aria-modal="false"
                  aria-labelledby="quick-roll-title"
@@ -596,42 +598,89 @@
                 </span>
                 <div class="quick-roll-heading">
                     <h2 id="quick-roll-title">Quick Roll</h2>
-                    <p id="quick-roll-description">Roll a number from 1 to N.</p>
+                    <p id="quick-roll-description">Draw a whole number, including either limit.</p>
                 </div>
                 <button class="quick-roll-close" id="quick-roll-close"
                         type="button" aria-label="Close Quick Roll">&times;</button>
             </div>
 
+            <div class="quick-roll-modes" role="tablist" aria-label="Roll mode">
+                <button class="quick-roll-mode is-active" id="quick-roll-mode-numbers"
+                        type="button" role="tab" data-mode="numbers"
+                        aria-selected="true" aria-controls="quick-roll-numbers-panel">
+                    Free Draw
+                </button>
+                <button class="quick-roll-mode" id="quick-roll-mode-teams"
+                        type="button" role="tab" data-mode="teams"
+                        aria-selected="false" aria-controls="quick-roll-teams-panel"
+                        tabindex="-1">
+                    Remaining Teams
+                </button>
+                <button class="quick-roll-mode" id="quick-roll-mode-students"
+                        type="button" role="tab" data-mode="students"
+                        aria-selected="false" aria-controls="quick-roll-students-panel"
+                        tabindex="-1">
+                    Random Student
+                </button>
+            </div>
+
             <form class="quick-roll-form" id="quick-roll-form" novalidate
                   onsubmit="return false">
-                <label for="quick-roll-maximum">Highest number (N)</label>
-                <div class="quick-roll-controls">
-                    <span class="quick-roll-prefix" aria-hidden="true">1 to</span>
-                    <input class="quick-roll-input" id="quick-roll-maximum"
-                           type="number" min="1" max="1000000" step="1"
-                           inputmode="numeric" autocomplete="off" value="6"
-                           aria-describedby="quick-roll-error">
-                    <button class="quick-roll-submit" id="quick-roll-submit"
-                            type="submit">Roll</button>
+                <div class="quick-roll-mode-panel" id="quick-roll-numbers-panel"
+                     role="tabpanel" aria-labelledby="quick-roll-mode-numbers">
+                    <div class="quick-roll-controls">
+                        <label for="quick-roll-minimum">
+                            Lower bound
+                            <input class="quick-roll-input" id="quick-roll-minimum"
+                                   type="text" autocomplete="off" spellcheck="false"
+                                   value="1" aria-describedby="quick-roll-error">
+                        </label>
+                        <label for="quick-roll-maximum">
+                            Upper bound
+                            <input class="quick-roll-input" id="quick-roll-maximum"
+                                   type="text" autocomplete="off" spellcheck="false"
+                                   value="6" aria-describedby="quick-roll-error">
+                        </label>
+                    </div>
                 </div>
+
+                <div class="quick-roll-mode-panel" id="quick-roll-teams-panel"
+                     role="tabpanel" aria-labelledby="quick-roll-mode-teams" hidden>
+                    <p class="quick-roll-pool-summary" id="quick-roll-teams-summary"
+                       role="status" aria-live="polite"></p>
+                    <p class="quick-roll-pool-items" id="quick-roll-teams-list"></p>
+                </div>
+
+                <div class="quick-roll-mode-panel" id="quick-roll-students-panel"
+                     role="tabpanel" aria-labelledby="quick-roll-mode-students" hidden>
+                    <p class="quick-roll-pool-summary" id="quick-roll-students-summary"
+                       role="status" aria-live="polite"></p>
+                </div>
+
+                <button class="quick-roll-submit" id="quick-roll-submit"
+                        type="submit">Roll</button>
                 <p class="quick-roll-error" id="quick-roll-error"
                    role="alert" hidden></p>
             </form>
 
-            <div class="quick-roll-result" id="quick-roll-result"
-                 role="status" aria-live="polite" aria-atomic="true">
+            <div class="quick-roll-result" id="quick-roll-result">
                 <div class="quick-roll-result-visual" aria-hidden="true">
                     <span class="quick-roll-result-label">Result</span>
                     <output class="quick-roll-result-number"
                             id="quick-roll-result-number"
-                            for="quick-roll-maximum">?</output>
+                            for="quick-roll-minimum quick-roll-maximum">?</output>
                     <span class="quick-roll-result-range"
-                          id="quick-roll-result-range">Choose N, then roll</span>
+                          id="quick-roll-result-range">No roll yet</span>
                 </div>
-                <span class="visually-hidden" id="quick-roll-announcement">No roll yet.</span>
+                <span class="visually-hidden" id="quick-roll-announcement"
+                      role="status" aria-live="polite" aria-atomic="true">No roll yet.</span>
+                <button class="quick-roll-apply" id="quick-roll-apply"
+                        type="button" hidden>Select This Team</button>
+                <p class="quick-roll-apply-note" id="quick-roll-apply-note" hidden>
+                    Finish the current presentation before selecting this result.
+                </p>
             </div>
 
-            <p class="quick-roll-privacy">Local only <span aria-hidden="true">&middot;</span> nothing is saved</p>
         </section>
 
         <button class="quick-roll-trigger" id="quick-roll-trigger"

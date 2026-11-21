@@ -222,7 +222,8 @@ const aliceRow = handsDiv.firstElementChild;
 const select = aliceRow.lastElementChild;
 assert.strictEqual(select.textContent, 'Select as Challenger');
 assert.strictEqual(select.getAttribute('aria-label'), 'Select Alice (ID01) as challenger');
-assert.doesNotMatch(aliceRow.innerHTML, /weekly-hero-badge/);
+assert.match(aliceRow.innerHTML, /weekly-hero-badge-gold/);
+assert.match(aliceRow.innerHTML, /weekly-hero-badge-bolt/);
 assert.match(aliceRow.innerHTML, /Challenge turns: <strong>0<\/strong>/);
 assert.doesNotMatch(handsDiv.innerHTML, /No raised hands yet/);
 
