@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+{% block title %}Request API Token · {{ course.code or slug }}{% endblock %}
+{% block content %}
+<section class="card results-token-settings" aria-labelledby="token-heading">
+    <p class="course-name-sm">{{ course.code or slug }}{% if course.semester %} · {{ course.semester }}{% endif %}</p>
+    <h1 id="token-heading">Request API Token</h1>
+    <p>A token lets your agent list weeks with saved activity and download their results ZIPs for this course.</p>
+    {% if error %}<p class="flash flash-error" role="alert">{{ error }}</p>{% endif %}
+    {% if token %}
+    <div class="form-group" id="issued-token-group">
+        <label for="issued-token">Your new token</label>
+        <input id="issued-token" type="text" readonly value="{{ token }}" autocomplete="off"
+               spellcheck="false" aria-describedby="token-copy-hint" onclick="this.select()">
+        <p class="hint" id="token-copy-hint">Copy this token now. It is shown once. Paste it into the downloader’s setup prompt.</p>
+    </div>
+    {% endif %}
+    {% if revision %}
+    <p><strong>One token is active.</strong> Replacing it disconnects agents using the old token. Revoking it turns off agent access.</p>
+    {% else %}
+    <p><strong>No active token.</strong></p>
+    {% endif %}
+    <form id="token-actions" method="post" action="{{ url_for('course_results_token', slug=slug) }}" class="form-inline"
+          onsubmit="if (this.dataset.sending) return false; this.dataset.sending = '1'">
+        {% if revision %}
+        <input type="hidden" name="revision" value="{{ revision }}">
+        <button type="submit" name="action" value="replace" class="btn btn-secondary"
+                onclick="return confirm('Replace the active token for this course?')">Replace token</button>
+        <button type="submit" name="action" value="revoke" class="btn btn-danger"
+                onclick="return confirm('Revoke agent access to this course’s results?')">Revoke token</button>
+        {% else %}
+        <button type="submit" name="action" value="create" class="btn btn-primary">Request API Token</button>
+        {% endif %}
+    </form>
+    <a href="{{ url_for('instructor_course', slug=slug) }}">Back to instructor dashboard</a>
+</section>
+{% endblock %}
+{% block scripts %}
+<script>
+    window.addEventListener('pageshow', () => { delete document.getElementById('token-actions').dataset.sending; });
+    window.addEventListener('pagehide', () => { document.getElementById('issued-token-group')?.remove(); });
+</script>
+{% endblock %}

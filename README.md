@@ -488,6 +488,43 @@ instructor finalizes that presentation.
 
 ## Managing Courses
 
+### Downloading weekly results with an agent
+
+Sign in to the course as its instructor and open **Tools → Request API Token**.
+Select **Request API Token** and copy the value while it is on screen. Each course
+has one active token. **Replace token** immediately invalidates the previous
+token. **Revoke token** disables downloads with that credential.
+
+On Windows, run the setup command once from the Popping repository and paste
+the token at its hidden prompt. The script encrypts it for your Windows user.
+After replacing a token, run Setup again with `-Replace`.
+
+```powershell
+.\scripts\popping-results.ps1 -Action Setup -Course 432fall2026
+.\scripts\popping-results.ps1 -Action List -Course 432fall2026
+.\scripts\popping-results.ps1 -Action Download -Course 432fall2026 -Week 11 -OutputDirectory 'C:\Teaching\STAT432\week-11'
+```
+
+An agent can run the last two commands on demand. Download saves the ZIP in
+the specified folder and prints its path. Repeating a download in the same
+folder replaces the previous ZIP after the new download has been verified.
+For a local server, pass the same `-BaseUrl http://127.0.0.1:5000` to all
+three commands. Local and production credentials are stored separately.
+
+Other clients can send `Authorization: Bearer <token>` with these GET requests:
+
+| Request | Response |
+| --- | --- |
+| `/api/courses/<slug>/results/weeks` | JSON such as `{"course":"432fall2026","weeks":[11,9]}`, listing weeks with compatible saved activity, newest first. |
+| `/api/courses/<slug>/results/weeks/<week>/download` | The same weekly ZIP as **Tools → Download Results**, including `course_data.xlsx`. |
+
+You can list weeks during class. Download during **Setup** or after **End
+Session**. A download returns HTTP 409 while the course is in discussion or
+presentation, HTTP 404 for a week without saved results, and HTTP 401 for a
+missing, replaced, revoked, or incorrect course token. Tokens grant access to
+weekly results only. The server keeps a digest beside the course database and
+creates it on first issuance.
+
 ### Adding a New Course
 
 Follow [Set Up a New Course](#set-up-a-new-course). The two-stage inactive

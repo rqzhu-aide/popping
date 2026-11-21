@@ -378,6 +378,13 @@
                     <span class="btn-glide" aria-hidden="true"></span>
                     <span class="btn-label">⭐ Start Poll</span>
                 </button>
+                <div class="presentation-poll-feedback">
+                    <p class="participation-count" id="poll-count" role="status"
+                       aria-live="polite">Loading rating activity...</p>
+                    <div id="poll-status" style="display:none">
+                        <button class="btn btn-sm btn-secondary" onclick="stopPoll()">Stop Poll</button>
+                    </div>
+                </div>
             </div>
             <div class="active-info" id="active-info">
                 <div class="info-row">
@@ -404,24 +411,17 @@
             </div>
 
             <div class="comp-actions presentation-finish-actions">
-                <button class="btn btn-secondary" id="btn-next" onclick="nextPresentation()">Finish and record turns</button>
-                <button class="btn btn-secondary" id="btn-cancel-presentation" onclick="cancelPresentation()">Cancel Mistake</button>
+                <button class="btn btn-record" id="btn-next" onclick="nextPresentation()">Finish and Record</button>
+                <button class="btn btn-cancel-mistake" id="btn-cancel-presentation" onclick="cancelPresentation()">Cancel Mistake</button>
             </div>
 
-            {# Poll status #}
-            <p class="participation-count" id="poll-count" role="status"
-               aria-live="polite">Loading rating activity...</p>
+            <p class="hint presentation-finish-hint">You can finish after the poll closes and votes are saved.</p>
             <p class="ratings-settling-status" id="ratings-settling-status"
                role="status" aria-live="polite" hidden></p>
 
-            <div class="poll-status" id="poll-status" style="display:none; margin-top:12px;">
-                <span class="poll-badge">⭐ Poll active</span>
-                <button class="btn btn-sm btn-secondary" onclick="stopPoll()">Stop Poll</button>
-            </div>
-
             {# Challenge controls #}
             <div class="challenge-instructor-panel" id="challenge-instructor-panel" style="margin-top:16px;">
-                <h4>🗣 Challenge</h4>
+                <h4 id="challenge-instructor-heading" tabindex="-1">🗣 Challenge</h4>
                 <div id="challenge-hands-list" class="hint">No raised hands yet.</div>
                 <div id="challenge-active-list" style="margin-top:12px;"></div>
             </div>
@@ -572,6 +572,10 @@
 
     {% endif %}
 
+</div>
+{% endblock %}
+
+{% block instructor_launcher %}
     {% if session.instructor_id and session.slug %}
     <aside class="quick-roll-widget" id="quick-roll-widget"
            aria-label="Quick Roll random number tool">
@@ -645,6 +649,4 @@
         </button>
     </aside>
     {% endif %}
-
-</div>
 {% endblock %}

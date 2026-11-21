@@ -5967,7 +5967,11 @@ def test_competition_page_renders_both_presentation_blocks(course_env):
     ).get_data(as_text=True)
     assert '<div id="presentation-active">' in active_html
     assert '<div id="presentation-idle" style="display:none">' in active_html
-    assert 'id="timer-box"' in active_html
+    timer_controls = active_html.split('id="timer-box"', 1)[1].split('id="active-info"', 1)[0]
+    assert 'id="btn-start-poll"' in timer_controls
+    assert 'id="poll-count"' in timer_controls
+    assert 'id="poll-status"' in timer_controls
+    assert active_html.count('id="poll-count"') == 1
 
 def test_competition_selectors_show_prior_turns_and_completed_questions(
         course_env):

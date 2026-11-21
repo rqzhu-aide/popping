@@ -13,6 +13,7 @@ import sqlite3
 import threading
 import time
 import uuid
+from contextlib import closing, contextmanager
 from datetime import datetime, timedelta, timezone
 from functools import wraps
 from fractions import Fraction
@@ -29,6 +30,7 @@ import yaml
 
 import config
 from database import (
+    _register_version_functions,
     calculate_weekly_hero_preview,
     ensure_schema,
     execute_db,
@@ -68,6 +70,7 @@ from question_catalog import (
     validate_question_catalog,
     weekly_filename,
 )
+from result_tokens import TokenChanged, change_result_token, token_revision, valid_result_token
 from versioning import (
     APP_VERSION,
     BASELINE_DATA_VERSION,
@@ -1246,13 +1249,16 @@ def compress_json_response(response):
     response.headers.setdefault(
         'X-Popping-Version', public_version(APP_VERSION)
     )
-    authenticated = (
-        getattr(g, 'authenticated_role', None) is not None
-        or _exclusive_session_role() is not None
-    )
-    if (authenticated and request.endpoint != 'static'
-            and request.path != '/healthz'):
-        response.headers['Cache-Control'] = 'no-store, private'
+    if re.match(r'^/api/courses/[^/]+/results(?:/|$)', request.path):
+        response.headers['Cache-Control'] = 'private, no-store'
+    else:
+        authenticated = (
+            getattr(g, 'authenticated_role', None) is not None
+            or _exclusive_session_role() is not None
+        )
+        if (authenticated and request.endpoint != 'static'
+                and request.path != '/healthz'):
+            response.headers['Cache-Control'] = 'no-store, private'
     if response.direct_passthrough or response.status_code < 200 or response.status_code >= 300:
         return response
     if response.mimetype != 'application/json' or response.headers.get('Content-Encoding'):
@@ -1742,6 +1748,46 @@ def instructor_login_required(f):
         g.authenticated_role = 'instructor'
         return f(*args, **kwargs)
     return decorated
+
+
+@app.route('/instructor/<slug>/results-token', methods=['GET', 'POST'])
+@app.route('/api/courses/<slug>/results/token', methods=['GET', 'POST'],
+           endpoint='api_course_results_token')
+@instructor_login_required
+def course_results_token(slug):
+    api = request.endpoint == 'api_course_results_token'
+    if canonical_class_slug(slug) == 'demo' or session.get('is_demo'):
+        message = 'Results tokens are unavailable in the demo.'
+        return (jsonify(error=message) if api else message), 403
+    if request.method == 'POST' and not _login_origin_is_allowed():
+        return (jsonify(error='Forbidden') if api else 'Forbidden'), 403
+
+    token = None
+    error = None
+    status = 200
+    if request.method == 'POST':
+        try:
+            token, revision = change_result_token(
+                slug, request.form.get('action'), request.form.get('revision')
+            )
+        except (TokenChanged, ValueError) as exc:
+            status = 409 if isinstance(exc, TokenChanged) else 400
+            error = str(exc)
+            if api:
+                return jsonify(error=error), status
+            revision = token_revision(slug)
+    else:
+        revision = token_revision(slug)
+
+    if api:
+        state = {'active': revision is not None, 'revision': revision}
+        if token:
+            state['token'] = token
+        return jsonify(state)
+    return render_template(
+        'results_token.html', slug=slug, token=token, revision=revision,
+        error=error, course=_course_availability(slug).get('config') or {},
+    ), status
 
 
 DEFAULT_PRESENTATION_RATING_QUESTIONS = (
@@ -8497,7 +8543,7 @@ def export_legacy_feedback(slug):
     )
 
 def _compatible_export_week_exists(db, course_id, week_num, state_row):
-    """Return whether a later week has supported saved results."""
+    """Return whether the week has supported saved results."""
     return week_num in _available_result_weeks(db, course_id, 0, state_row)
 
 
@@ -8542,6 +8588,73 @@ def _available_result_weeks(db, course_id, current_week, state_row):
     return sorted(weeks, reverse=True)
 
 
+class WeeklyExportError(Exception):
+    def __init__(self, message, status):
+        super().__init__(message)
+        self.status = status
+
+
+@app.errorhandler(WeeklyExportError)
+def weekly_export_api_error(error):
+    response = jsonify({'error': str(error)})
+    response.status_code = error.status
+    if error.status == 401:
+        response.headers['WWW-Authenticate'] = 'Bearer'
+    return response
+
+
+def _result_token_required(view):
+    @wraps(view)
+    def decorated(slug, **kwargs):
+        if not is_valid_slug(slug) or not valid_result_token(
+            slug, request.headers.get('Authorization')
+        ):
+            raise WeeklyExportError('A valid course results token is required.', 401)
+        if canonical_class_slug(slug) == 'demo':
+            raise WeeklyExportError('Course not found.', 404)
+        availability = _course_availability(slug)
+        if availability['status'] == 'unavailable':
+            raise CourseTemporarilyUnavailable()
+        if availability['status'] != 'ready':
+            raise WeeklyExportError('Course not found.', 404)
+        return view(slug, availability['config'], **kwargs)
+    return decorated
+
+
+@contextmanager
+def _open_results_db(slug):
+    """Use a read-only connection to discover saved weeks."""
+    db_uri = f'{Path(course_db_path(slug)).resolve().as_uri()}?mode=ro'
+    with closing(sqlite3.connect(db_uri, uri=True, timeout=2)) as db:
+        db.row_factory = sqlite3.Row
+        _register_version_functions(db)
+        yield db
+
+
+@app.get('/api/courses/<slug>/results/weeks')
+@_result_token_required
+def api_result_weeks(slug, _course_config):
+    with _open_results_db(slug) as db:
+        db.execute('BEGIN')
+        state = db.execute(
+            '''SELECT state.course_id, state.presentation_history
+               FROM course_state state
+               JOIN courses course ON course.id = state.course_id
+               WHERE course.slug = ? AND course.is_active = 1''',
+            [slug],
+        ).fetchone()
+        if not state:
+            raise WeeklyExportError('Course not found.', 404)
+        weeks = _available_result_weeks(db, state['course_id'], 0, state)
+    return jsonify({'course': slug, 'weeks': weeks})
+
+
+@app.get('/api/courses/<slug>/results/weeks/<int:week>/download')
+@_result_token_required
+def api_download_result_week(slug, course_config, week):
+    return _weekly_export(slug, course_config, saved_week=week)
+
+
 @app.route('/export/<slug>')
 @instructor_login_required
 def export_data(slug):
@@ -8553,29 +8666,45 @@ def export_data(slug):
                 'lecture week.'), 400
 
     try:
+        return _weekly_export(
+            slug, _course_availability(slug).get('config'),
+            requested_week=(request.args.get('week') or '').strip(),
+        )
+    except WeeklyExportError as error:
+        if error.status in (400, 409):
+            return str(error), error.status
+        flash(str(error), 'error')
+        if error.status == 404:
+            return redirect(url_for('index'))
+    except Exception:
+        app.logger.exception('Export failed for course %s', slug)
+        flash('Export failed — please try again.', 'error')
+    return redirect(url_for('instructor_course', slug=slug))
+
+
+def _weekly_export(slug, course_config, *, requested_week='', saved_week=None):
+    try:
         from openpyxl import Workbook
         from openpyxl.styles import Font, PatternFill, Alignment
         from openpyxl.utils import get_column_letter
         from io import BytesIO
         import collections
-    except ImportError:
-        flash('Export library not available. Contact administrator.', 'error')
-        return redirect(url_for('instructor_course', slug=slug))
+    except ImportError as error:
+        raise WeeklyExportError(
+            'Export library not available. Contact administrator.', 503
+        ) from error
 
-    db = None
-    snapshot_open = False
+    db = get_db(slug)
+    # Question uploads replace files while holding this same SQLite lock.
+    db.execute('BEGIN IMMEDIATE')
     try:
-        ensure_schema(slug)
-        db = get_db(slug)
-        db.execute('BEGIN IMMEDIATE')
-        snapshot_open = True
-        course = query_db(slug, 'SELECT * FROM courses LIMIT 1', one=True)
+        course = query_db(
+            slug,
+            'SELECT * FROM courses WHERE slug = ? AND is_active = 1', [slug],
+            one=True,
+        )
         if not course:
-            db.rollback()
-            snapshot_open = False
-            flash('Course not found.', 'error')
-            return redirect(url_for('index'))
-        course_config = _course_availability(slug).get('config')
+            raise WeeklyExportError('Course not found.', 404)
         course = _course_with_config_metadata(course, course_config)
         export_rating_questions = _presentation_rating_questions(course_config)
 
@@ -8586,11 +8715,13 @@ def export_data(slug):
             [cid],
             one=True,
         )
+        if saved_week is not None and not _compatible_export_week_exists(
+            db, cid, saved_week, state_row
+        ):
+            raise WeeklyExportError('No saved results for this week.', 404)
         phase_error = _export_phase_error(db, cid)
         if phase_error:
-            db.rollback()
-            snapshot_open = False
-            return phase_error, 409
+            raise WeeklyExportError(phase_error, 409)
 
         current_week = (
             state_row['discussion_week'] if state_row else None
@@ -8599,28 +8730,23 @@ def export_data(slug):
 
         # Optional ?week=N exports a previous lecture week with the exact
         # same workbook layout as the current week.
-        requested_week = (request.args.get('week') or '').strip()
-        if requested_week:
+        if saved_week is not None:
+            current_week = saved_week
+        elif requested_week:
             try:
                 requested_week_num = int(requested_week)
-            except ValueError:
-                db.rollback()
-                snapshot_open = False
-                return 'Invalid week parameter.', 400
+            except ValueError as error:
+                raise WeeklyExportError('Invalid week parameter.', 400) from error
             if requested_week_num < 1:
-                db.rollback()
-                snapshot_open = False
-                return 'Week must be a positive integer.', 400
+                raise WeeklyExportError('Week must be a positive integer.', 400)
             if (requested_week_num > current_week
                     and not _compatible_export_week_exists(
                         db, cid, requested_week_num, state_row
                     )):
-                db.rollback()
-                snapshot_open = False
-                return (
+                raise WeeklyExportError(
                     f'Week {requested_week_num} is later than the current week '
-                    f'and has no compatible saved results.'
-                ), 400
+                    f'and has no compatible saved results.', 400,
+                )
             current_week = requested_week_num
 
         export_weeks = [current_week]
@@ -8665,10 +8791,9 @@ def export_data(slug):
             )
 
         if asset_bytes > MAX_EXPORT_BYTES:
-            db.rollback()
-            snapshot_open = False
-            flash('The export files exceed the 50 MB safety limit.', 'error')
-            return redirect(url_for('instructor_course', slug=slug))
+            raise WeeklyExportError(
+                'The export files exceed the 50 MB safety limit.', 413
+            )
 
         row_counts = query_db(
             slug,
@@ -8720,10 +8845,9 @@ def export_data(slug):
             one=True
         )
         if sum(row_counts) + row_counts['students'] > MAX_EXPORT_ROWS:
-            db.rollback()
-            snapshot_open = False
-            flash('The export is too large. Please contact the administrator.', 'error')
-            return redirect(url_for('instructor_course', slug=slug))
+            raise WeeklyExportError(
+                'The export is too large. Please contact the administrator.', 413
+            )
 
         # Gather one compatibility-scoped snapshot for every derived and raw
         # workbook view.
@@ -8987,7 +9111,6 @@ def export_data(slug):
         data_compatibility = activity_compatibility_label()
         # Release the snapshot lock after all database rows and files are captured.
         db.commit()
-        snapshot_open = False
 
         # ── styles ──
 
@@ -9486,8 +9609,9 @@ def export_data(slug):
 
         if (xlsx_buf.getbuffer().nbytes + asset_bytes + len(manifest_bytes)
                 > MAX_EXPORT_BYTES):
-            flash('The export files exceed the 50 MB safety limit.', 'error')
-            return redirect(url_for('instructor_course', slug=slug))
+            raise WeeklyExportError(
+                'The export files exceed the 50 MB safety limit.', 413
+            )
 
         # Build a ZIP containing the Excel file + all question content files
         import zipfile
@@ -9514,9 +9638,6 @@ def export_data(slug):
             download_name=filename,
         )
 
-    except Exception:
-        if snapshot_open and db is not None:
+    finally:
+        if db.in_transaction:
             db.rollback()
-        app.logger.exception('Export failed for course %s', slug)
-        flash('Export failed — please try again.', 'error')
-        return redirect(url_for('instructor_course', slug=slug))

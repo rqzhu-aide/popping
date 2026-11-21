@@ -3144,6 +3144,14 @@ function initInstructorQuickRoll() {
 initInstructorQuickRoll();
 /* ===== END INSTRUCTOR QUICK ROLL ===== */
 
+function updateChallengeButtonAvailability(button) {
+    // Keep the focused control in the tab order while final ratings save.
+    const disabled = String(ratingsSettling);
+    if (button.getAttribute('aria-disabled') !== disabled) {
+        button.setAttribute('aria-disabled', disabled);
+    }
+}
+
 function applyRatingsSettlingState(source) {
     if (!source || !Object.prototype.hasOwnProperty.call(
             source, 'ratings_settling')) return;
@@ -3187,9 +3195,8 @@ function applyRatingsSettlingState(source) {
     if (nextButton) {
         nextButton.disabled = ratingsSettling || pollGlideAnchor !== null;
     }
-    document.querySelectorAll('.challenge-mutating-btn').forEach(button => {
-        button.disabled = ratingsSettling;
-    });
+    document.querySelectorAll('.challenge-mutating-btn')
+        .forEach(updateChallengeButtonAvailability);
     const cancelButton =
         document.getElementById('btn-cancel-presentation');
     if (cancelButton) cancelButton.disabled = ratingsSettling;
@@ -4278,88 +4285,125 @@ function renderInstructorChallenge(state) {
     const challenges = state.active_challenges || [];
     const summaries = state.challenge_rating_summaries || {};
 
-    // Render raised hands
-    const handsDiv = document.getElementById('challenge-hands-list');
-    if (handsDiv) {
-        if (hands.length === 0) {
-            handsDiv.innerHTML = '<span class="hint">No raised hands yet.</span>';
-        } else {
-            handsDiv.innerHTML = '';
-            for (const h of hands) {
-
-                const challengeTurns = normalizedParticipationCount(h.challenger_count);
-                const studentDisplay = instructorDisplayName(h);
-                const row = document.createElement('div');
-                row.className = 'challenge-hand-row';
-                row.innerHTML = `<span class="challenge-hand-details">
-                    <span>${escapeHtml(studentDisplay)} (${escapeHtml(h.student_team_name || '')})</span>
-                    <span class="participation-badge${challengeTurns === 0 ? ' is-zero' : ''}">Challenge turns: <strong>${challengeTurns}</strong></span>
-                </span>`;
-                const btn = document.createElement('button');
-                btn.className =
-                    'btn btn-sm btn-primary challenge-mutating-btn';
-                btn.textContent = 'Select as Challenger';
-                btn.setAttribute('aria-label', `Select ${studentDisplay} as challenger`);
-                btn.disabled = ratingsSettling;
-                btn.addEventListener('click', () => selectChallenger(h.student_id));
-                row.appendChild(btn);
-                handsDiv.appendChild(row);
+    function updateList(listId, records, kind, describe) {
+        const list = document.getElementById(listId);
+        if (!list) return;
+        const active = kind === 'active';
+        if (records.length === 0) {
+            const emptyHtml = active ? '' : '<span class="hint">No raised hands yet.</span>';
+            if (list.innerHTML !== emptyHtml) {
+                focusChallengeHeadingBeforeRemoval(list);
+                list.innerHTML = emptyHtml;
             }
+            return;
+        }
+
+        // The initial raised-hands placeholder is server-rendered text.
+        if (list.children.length === 0 && list.textContent) list.textContent = '';
+        const dataKey = active ? 'challengeKey' : 'studentId';
+        const existing = new Map(Array.from(list.children, row => [
+            row.dataset[dataKey], row
+        ]));
+        const focusedRow = document.activeElement?.parentElement;
+        const rows = records.map(record => {
+            const key = String(active ? record.challenge_key : record.student_id);
+            let row = existing.get(key);
+            if (row) {
+                existing.delete(key);
+            } else {
+                row = document.createElement('div');
+                row.className = `challenge-${kind}-row`;
+                row.dataset[dataKey] = key;
+                const details = document.createElement('span');
+                details.className = `challenge-${kind}-details`;
+                const btn = document.createElement('button');
+                btn.type = 'button';
+                btn.className = `btn btn-sm btn-${active ? 'danger' : 'primary'} challenge-mutating-btn`;
+                btn.textContent = active ? 'Clear' : 'Select as Challenger';
+                row.appendChild(details);
+                row.appendChild(btn);
+            }
+
+            const { html, label, action, title = '' } = describe(record);
+            const details = row.firstElementChild;
+            const btn = row.lastElementChild;
+            if (details.innerHTML !== html) details.innerHTML = html;
+            if (btn.getAttribute('aria-label') !== label) btn.setAttribute('aria-label', label);
+            updateChallengeButtonAvailability(btn);
+            if (btn.title !== title) {
+                if (title) btn.title = title;
+                else btn.removeAttribute('title');
+            }
+            btn.onclick = () => {
+                if (!ratingsSettling) action();
+            };
+            return row;
+        });
+        existing.forEach(row => {
+            focusChallengeHeadingBeforeRemoval(row);
+            row.remove();
+        });
+
+        // Moving a row can blur its button. Move the other rows around it.
+        let nextRow = null;
+        for (let index = rows.length - 1; index >= 0; index -= 1) {
+            const row = rows[index];
+            if (row !== focusedRow &&
+                    (row.parentElement !== list || row.nextElementSibling !== nextRow)) {
+                list.insertBefore(row, nextRow);
+            }
+            nextRow = row;
         }
     }
 
-    // Render active challengers
-    const activeDiv = document.getElementById('challenge-active-list');
-    if (activeDiv) {
-        if (challenges.length === 0) {
-            activeDiv.innerHTML = '';
-        } else {
-            activeDiv.innerHTML = '';
-            for (const ch of challenges) {
-                const summary = summaries[ch.challenge_key];
+    // Render raised hands
+    updateList('challenge-hands-list', hands, 'hand', h => {
+        const challengeTurns = normalizedParticipationCount(h.challenger_count);
+        const studentDisplay = instructorDisplayName(h);
+        return {
+            html: `<span>${escapeHtml(studentDisplay)} (${escapeHtml(h.student_team_name || '')})</span>
+                <span class="participation-badge${challengeTurns === 0 ? ' is-zero' : ''}">Challenge turns: <strong>${challengeTurns}</strong></span>`,
+            label: `Select ${studentDisplay} as challenger`,
+            action: () => selectChallenger(h.student_id),
+        };
+    });
 
-                const challengeTurns = normalizedParticipationCount(ch.challenger_count);
-                const submitted = Number(summary?.submitted_count) || 0;
-                const challengerDisplay = instructorDisplayName(ch);
-                const eligible = Number(summary?.eligible_count) || 0;
-                const ratingText =
-                    `${submitted} out of ${eligible} students voted`;
-                const row = document.createElement('div');
-                row.className = 'challenge-active-row';
-                row.dataset.challengeKey = String(ch.challenge_key);
-                row.innerHTML = `<span class="challenge-active-details">
-                    <strong>Challenger ${ch.challenge_num}:</strong>
-                    <span class="challenge-active-person">
-                        <span>${escapeHtml(challengerDisplay)}</span>
-                        ${weeklyHeroBadgesHtml(ch)}
-                        <span>(${escapeHtml(ch.challenger_team_name || '')})</span>
-                    </span>
-                    <span class="participation-badge${challengeTurns === 0 ? ' is-zero' : ''}">Challenge turns: <strong>${challengeTurns}</strong></span>
-                    <span class="hint">${ratingText}</span>
-                </span>`;
-                const btn = document.createElement('button');
-                btn.className =
-                    'btn btn-sm btn-danger challenge-mutating-btn';
-                btn.textContent = 'Clear';
-                btn.setAttribute('aria-label', `Clear challenger ${challengerDisplay}`);
-                btn.disabled = ratingsSettling;
+    // Render active challengers
+    updateList('challenge-active-list', challenges, 'active', ch => {
+        const summary = summaries[ch.challenge_key];
+        const challengeTurns = normalizedParticipationCount(ch.challenger_count);
+        const challengerDisplay = instructorDisplayName(ch);
+        const submitted = Number(summary?.submitted_count) || 0;
+        const eligible = Number(summary?.eligible_count) || 0;
+        const ratingText = `${submitted} out of ${eligible} students voted`;
+        return {
+            html: `<strong>Challenger ${ch.challenge_num}:</strong>
+                <span class="challenge-active-person">
+                    <span>${escapeHtml(challengerDisplay)}</span>
+                    ${weeklyHeroBadgesHtml(ch)}
+                    <span>(${escapeHtml(ch.challenger_team_name || '')})</span>
+                </span>
+                <span class="participation-badge${challengeTurns === 0 ? ' is-zero' : ''}">Challenge turns: <strong>${challengeTurns}</strong></span>
+                <span class="hint">${ratingText}</span>`,
+            label: `Clear challenger ${challengerDisplay}`,
+            title: state.poll_active ? 'Stop Poll before clearing this challenger' : '',
+            action: () => {
                 if (state.poll_active) {
-                    btn.title = 'Stop Poll before clearing this challenger';
+                    showToast(
+                        'Stop Poll, wait for final ratings to save, then click Clear again.',
+                        'warning'
+                    );
+                    return;
                 }
-                btn.addEventListener('click', () => {
-                    if (state.poll_active) {
-                        showToast(
-                            'Stop Poll, wait for final ratings to save, then click Clear again.',
-                            'warning'
-                        );
-                        return;
-                    }
-                    clearChallenger(ch.challenge_key);
-                });
-                row.appendChild(btn);
-                activeDiv.appendChild(row);
-            }
-        }
+                clearChallenger(ch.challenge_key);
+            },
+        };
+    });
+}
+
+function focusChallengeHeadingBeforeRemoval(element) {
+    if (element.contains(document.activeElement)) {
+        document.getElementById('challenge-instructor-heading')?.focus();
     }
 }
 
@@ -4425,6 +4469,7 @@ window.clearChallenger = async function(challengeKey) {
         } else {
             document.querySelectorAll('.challenge-active-row').forEach(row => {
                 if (row.dataset.challengeKey === String(challengeKey)) {
+                    focusChallengeHeadingBeforeRemoval(row);
                     row.remove();
                 }
             });
@@ -4820,8 +4865,8 @@ if (instructor) {
                 if (pollCount) {
                     const count = Number(state.poll_count) || 0;
                     const eligible = Number(state.poll_eligible_count) || 0;
-                    pollCount.textContent =
-                        `${count} out of ${eligible} students voted`;
+                    const summary = `${count} out of ${eligible} students voted`;
+                    if (pollCount.textContent !== summary) pollCount.textContent = summary;
                 }
                 const presentationIndex = document.getElementById('presentation-index');
                 if (presentationIndex) {
@@ -5781,12 +5826,11 @@ function updateQuestionReadinessWarning(data) {
     }
     const week = Number(data?.current_week) ||
         Number(instructor?.dataset?.discussionWeek) || 1;
-    const issues = (Array.isArray(data?.issues) ? data.issues : [])
+    const firstIssue = (Array.isArray(data?.issues) ? data.issues : [])
         .map(issue => String(issue || '').trim())
-        .filter(Boolean)
-        .slice(0, 2);
-    warning.textContent = `Week ${week} weekly questions are not ready.` +
-        (issues.length ? ` ${issues.join(' ')}` : '') +
+        .find(Boolean);
+    warning.textContent = `Week ${week} is active. Its weekly questions are not ready.` +
+        (firstIssue ? ` ${firstIssue.replace(/[.!?]?$/, '.')}` : '') +
         ' Appendix questions remain available.';
 }
 
@@ -6313,7 +6357,6 @@ function startPollGlide(remainingSec, durationSec) {
     btn.disabled = true;
     const nextButton = document.getElementById('btn-next');
     if (nextButton) nextButton.disabled = true;
-    if (label) label.textContent = '⏳ Poll Active';
 
     function step() {
         if (!pollGlideAnchor) return;
@@ -6325,7 +6368,7 @@ function startPollGlide(remainingSec, durationSec) {
         );
         glide.style.width = pct + '%';
 
-        if (label) label.textContent = `⏳ ${Math.ceil(remaining)}s`;
+        if (label) label.textContent = `Poll · ${Math.ceil(remaining)}s`;
 
         if (remaining <= 0) {
             btn.classList.remove('gliding');

@@ -210,7 +210,7 @@ function testLiveChallengerRenderersUsePublicIds() {
         "${escapeHtml(studentDisplay)} (${escapeHtml(h.student_team_name || '')})"
     ));
     assert(instructorRenderer.includes(
-        "btn.setAttribute('aria-label', `Select ${studentDisplay} as challenger`)"
+        'label: `Select ${studentDisplay} as challenger`'
     ));
     assert.match(
         instructorRenderer,
@@ -226,7 +226,7 @@ function testLiveChallengerRenderersUsePublicIds() {
         "<span>(${escapeHtml(ch.challenger_team_name || '')})</span>"
     ));
     assert(instructorRenderer.includes(
-        "btn.setAttribute('aria-label', `Clear challenger ${challengerDisplay}`)"
+        'label: `Clear challenger ${challengerDisplay}`'
     ));
 }
 

@@ -85,8 +85,19 @@ def test_quick_roll_visual_contract_avoids_existing_fixed_controls():
     widget = _css_rule(css, ".quick-roll-widget")
     trigger = _css_rule(css, ".quick-roll-trigger")
     panel = _css_rule(css, ".quick-roll-panel")
-    quick_roll_page = _css_rule(
-        css, "main.instructor-container:has(.quick-roll-widget)"
+    quick_roll_page = _css_rule(css, "main.instructor-container")
+    toolbar_rules = _between(
+        css, "@media (max-width: 1340px)", "/* ===== TOAST NOTIFICATIONS"
+    )
+    toolbar_widget = _css_rule(toolbar_rules, ".quick-roll-widget")
+    toolbar_panel = _css_rule(toolbar_rules, ".quick-roll-panel")
+    toolbar_template = _between(
+        _read("templates/instructor.html"),
+        "{% block instructor_launcher %}",
+        "{% endblock %}",
+    )
+    base_nav = _between(
+        _read("templates/base.html"), '<div class="nav-links">', '</nav>'
     )
 
     assert "position: fixed;" in widget
@@ -101,5 +112,10 @@ def test_quick_roll_visual_contract_avoids_existing_fixed_controls():
     assert "max-height: calc(100dvh - 160px" in panel
     assert "overflow-y: auto;" in panel
     assert "padding-bottom: 108px;" in quick_roll_page
+    assert "position: static;" in toolbar_widget
+    assert "top: 100%;" in toolbar_panel
+    assert "bottom: auto;" in toolbar_panel
+    assert 'id="quick-roll-trigger"' in toolbar_template
+    assert "{% block instructor_launcher %}" in base_nav
     assert ".quick-roll-trigger:focus-visible" in css
     assert "env(safe-area-inset-bottom)" in css

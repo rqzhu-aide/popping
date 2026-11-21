@@ -77,6 +77,7 @@
             </a>
         </div>
         <div class="nav-links">
+            {% block instructor_launcher %}{% endblock %}
             <div class="nav-version-theme">
                 {% if session.get('slug') and (session.get('student_id') or session.get('instructor_id')) %}
                     <span class="nav-version" aria-label="Popping version {{ app_version }}">{{ app_version }}</span>
@@ -88,7 +89,7 @@
             {% if session.student_id %}
                 <a href="{{ url_for('dashboard') }}" class="nav-link">Dashboard</a>
                 <form method="post" action="{{ url_for('logout') }}" class="nav-logout-form">
-                    <button type="submit" class="nav-link nav-link-btn logout">Logout · <span class="nav-user-name" data-current-student-display title="{{ session | display_name }}">{{ session | display_name }}</span></button>
+                    <button type="submit" class="nav-link nav-link-btn logout">Logout <span class="nav-user-name">· <span data-current-student-display title="{{ session | display_name }}">{{ session | display_name }}</span></span></button>
                 </form>
             {% elif session.instructor_id and session.slug %}
                 {% if classroom_page %}
@@ -128,6 +129,8 @@
                         <a href="{{ url_for('export_legacy_feedback', slug=session.slug) }}" class="nav-dropdown-item" title="Unsupported-version or unclassified records excluded from weekly results">⬇ Download Legacy Data</a>
                         {% endif %}
                         {% if not session.get('is_demo') %}
+                        <a href="{{ url_for('course_results_token', slug=session.slug) }}"
+                           class="nav-dropdown-item">Request API Token</a>
                         <a href="{{ url_for('download_student_roster', slug=session.slug) }}"
                            class="nav-dropdown-item"
                            aria-label="Download Student Roster as CSV"

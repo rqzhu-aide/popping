@@ -1907,3 +1907,279 @@ def test_later_week_with_compatible_saved_rows_remains_exportable(
         if row[0]
     }
     assert summary["Lecture Week"] == 3
+
+
+def _result_api_path(env, suffix):
+    return f"/api/courses/{env['slug']}/results/{suffix}"
+
+
+def _bearer(token):
+    return {"Authorization": f"Bearer {token}"}
+
+
+def _assert_result_api_is_private(response):
+    assert response.cache_control.private
+    assert response.cache_control.no_store
+
+
+def _issue_result_token(env):
+    response = _instructor_client(env).post(
+        _result_api_path(env, "token"), data={"action": "create"}
+    )
+    assert 200 <= response.status_code < 300
+    _assert_result_api_is_private(response)
+    issued = response.get_json()
+    assert issued["active"] is True
+    assert issued["token"] and issued["revision"]
+    return issued
+
+
+@pytest.fixture
+def result_api_course(versioned_course_env):
+    env = versioned_course_env
+    _seed_versioned_export_rows(env)
+    folder = Path(config.CLASSES_DIR) / env["slug"]
+    for week in (7, 8):
+        (folder / f"week-{week:02d}-questions.md").write_text(
+            f"---\ntitle: Week {week} Question\nid: week-{week}\n---\n\n"
+            "Explain the result.\n",
+            encoding="utf-8",
+        )
+    (folder / "week-07-appendix.md").write_bytes(
+        b"Additional material for week 7.\n"
+    )
+
+    with _connect(env) as db:
+        for week, key, version in (
+            (7, "later-week-thumb", "1.3.9"),
+            (9, "unsupported-version", "2.0.0"),
+            (10, "malformed-version", "bad-version"),
+        ):
+            db.execute(
+                """INSERT INTO teammate_thumbs
+                   (course_id, session_key, week_num, question_key,
+                    source_question_key, grader_id, recipient_id, data_version)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    env["course_id"], SESSION_KEY, week, key, key,
+                    env["students"]["s1"], env["students"]["s2"], version,
+                ),
+            )
+        db.commit()
+    _set_state(
+        env,
+        discussion_week=4,
+        presentation_history=json.dumps([{
+            "presentation_key": "history-only",
+            "session_key": SESSION_KEY,
+            "week_num": 5,
+            "data_version": "1.3.8",
+            "team_id": env["teams"]["Team 1"],
+            "team": "Team 1",
+            "title": "Presentation with no saved ratings",
+        }]),
+    )
+    return env
+
+
+def test_results_api_lists_saved_weeks_and_blocks_live_downloads(result_api_course):
+    env = result_api_course
+    client = app_module.app.test_client()
+    headers = _bearer(_issue_result_token(env)["token"])
+    listing_path = _result_api_path(env, "weeks")
+    expected = {"course": env["slug"], "weeks": [7, 5, 1]}
+
+    response = client.get(listing_path, headers=headers)
+    assert response.status_code == 200
+    assert response.get_json() == expected
+    _assert_result_api_is_private(response)
+
+    # Gaps, the calendar week, question-only weeks, and legacy-only weeks
+    # are absent even when the browser can export an empty past week.
+    for week in (2, 4, 8, 9, 10):
+        response = client.get(f"{listing_path}/{week}/download", headers=headers)
+        assert response.status_code == 404
+        _assert_result_api_is_private(response)
+
+    history_only = client.get(f"{listing_path}/5/download", headers=headers)
+    assert history_only.status_code == 200
+    with zipfile.ZipFile(io.BytesIO(history_only.data)) as archive:
+        manifest = json.loads(archive.read("manifest.json"))
+    assert "v1.3.8" in manifest["data_versions"]
+
+    _set_state(env, phase="discussion")
+    assert client.get(listing_path, headers=headers).get_json() == expected
+    response = client.get(f"{listing_path}/1/download", headers=headers)
+    assert response.status_code == 409
+    _assert_result_api_is_private(response)
+    with _connect(env) as db:
+        state = db.execute("SELECT phase, discussion_week FROM course_state").fetchone()
+    assert tuple(state) == ("discussion", 4)
+
+
+@pytest.mark.parametrize(
+    "week,expected_key", ((1, "thumb-compatible"), (7, "later-week-thumb"))
+)
+def test_results_api_zip_matches_browser_export(
+        result_api_course, monkeypatch, week, expected_key):
+    from openpyxl import load_workbook
+
+    env = result_api_course
+    headers = _bearer(_issue_result_token(env)["token"])
+    timestamps = ("2026-01-01T10:00:00Z", "2026-01-01T10:00:01Z")
+    exported_at = iter(timestamps)
+    monkeypatch.setattr(app_module, "_exported_at_utc", lambda: next(exported_at))
+    with _connect(env) as db:
+        before = tuple(db.execute("SELECT * FROM course_state").fetchone())
+
+    api = app_module.app.test_client().get(
+        _result_api_path(env, f"weeks/{week}/download"), headers=headers
+    )
+    browser = _instructor_client(env).get(f"/export/{env['slug']}?week={week}")
+    _assert_result_api_is_private(api)
+    assert api.status_code == browser.status_code == 200
+    assert api.mimetype == browser.mimetype == "application/zip"
+    assert api.headers["Content-Disposition"] == browser.headers["Content-Disposition"]
+    assert f"week_{week}_export.zip" in api.headers["Content-Disposition"]
+
+    def read_archive(response, timestamp):
+        with zipfile.ZipFile(io.BytesIO(response.data)) as archive:
+            manifest = json.loads(archive.read("manifest.json"))
+            assert manifest.pop("exported_at_utc") == timestamp
+            workbook = load_workbook(
+                io.BytesIO(archive.read("course_data.xlsx")), read_only=True
+            )
+            assets = {
+                name: archive.read(name) for name in archive.namelist()
+                if name not in {"manifest.json", "course_data.xlsx"}
+            }
+        try:
+            summary = {row[0]: row[1] for row in workbook["Summary"].values}
+            assert summary["Lecture Week"] == week
+            assert summary["Exported At (UTC)"] == timestamp
+            peer_reviews = _workbook_rows(workbook, "Peer Reviews")
+            assert [row["discussion_post_key"] for row in peer_reviews] == [
+                expected_key
+            ]
+            sheets = [
+                (sheet.title, [
+                    tuple(None if value == timestamp else value for value in row)
+                    for row in sheet.values
+                ])
+                for sheet in workbook.worksheets
+            ]
+        finally:
+            workbook.close()
+        return manifest, sheets, assets
+
+    api_contents = read_archive(api, timestamps[0])
+    assert api_contents == read_archive(browser, timestamps[1])
+    folder = Path(config.CLASSES_DIR) / env["slug"]
+    question_filename = f"week-{week:02d}-questions.md"
+    expected_assets = {
+        f"questions/{question_filename}": (folder / question_filename).read_bytes()
+    }
+    if week == 7:
+        expected_assets["appendix/week-07-appendix.md"] = (
+            folder / "week-07-appendix.md"
+        ).read_bytes()
+    assert api_contents[2] == expected_assets
+    with _connect(env) as db:
+        assert tuple(db.execute("SELECT * FROM course_state").fetchone()) == before
+
+
+def test_results_api_token_lifecycle_and_course_scope(result_api_course):
+    env = result_api_course
+    other_slug = f"{env['slug']}_other"
+    other_dir = Path(config.CLASSES_DIR) / other_slug
+    other_dir.mkdir()
+    (other_dir / "course.yaml").write_text(
+        f"slug: {other_slug}\nname: Other Course\ncode: OTHER\nactive: true\n",
+        encoding="utf-8",
+    )
+    other_db = env["db_path"].parent.parent / other_slug / "popping.db"
+    other_db.parent.mkdir()
+    other = {**env, "slug": other_slug, "db_path": other_db}
+    try:
+        with _connect(env) as source, _connect(other) as target:
+            source.backup(target)
+            target.execute("UPDATE courses SET slug = ?", (other_slug,))
+            target.commit()
+        _set_state(other, presentation_history="[]")
+        issued = _issue_result_token(env)
+        token_a = issued["token"]
+        token_b = _issue_result_token(other)["token"]
+
+        client = app_module.app.test_client()
+        browser = _instructor_client(env)
+        listing = _result_api_path(env, "weeks")
+        download = _result_api_path(env, "weeks/1/download")
+        management = _result_api_path(env, "token")
+
+        for route in (listing, download):
+            for headers in ({}, _bearer("wrong-token"), _bearer(token_b)):
+                response = client.get(route, headers=headers)
+                assert response.status_code == 401
+                _assert_result_api_is_private(response)
+            assert browser.get(route).status_code == 401
+        assert client.get(
+            _result_api_path(other, "weeks"), headers=_bearer(token_a)
+        ).status_code == 401
+        other_results = client.get(
+            _result_api_path(other, "weeks"), headers=_bearer(token_b)
+        )
+        assert other_results.status_code == 200
+        assert other_results.get_json() == {"course": other_slug, "weeks": [7, 1]}
+        assert browser.get(_result_api_path(other, "token")).status_code == 401
+        assert browser.post(
+            _result_api_path(other, "token"), data={"action": "create"}
+        ).status_code == 401
+        assert client.post(
+            management, data={"action": "replace"}, headers=_bearer(token_a)
+        ).status_code in (401, 403)
+        assert client.post(
+            "/api/set_discussion_week", json={"week": 7}, headers=_bearer(token_a)
+        ).status_code == 401
+        assert client.get(
+            f"/export/{env['slug']}", headers=_bearer(token_a)
+        ).status_code == 302
+
+        status = browser.get(management)
+        assert status.get_json() == {"active": True, "revision": issued["revision"]}
+        _assert_result_api_is_private(status)
+        duplicate = browser.post(management, data={"action": "create"})
+        assert duplicate.status_code == 409
+        _assert_result_api_is_private(duplicate)
+        assert token_a not in duplicate.get_data(as_text=True)
+        rotate = {"action": "replace", "revision": issued["revision"]}
+        assert browser.post(
+            management, data=rotate,
+            headers={"Origin": "https://unrelated.example"},
+        ).status_code == 403
+        assert client.get(listing, headers=_bearer(token_a)).status_code == 200
+
+        replacement = browser.post(management, data=rotate)
+        assert 200 <= replacement.status_code < 300
+        _assert_result_api_is_private(replacement)
+        replaced = replacement.get_json()
+        latest = replaced["token"]
+        assert latest and latest != token_a
+        assert browser.post(management, data=rotate).status_code == 409
+        for route in (listing, download):
+            assert client.get(route, headers=_bearer(token_a)).status_code == 401
+            assert client.get(route, headers=_bearer(latest)).status_code == 200
+
+        revoked = browser.post(
+            management, data={"action": "revoke", "revision": replaced["revision"]}
+        )
+        assert 200 <= revoked.status_code < 300
+        _assert_result_api_is_private(revoked)
+        assert browser.get(management).get_json() == {"active": False, "revision": None}
+        for route in (listing, download):
+            assert client.get(route, headers=_bearer(latest)).status_code == 401
+        assert client.get(
+            _result_api_path(other, "weeks"), headers=_bearer(token_b)
+        ).status_code == 200
+    finally:
+        database.forget_schema(other_slug)
+        app_module._clear_course_availability_cache(other_slug)

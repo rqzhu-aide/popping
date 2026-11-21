@@ -472,12 +472,6 @@ async function main() {
         'intentional rating settlement must not appear as an error'
     );
     assert(
-        (source.match(/btn\.disabled = ratingsSettling;/g) || []).length >= 2,
-        'rebuilt Select and Clear buttons must remain disabled while ' +
-            'final ratings are settling'
-    );
-
-    assert(
         source.includes('discardStalePresentationUncertainty(_lastState);'),
         'saved-response retries must prune stale presentation uncertainty'
     );

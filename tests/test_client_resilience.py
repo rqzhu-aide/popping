@@ -68,7 +68,6 @@ def test_instructor_vote_progress_uses_compact_counts():
     assert "online_eligible_count" not in source
     assert "active in last 1 minute" not in source
     assert "Still to rate:" not in source
-    assert 'class="challenge-active-details"' in source
     challenge_renderer = source[
         source.index("function renderInstructorChallenge"):
         source.index("window.selectChallenger")
